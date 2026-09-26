@@ -4,7 +4,11 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "dev:cloudflare": "npx wrangler dev",
+    "cf:db:migrate:local": "npx wrangler d1 migrations apply accessx-demo --local",
+    "cf:deploy": "npx wrangler deploy",
+    "cf:db:migrate:remote": "npx wrangler d1 migrations apply accessx-demo --remote"
   },
   "keywords": [],
   "author": "",
@@ -12,5 +16,8 @@
   "description": "",
   "dependencies": {
     "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.141.0"
   }
 }
