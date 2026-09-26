@@ -114,11 +114,11 @@ async function loadPeople(){
   const groups=g.userGroups||[];
   const gname=id=>(groups.find(x=>x.id===id)||{}).name||id;
   $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th><th></th></tr>`+
-    USERS.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="meta">${esc(p.email||'')}</div></td>
+    USERS.map(p=>`<tr><td><b>${esc(p.name)}</b>${p.source==='scim'?' <span class="tag" title="Managed by your directory (SCIM)">directory</span>':''}<div class="meta">${esc(p.email||'')}</div></td>
     <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+esc(gname(i))+'</span>').join('')}</td>
-    <td>${p.suspended?'<span class="tag r">suspended</span>':'<span class="tag g">active</span>'}
+    <td>${p.suspended?`<span class="tag r">${p.suspendedBy==='directory'?'deactivated in directory':'suspended'}</span>`:'<span class="tag g">active</span>'}
     ${p.validTo?'<div class="meta">until '+esc(String(p.validTo).slice(0,10))+'</div>':''}</td>
-    <td><button class="btn2 sm" type="button" data-suspend="${esc(p.id)}" data-to="${p.suspended?'unsuspend':'suspend'}">${p.suspended?'Reinstate':'Suspend'}</button></td></tr>`).join('')+`</table><div id="people-msg" class="meta" style="margin-top:8px"></div>`;
+    <td>${p.suspendedBy==='directory'?'':`<button class="btn2 sm" type="button" data-suspend="${esc(p.id)}" data-to="${p.suspended?'unsuspend':'suspend'}">${p.suspended?'Reinstate':'Suspend'}</button>`}</td></tr>`).join('')+`</table><div id="people-msg" class="meta" style="margin-top:8px"></div>`;
   $('#ugroups').innerHTML=groups.map(x=>`<span class="chip">${esc(x.name)}</span>`).join('');
   $('#scheds').innerHTML=(s.schedules||[]).map(x=>`<div style="margin-bottom:10px"><b>${esc(x.name)}</b>
     ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
@@ -151,6 +151,16 @@ async function loadAdmin(){
     <td><button class="btn2 sm" type="button" data-revoke-op="${esc(x.id)}">Revoke</button></td></tr>`).join('')+
     (o.bootstrap||[]).map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">server configuration</div></td><td>${esc(x.role)}</td><td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td><td><span class="tag">env token</span></td><td></td><td></td></tr>`).join('')+'</table>';
   $('#i-site').innerHTML='<option value="*">All sites</option>'+(sites.sites||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
+  const [dir,ug]=await Promise.all([api('/api/directory'),api('/api/userGroups')]);
+  $('#dir-box').hidden=!dir.ok;
+  if(dir.ok){
+    $('#dir-state').textContent=`SCIM base URL: ${dir.scimBaseUrl} · people from directory: ${Number(dir.users.total)} (${Number(dir.users.inactive)} deactivated) · connections: ${(dir.provisioners||[]).length}`;
+    const opts=sel=>'<option value="">— no door access —</option>'+(ug.userGroups||[]).map(x=>`<option value="${esc(x.id)}"${x.id===sel?' selected':''}>${esc(x.name)}</option>`).join('');
+    $('#dir-groups').innerHTML=(dir.groups||[]).length?`<table><tr><th>Directory group</th><th>Members</th><th>Grants access as</th></tr>`+
+      dir.groups.map(g=>`<tr><td><b>${esc(g.displayName)}</b></td><td>${Number(g.members)}</td>
+      <td><select data-map-group="${esc(g.id)}" aria-label="Map ${esc(g.displayName)}">${opts(g.userGroupId)}</select></td></tr>`).join('')+'</table><div id="map-msg" class="meta"></div>'
+      :'<div class="meta">No groups pushed yet. Assign groups to the AccessX app in your directory.</div>';
+  }
   $('#sso-box').hidden=!sso.ok;
   if(sso.ok){
     const c=sso.sso;
@@ -166,6 +176,17 @@ $('#ops').addEventListener('click',async e=>{
   const r=await api('/api/operators/'+encodeURIComponent(b.dataset.revokeOp),{method:'DELETE'});
   if(!r.ok){b.textContent=errText(r);return;}
   loadAdmin();loadAudit();
+});
+$('#dir-groups').addEventListener('change',async e=>{
+  const sel=e.target.closest('[data-map-group]');if(!sel)return;
+  const r=await api('/api/directory/groups/'+encodeURIComponent(sel.dataset.mapGroup),{method:'PUT',body:JSON.stringify({userGroupId:sel.value||null})});
+  const msg=r.ok?`Mapped. ${Number(r.usersChanged)} people updated${r.usersLostAccess?` · ${Number(r.usersLostAccess)} lost access (credentials revoked: ${Number((r.reconcile||{}).revoked||0)})`:''}.`:errText(r);
+  await loadAdmin();if($('#map-msg'))$('#map-msg').textContent=msg;loadPeople();loadCreds();loadAudit();
+});
+$('#scim-token-btn').addEventListener('click',async()=>{
+  const r=await post('/api/operators',{name:'Directory sync',role:'r_provisioner'});
+  $('#scim-token-out').textContent=r.ok?`Secret token (shown once — paste into your directory's provisioning settings): ${r.token}`:errText(r);
+  if(r.ok)loadAdmin();
 });
 $('#invite-form').addEventListener('submit',async e=>{
   e.preventDefault();

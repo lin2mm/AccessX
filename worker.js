@@ -79,10 +79,12 @@ function apiFor(env) {
 async function handleApi(request, env) {
   const url = new URL(request.url);
   let body;
+  // Okta/Entra may PUT a group with its full member list: larger limit for SCIM only.
+  const limit = url.pathname.startsWith('/scim/') ? 1024 * 1024 : MAX_BODY;
   if (!['GET', 'HEAD'].includes(request.method)) {
-    if (Number(request.headers.get('content-length') || 0) > MAX_BODY) return json({ ok: false, error: 'request body too large' }, 413);
+    if (Number(request.headers.get('content-length') || 0) > limit) return json({ ok: false, error: 'request body too large' }, 413);
     const text = await request.text();
-    if (text.length > MAX_BODY) return json({ ok: false, error: 'request body too large' }, 413);
+    if (text.length > limit) return json({ ok: false, error: 'request body too large' }, 413);
     if (text) {
       try { body = JSON.parse(text); } catch { return json({ ok: false, error: 'invalid JSON body' }, 400); }
     }

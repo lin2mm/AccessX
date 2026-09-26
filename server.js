@@ -95,7 +95,9 @@ app.use((req, res, next) => {
   next();
 });
 // SCIM clients (Entra ID, Okta) send application/scim+json.
-app.use(['/api', '/scim'], express.json({ limit: '64kb', type: ['application/json', 'application/scim+json'] }));
+app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));
+// Okta/Entra may PUT a group with its full member list: allow larger bodies here only.
+app.use('/scim', express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] }));
 app.use(['/api', '/scim'], async (req, res) => {
   // NOTE: x-forwarded-for is client-controlled unless a trusted proxy
   // overwrites it. Behind a proxy, configure Express "trust proxy" instead.

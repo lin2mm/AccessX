@@ -41,7 +41,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS operators_sso ON operators (sso_issuer, sso_su
 ALTER TABLE users ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';   -- manual | scim
 ALTER TABLE users ADD COLUMN external_id TEXT;
 ALTER TABLE users ADD COLUMN user_name TEXT;                          -- personal data (usually the UPN/email)
-CREATE UNIQUE INDEX IF NOT EXISTS users_user_name ON users (tenant_id, user_name) WHERE user_name IS NOT NULL;
+ALTER TABLE users ADD COLUMN directory_status TEXT;                   -- active | inactive | NULL (not directory-managed)
+-- SCIM userName is case-insensitive (RFC 7643 §4.1.1).
+CREATE UNIQUE INDEX IF NOT EXISTS users_user_name ON users (tenant_id, lower(user_name)) WHERE user_name IS NOT NULL;
 
 -- Directory groups pushed by SCIM. An owner maps each to (at most) one
 -- local user group; membership then flows into users.group_ids.

@@ -21,6 +21,7 @@ const { operatorStatement } = require('./store/repo');
 const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
 const { createOidcClient, randomB64url } = require('./oidc-core');
 const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
 const { seedTenant } = require('./store/bootstrap');
 
 class HttpError extends Error {
@@ -114,6 +115,16 @@ function createApi({
     if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
     return ready;
   };
+
+  const scim = createScim({
+    uid: policy.uid,
+    log,
+    // Directory removed access → revoke now. Never fail the SCIM request:
+    // the periodic reconcile is the safety net.
+    reconcile: async (tenantId, userId) => {
+      try { await reconcileTenant(tenantId, { userId, actor: reconciler.ACTOR }); } catch (error) { log('reconcile after SCIM failed', error); }
+    },
+  });
 
   /* ---------------------------------------------------------------- */
   /* Reconciliation                                                    */
@@ -237,6 +248,9 @@ function createApi({
       const user = snap.users.find(u => u.id === userId);
       if (!user || !ctx.scope.userVisible(user)) throw new HttpError(404, 'not found');
       if (!ctx.scope.userManageable(user)) throw outOfScope(`${userId} belongs to groups outside your sites`);
+      if (!suspended && user.directoryStatus === 'inactive') {
+        throw new HttpError(409, 'this person is deactivated in your directory; reactivate them there', { managedBy: 'directory' });
+      }
       await ctx.t.unit().update('users', userId, { suspended }).audit(`users.${verb}`, userId, ctx.actor).commit();
       const reconcile = suspended ? await reconcileAfter(ctx, { userId }) : undefined;
       return { user: { ...user, suspended }, reconcile };
@@ -286,6 +300,9 @@ function createApi({
       if (!item || (coll === 'users' && !ctx.scope.userVisible(item))) throw new HttpError(404, 'not found');
       if (coll === 'users' ? !ctx.scope.userManageable(item) : !ctx.scope.canWrite(coll, item)) {
         throw outOfScope(`${id} is (partly) outside your sites`);
+      }
+      if (coll === 'users' && item.source === 'scim') {
+        throw new HttpError(409, 'this person is managed by your directory (SCIM); remove them there', { managedBy: 'directory' });
       }
       const refs = referencedBy(coll, id, snap);
       if (refs.length) throw new HttpError(409, 'still referenced', { referencedBy: refs.slice(0, 20) });
@@ -525,6 +542,44 @@ function createApi({
       .raw("UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND via = 'sso' AND revoked_at IS NULL", [new Date().toISOString(), ctx.tenantId])
       .audit('sso.remove', sso.issuer, ctx.actor).commit();
     return publicSso(null, ctx.origin);
+  });
+
+  // --- directory (SCIM) overview + group mapping ---------------------------
+  route('GET', /^\/api\/directory$/, async ctx => {
+    const snap = await ctx.snap();
+    const scimUsers = snap.users.filter(u => u.source === 'scim');
+    const provisioners = (await ctx.t.operators()).filter(o => o.role === 'r_provisioner' && !o.revokedAt).map(o => ({ id: o.id, name: o.name, createdAt: o.createdAt }));
+    return {
+      scimBaseUrl: `${ctx.origin}/scim/v2`,
+      users: { total: scimUsers.length, inactive: scimUsers.filter(u => u.directoryStatus === 'inactive').length },
+      groups: snap.directoryGroups.map(g => ({
+        id: g.id, displayName: g.displayName, externalId: g.externalId, members: (g.memberIds || []).length,
+        userGroupId: g.userGroupId || null, userGroupName: (snap.userGroups.find(x => x.id === g.userGroupId) || {}).name,
+      })),
+      // User groups that the directory currently controls (manual edits are overwritten).
+      controlledUserGroups: [...new Set(snap.directoryGroups.map(g => g.userGroupId).filter(Boolean))],
+      provisioners: ctx.scope.all ? provisioners : undefined,
+    };
+  });
+
+  route('PUT', /^\/api\/directory\/groups\/([^/]+)$/, async (ctx, [id]) => {
+    if (!ctx.scope.all) throw outOfScope('mapping directory groups needs all-site scope');
+    const target = ctx.body.userGroupId === null || ctx.body.userGroupId === '' ? null : String(ctx.body.userGroupId || '');
+    if (target === '') throw new HttpError(400, 'userGroupId is required (or null to unmap)');
+    const out = await ctx.t.transact((snap, uow) => {
+      const g = snap.directoryGroups.find(x => x.id === id);
+      if (!g) throw new HttpError(404, 'not found');
+      if (target && !snap.userGroups.some(x => x.id === target)) throw new HttpError(400, 'userGroupId does not match a user group');
+      if ((g.userGroupId || null) === target) return { changed: [] };
+      uow.update('directoryGroups', id, { userGroupId: target }).audit('directory.group_mapped', `${id} -> ${target || '-'}`, ctx.actor);
+      const after = { ...snap, directoryGroups: snap.directoryGroups.map(x => (x.id === id ? { ...x, userGroupId: target } : x)) };
+      const changed = membershipChanges(after, g.userGroupId ? [g.userGroupId] : []);
+      for (const c of changed) uow.update('users', c.userId, { groupIds: c.groupIds });
+      return { changed };
+    });
+    const lost = out.changed.filter(c => c.lost.length).length;
+    const reconcile = lost ? await reconcileAfter(ctx, {}) : undefined;
+    return { mapped: { id, userGroupId: target }, usersChanged: out.changed.length, usersLostAccess: lost, reconcile };
   });
 
   // --- vendor / mirror / health ---------------------------------------------
@@ -773,6 +828,18 @@ function createApi({
     },
   };
 
+  async function handleScim(req, method, path, who) {
+    const fail = (status, detail) => ({ status, body: scimErrorBody(status, detail), contentType: SCIM_TYPE, headers: status === 401 ? { 'WWW-Authenticate': 'Bearer' } : undefined });
+    if (who.error) return fail(who.error.status, who.error.body && who.error.body.error || 'unauthorized');
+    if (!who.operator || who.operator.anonymous || !who.tenantId) return fail(401, 'a bearer token is required');
+    const t = store.tenant(who.tenantId);
+    if (!(await t.info())) return fail(403, 'tenant not found');
+    if (!rbac.hasPermission(await t.snapshot(), who.operator, 'directory.sync')) return fail(403, 'this token lacks the directory.sync permission');
+    if (!/^\/scim\/v2(\/|$)/.test(path)) return fail(404, 'SCIM lives under /scim/v2');
+    const query = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
+    return scim.handle({ t, tenantId: who.tenantId, method, path, query, body: req.body, origin: req.origin || '', actor: who.operator.id });
+  }
+
   async function handle(req) {
     const method = String(req.method || 'GET').toUpperCase() === 'HEAD' ? 'GET' : String(req.method || 'GET').toUpperCase();
     const path = (String(req.path || '/').replace(/\/+$/, '') || '/');
@@ -786,12 +853,15 @@ function createApi({
         return await sessionRoute(req, body);
       }
 
+      const isScim = path === '/scim/v2' || path.startsWith('/scim/');
       const found = routes.find(r => r.method === method && r.pattern.test(path));
       const headers = req.headers || {};
       const who = await auth.authenticate({
         method, path, ip: req.ip || 'unknown',
-        authorization: headers.authorization || '', cookie: headers.cookie || '', csrf: headers['x-csrf-token'] || '',
+        // SCIM is machine-to-machine: bearer tokens only, never browser cookies.
+        authorization: headers.authorization || '', cookie: isScim ? '' : headers.cookie || '', csrf: headers['x-csrf-token'] || '',
       });
+      if (isScim) return await handleScim(req, method, path, who);
       if (who.error) return who.error;
       if (!found) return { status: 404, body: { ok: false, error: 'not found' } };
 

@@ -35,6 +35,10 @@ const COLLECTIONS = {
       validFrom: 'valid_from', validTo: 'valid_to',
       // directory provisioning (server-managed, never client-writable)
       source: 'source', externalId: 'external_id', userName: 'user_name',
+      // 'active' | 'inactive' | null. Kept apart from `suspended` (the
+      // operator's switch) so a routine directory sync can never undo an
+      // operator's emergency suspension, and vice versa.
+      directoryStatus: 'directory_status',
     },
   },
   schedules: {
@@ -109,6 +113,11 @@ function createStore(sql) {
         sql.all(`SELECT * FROM ${COLLECTIONS[name].table} WHERE tenant_id = ? ORDER BY rowid`, [tenantId])));
       const snap = {};
       names.forEach((name, index) => { snap[name] = results[index].map(row => fromRow(name, row)); });
+      // Effective suspension = operator switch OR directory deactivation.
+      snap.users = snap.users.map(u => {
+        if (u.directoryStatus !== 'inactive') return u.suspended ? { ...u, suspendedBy: 'operator' } : u;
+        return { ...u, suspended: true, suspendedBy: u.suspended ? 'operator+directory' : 'directory' };
+      });
       const t = await sql.first('SELECT name, settings FROM tenants WHERE id = ?', [tenantId]);
       snap.settings = t ? JSON.parse(t.settings || '{}') : {};
       snap.tenant = { id: tenantId, name: t ? t.name : tenantId };
@@ -159,10 +168,10 @@ function createStore(sql) {
          * one transaction. If another writer took the same seq first, the
          * PK rejects the batch; re-seal on the new head and retry.
          */
-        async commit({ retries = 12 } = {}) {
+        async commit({ retries = 12, expectHead = null } = {}) {
           for (let attempt = 0; ; attempt++) {
             const lastImport = sealedImports[sealedImports.length - 1];
-            const head = lastImport ? { seq: lastImport.seq, hash: lastImport.hash } : await auditHead();
+            const head = lastImport ? { seq: lastImport.seq, hash: lastImport.hash } : expectHead || await auditHead();
             const sealed = auditCore.seal(head, pending);
             const auditStatements = [...sealedImports, ...sealed].map(e => ({
               sql: 'INSERT INTO audit_events (tenant_id, seq, id, ts, actor, action, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -173,7 +182,10 @@ function createStore(sql) {
               await sql.batch([...auditStatements, ...statements]);
               return sealed;
             } catch (error) {
-              if (!(error instanceof ConflictError) || attempt >= retries || sealedImports.length) throw error;
+              // expectHead = compare-and-swap: the caller computed these writes
+              // from state at that head, so re-sealing on a newer head would
+              // silently overwrite someone else's change. Let transact() redo it.
+              if (!(error instanceof ConflictError) || attempt >= retries || sealedImports.length || expectHead) throw error;
               // Full-jitter exponential backoff: colliding writers spread out
               // instead of re-colliding in lockstep.
               await sleep(Math.random() * Math.min(1000, 8 * 2 ** attempt));
@@ -182,6 +194,31 @@ function createStore(sql) {
         },
       };
       return api;
+    }
+
+    /**
+     * Optimistic read-modify-write. `fn(snapshot, uow)` must be pure apart
+     * from queueing writes (no vendor calls). Every write carries an audit
+     * entry, so the audit head works as the tenant's version number: if
+     * anyone committed after we read, the commit conflicts and fn re-runs
+     * on fresh state. Lost updates (two SCIM PATCHes on one group) become
+     * impossible without per-row version columns.
+     */
+    async function transact(fn, { retries = 10 } = {}) {
+      for (let attempt = 0; ; attempt++) {
+        const head = await auditHead(); // read the version BEFORE the data
+        const snap = await snapshot();
+        const uow = unit();
+        const result = await fn(snap, uow);
+        if (!uow.size) return result;
+        try {
+          await uow.commit({ expectHead: head });
+          return result;
+        } catch (error) {
+          if (!(error instanceof ConflictError) || attempt >= retries) throw error;
+          await sleep(Math.random() * Math.min(1000, 8 * 2 ** attempt));
+        }
+      }
     }
 
     async function auditRecent({ limit = 100, before = null, action = null, actor = null } = {}) {
@@ -218,7 +255,7 @@ function createStore(sql) {
       return sql.first('SELECT id, name, seeded, settings FROM tenants WHERE id = ?', [tenantId]);
     }
 
-    return { id: tenantId, snapshot, unit, auditRecent, auditCount, auditVerify, auditHead, operators, info };
+    return { id: tenantId, snapshot, unit, transact, auditRecent, auditCount, auditVerify, auditHead, operators, info };
   }
 
   const OP_COLS = 'tenant_id, id, name, role, site_ids, email, sso_issuer, sso_subject';

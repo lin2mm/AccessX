@@ -242,6 +242,13 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <div><button class="btn sm" type="submit">Invite (single sign-on)</button></div>
         <div id="invite-msg" class="meta"></div>
       </form>
+      <div id="dir-box" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Directory sync (SCIM 2.0)</b>
+        <div id="dir-state" class="meta" style="margin:4px 0 8px"></div>
+        <div id="dir-groups"></div>
+        <button class="btn2 sm" type="button" id="scim-token-btn" style="margin-top:8px">Create SCIM token</button>
+        <div id="scim-token-out" class="meta" style="margin-top:6px"></div>
+      </div>
       <div id="sso-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
         <b>Single sign-on (OpenID Connect)</b>
         <div id="sso-state" class="meta" style="margin:4px 0 8px"></div>

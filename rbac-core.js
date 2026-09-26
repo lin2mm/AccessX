@@ -23,6 +23,7 @@ const PERMS = {
   'mirror.sync': 'Pull records from the lock vendor',
   'diag.read': 'Installer diagnostics',
   'door.commission': 'Commission / decommission hardware',
+  'directory.sync': 'Provision people and groups from a directory (SCIM)',
 };
 
 const OWNER = '*';
@@ -35,6 +36,8 @@ const DEFAULT_ROLES = [
   { id: 'r_manager', name: 'Site Manager', perms: ['door.read', 'door.unlock', 'credential.issue', 'user.manage', 'report.read', 'audit.read'] },
   { id: 'r_installer', name: 'Installer', perms: ['door.read', 'door.commission', 'diag.read'] },
   { id: 'r_view', name: 'Auditor', perms: ['door.read', 'report.read', 'audit.read'] },
+  // Machine identity for Entra ID / Okta / Google. It can only reach /scim/v2.
+  { id: 'r_provisioner', name: 'Directory sync (SCIM)', perms: ['directory.sync'] },
 ];
 
 /** What an anonymous visitor may do when open reads are enabled (demo mode). */
@@ -83,6 +86,9 @@ const ROUTES = [
   ['GET', /^\/api\/mirror\/(coverage|records)$/, 'report.read'],
   ['POST', /^\/api\/ai$/, 'report.read'],
   ['GET', /^\/api\/permissions$/, 'report.read'],
+  ['GET', /^\/api\/directory$/, 'report.read'],
+  ['PUT', /^\/api\/directory\/groups\/[^/]+$/, 'rule.manage'],
+  ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => [m, /^\/scim\/v2(\/|$)/, 'directory.sync']),
 ];
 
 function requiredPermission(method, pathname) {
