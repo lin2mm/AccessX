@@ -3,19 +3,20 @@ import mirrorDefaults from './data/mirror.json';
 import policy from './policy-core.js';
 import rbac from './rbac-core.js';
 import creds from './credentials-core.js';
+import compiler from './compiler-core.js';
 import auditCore from './audit-core.js';
 import validation from './validate-core.js';
 
 const h = validation.escapeHtml;
 
 const DEMO_LOCKS = [
-  { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9002, lockAlias: 'Server Room', electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9003, lockAlias: 'Warehouse Side Door', electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9004, lockAlias: 'Cleaner Cupboard', electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office' },
-  { lockId: 9101, lockAlias: 'Gym Front Door', electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9102, lockAlias: 'Gym Staff Office', electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot' },
+  { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9002, lockAlias: 'Server Room', electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9003, lockAlias: 'Warehouse Side Door', electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9004, lockAlias: 'Cleaner Cupboard', electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office', cyclic: false },
+  { lockId: 9101, lockAlias: 'Gym Front Door', electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym', cyclic: true },
+  { lockId: 9102, lockAlias: 'Gym Staff Office', electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym', cyclic: false },
+  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot', cyclic: true },
 ];
 
 const COLLECTIONS = new Set([
@@ -456,6 +457,19 @@ async function handleApi(request, env) {
       policy.audit(acl, 'credential.revoke', `${id} lock ${cred.lockId} user ${cred.userId}`, actor);
       await saveAcl(db, acl);
       return json(ok({ credential: cred }));
+    }
+
+    if (method === 'GET' && pathname === '/api/compile') {
+      const locks = visibleLocks.map(l => ({ lockId: l.lockId, name: l.lockAlias, hasGateway: Boolean(l.hasGateway), cyclic: l.cyclic === true }));
+      const scoped = { ...acl, assignments: acl.assignments.filter(a => {
+        const dg = acl.doorGroups.find(d => d.id === a.doorGroupId);
+        return dg && rbac.canAccessSite(operator, dg.siteId);
+      }) };
+      const visible = new Set(locks.map(l => Number(l.lockId)));
+      return json(ok({
+        ...compiler.compile(scoped, locks),
+        drift: creds.reviewCredentials(acl).filter(f => visible.has(Number(f.lockId))),
+      }));
     }
 
     const recordsMatch = pathname.match(/^\/api\/records\/(\d+)$/);

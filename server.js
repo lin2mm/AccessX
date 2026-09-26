@@ -6,6 +6,7 @@ const mirror = require('./mirror');
 const { createAuth, authStatus: getAuthStatus } = require('./auth');
 const acl = require('./acl');
 const creds = require('./credentials-core');
+const compiler = require('./compiler-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
 
 const app = express();
@@ -50,13 +51,13 @@ app.get('/api/auth', (req,res)=>res.json({ ok: true, ...authStatus() }));
 /* Demo dataset — realistic commercial scenario                        */
 /* ----------------------------------------------------------------- */
 const DEMO_LOCKS = [
-  { lockId: 9001, lockAlias: 'Main Entrance',        electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9002, lockAlias: 'Server Room',          electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9003, lockAlias: 'Warehouse Side Door',  electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9004, lockAlias: 'Cleaner Cupboard',     electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office' },
-  { lockId: 9101, lockAlias: 'Gym Front Door',       electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9102, lockAlias: 'Gym Staff Office',     electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot' },
+  { lockId: 9001, lockAlias: 'Main Entrance',        electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9002, lockAlias: 'Server Room',          electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9003, lockAlias: 'Warehouse Side Door',  electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office', cyclic: true },
+  { lockId: 9004, lockAlias: 'Cleaner Cupboard',     electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office', cyclic: false },
+  { lockId: 9101, lockAlias: 'Gym Front Door',       electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym', cyclic: true },
+  { lockId: 9102, lockAlias: 'Gym Staff Office',     electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym', cyclic: false },
+  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot', cyclic: true },
 ];
 
 function seed() {
@@ -291,6 +292,27 @@ app.delete('/api/credentials/:id', async (req, res) => {
     acl.audit(db, 'credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId}`, actor(req));
     acl.save(db);
     ok(res, { credential: cred });
+  } catch (e) { fail(res, e); }
+});
+
+// ---- Policy compiler: what will each lock actually enforce? --------
+app.get('/api/compile', async (req, res) => {
+  try {
+    const db = acl.load();
+    const fleet = DEMO ? DEMO_LOCKS : ((await tt.listLocks(1, 200)).list || []);
+    const locks = fleet
+      .filter(l => rbac.canAccessLock(db, req.operator, l.lockId))
+      // cyclic support is model-dependent; unknown in live mode ⇒ false (conservative)
+      .map(l => ({ lockId: l.lockId, name: l.lockAlias, hasGateway: Boolean(l.hasGateway), cyclic: l.cyclic === true }));
+    const scoped = { ...db, assignments: db.assignments.filter(a => {
+      const dg = db.doorGroups.find(d => d.id === a.doorGroupId);
+      return dg && rbac.canAccessSite(req.operator, dg.siteId);
+    }) };
+    const visible = new Set(locks.map(l => Number(l.lockId)));
+    ok(res, {
+      ...compiler.compile(scoped, locks),
+      drift: creds.reviewCredentials(db).filter(f => visible.has(Number(f.lockId))),
+    });
   } catch (e) { fail(res, e); }
 });
 

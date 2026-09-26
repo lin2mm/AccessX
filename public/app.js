@@ -52,7 +52,7 @@ async function init(){
   $('#mode').textContent=(st.mode||'').startsWith('DEMO')?'Demo data':'Live';
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 async function loadDoors(){
@@ -121,6 +121,28 @@ async function evaluate(){
 }
 $('#e-go').addEventListener('click',evaluate);
 
+/* ---- enforcement map (policy compiler) ---- */
+const lv=l=>`<span class="tag lv-${esc(l)}">${esc(l)}</span>`;
+const hm=m=>`${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+const DAYS=['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+async function loadCompile(){
+  const r=await api('/api/compile');
+  if(!r.ok){$('#cm-rules').innerHTML=`<div class="empty">${esc(errText(r))}</div>`;$('#cm-kpis').innerHTML='';$('#cm-locks').innerHTML='';return;}
+  const s=r.summary;
+  $('#cm-kpis').innerHTML=`
+    <div class="kpi"><div class="n ${s.fullyEnforcedPct>=80?'ok':s.fullyEnforcedPct>=50?'warn':'bad'}">${Number(s.fullyEnforcedPct)}%</div><div class="l">Rules enforced at the lock</div></div>
+    <div class="kpi"><div class="n ${s.cloud?'bad':'ok'}">${Number(s.cloud)}</div><div class="l">Cloud-only rules</div></div>
+    <div class="kpi"><div class="n ${(r.drift||[]).length?'bad':'ok'}">${(r.drift||[]).length}</div><div class="l">Credentials to revoke</div></div>`;
+  $('#cm-rules').innerHTML=`<table><tr><th>Rule</th><th>Level</th><th>Per door</th></tr>`+
+    r.rules.map(x=>`<tr><td><b>${esc(x.who)}</b> → ${esc(x.doorGroup)}<div class="meta">${esc(x.schedule)} · ${Number(x.members)} people</div></td>
+      <td>${lv(x.level)}</td>
+      <td>${x.doors.map(d=>`<details><summary>${lv(d.level)} ${esc(d.name)}</summary><div class="meta">${d.reasons.map(q=>'· '+esc(q.text)).join('<br>')}</div></details>`).join('')}
+      ${x.slots.length?`<details><summary>compiled lock slots (${x.slots.length})</summary><div class="meta">${x.slots.map(q=>esc(DAYS[q.weekDay])+' '+hm(q.startMin)+'–'+hm(q.endMin)).join(' · ')}</div></details>`:''}</td></tr>`).join('')+`</table>`;
+  $('#cm-locks').innerHTML=`<table><tr><th>Lock</th><th>Worst level</th><th>Rules</th><th>Issues</th></tr>`+
+    r.locks.map(l=>`<tr><td><b>${esc(l.name)}</b><div class="meta">${l.hasGateway?'gateway':'no gateway'} · ${l.cyclic?'weekly windows':'period only'}</div></td>
+      <td>${lv(l.level)}</td><td>${Number(l.rules)}</td><td class="meta">${l.issues.map(esc).join('<br>')||'—'}</td></tr>`).join('')+`</table>`;
+}
+
 /* ---- passcodes ---- */
 async function issuePasscode(acknowledge=false){
   const end=$('#p-end').value;
@@ -141,7 +163,7 @@ async function issuePasscode(acknowledge=false){
     <div style="margin-top:6px">${esc(c.startAt.slice(0,16).replace('T',' '))} → ${esc(c.endAt.slice(0,16).replace('T',' '))} UTC ·
       ${c.enforcement==='lock'?'<span class="tag g">lock-enforced</span>':'<span class="tag o">partial</span>'}</div>
     ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
-  loadCreds();loadAudit();
+  loadCreds();loadAudit();loadCompile();
 }
 $('#p-issue').addEventListener('click',()=>issuePasscode(false));
 
@@ -163,7 +185,7 @@ async function loadCreds(){
 $('#creds').addEventListener('click',async e=>{
   const b=e.target.closest('[data-revoke]');if(!b)return;
   const r=await api('/api/credentials/'+encodeURIComponent(b.dataset.revoke),{method:'DELETE'});
-  if(!r.ok)b.textContent=r._status===403?'No permission':'Failed';else{loadCreds();loadAudit();}
+  if(!r.ok)b.textContent=r._status===403?'No permission':'Failed';else{loadCreds();loadAudit();loadCompile();}
 });
 
 async function loadRecords(){

@@ -134,6 +134,8 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 .sugg button{background:var(--db800);border:1px solid var(--line);color:var(--txt2);
   font-size:11px;padding:5px 10px;font-weight:500}
 .sugg button:hover{border-color:var(--coral);color:var(--coral)}
+.lv-lock{background:var(--green7);color:#C1F2D6}.lv-synced{background:#5c2d00;color:#FFCD88}.lv-cloud{background:#4a0f1a;color:var(--red3)}
+details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
 .code{font:700 22px/1 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--bold-green)}
 </style>
 </head>
@@ -171,6 +173,15 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <label>Date &amp; time (local time at the door's site)</label><input type="datetime-local" id="e-when">
       <div style="margin-top:14px"><button class="btn" type="button" id="e-go">Evaluate access</button></div>
       <div id="e-res"></div>
+    </div>
+    <div class="card">
+      <h2>Enforcement map</h2>
+      <div class="hint">What each lock will <b>actually</b> enforce. <span class="tag g">lock</span> works offline ·
+        <span class="tag o">synced</span> needs the cloud to push changes in time ·
+        <span class="tag r">cloud</span> only remote unlocks are checked — codes/cards would bypass the rule.</div>
+      <div class="grid c3" id="cm-kpis"></div>
+      <div id="cm-rules" style="margin-top:12px;overflow-x:auto"></div>
+      <div id="cm-locks" style="margin-top:12px;overflow-x:auto"></div>
     </div>
     <div class="card"><h2>Access rules</h2><div id="rules"></div></div>
     <div class="card">

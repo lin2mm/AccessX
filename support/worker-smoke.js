@@ -94,6 +94,14 @@ check('static assets carry a strict CSP', async () => {
   assert.match(csp, /script-src 'self';/);
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
 });
+check('policy compiler reports enforcement levels', async () => {
+  const r = await call('GET', '/api/compile', OWNER);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.summary.rules, 9);
+  assert.ok(r.body.summary.cloud >= 1 && r.body.summary.lock >= 1);
+  const gym = await call('GET', '/api/compile', GYM);
+  assert.ok(gym.body.locks.every(l => [9101, 9102].includes(l.lockId)));
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });
