@@ -78,8 +78,24 @@ Operators (people who administer the system) are separate from door users.
   isolated tenant and returns its owner token once. Every request is bound to
   the operator's tenant; data, audit chains and lock fleets never cross.
 
+- **Browser sign-in:** the UI exchanges a token for an **HttpOnly session
+  cookie** (`POST /api/auth/login`; 12 h absolute, 60 min idle). No token is
+  kept in the page; writes need the `X-CSRF-Token` returned at login.
+  `COOKIE_SAMESITE=None` only if the app must run inside another site's iframe.
+- **Single sign-on (OIDC):** owners configure `PUT /api/sso {issuer,
+  clientId, clientSecret?, domains}` (Entra ID, Okta, Google…; redirect URI
+  `https://<host>/api/auth/sso/callback`) and invite operators by email
+  (`POST /api/operators {…, email, auth:'sso'}`). First login links the
+  invite only if the IdP marks the email **verified**; after that the
+  identity is the IdP's `(issuer, subject)`. Client secrets are encrypted
+  with `SECRETS_KEY` (32 random bytes, base64).
+- **Directory sync (SCIM 2.0):** create a token with the *Directory sync*
+  role (`r_provisioner`) and give your directory the base URL
+  `https://<host>/scim/v2`. People deactivated or deleted there lose their
+  door codes in the same request. SCIM groups grant nothing until an owner
+  maps them to a user group (People → Operators & sign-in).
 - Built-in roles: `r_owner`, `r_manager` (site manager), `r_installer`, `r_view`
-  (auditor). Every API route maps to one permission in `rbac-core.js`; routes
+  (auditor), `r_provisioner` (SCIM only). Every API route maps to one permission in `rbac-core.js`; routes
   not listed there require the owner (fail closed).
 - Site-scoped operators only see, unlock, issue codes for and read records of
   doors at their sites. They see people with at least one group at their sites
@@ -107,6 +123,10 @@ Operators (people who administer the system) are separate from door users.
   whether the rule is enforced by the lock (`lock`), depends on the cloud
   pushing changes through a gateway (`synced`), or only applies to remote
   unlocks (`cloud`). It also flags daylight-saving drift on fixed-offset lock clocks.
+- **Time to revoke** — `GET /api/reports/revocation?days=30` measures, from
+  the audit chain, how long it took from "person suspended/deactivated" to
+  "code gone from the lock" (remote and on-site p50/p95/max) and lists every
+  code that still works.
 - **Tamper-evident audit** — one hash chain per tenant in `audit_events`,
   written in the same transaction as the change, with UPDATE/DELETE-blocking
   triggers.
@@ -122,13 +142,20 @@ Operators (people who administer the system) are separate from door users.
 
 - `data/*.json` are read-only seeds. Runtime state lives in `DATA_DIR`
   (default `data/runtime/`, git-ignored).
-- `npm test` — unit, storage, tenancy and in-process API tests.
+- `npm test` — unit, storage, tenancy, SSO, SCIM and in-process API tests.
+- `npm run test:isolation` — the **cross-tenant gate**: every route is called
+  as tenant B with tenant A's ids; any leak or change to A fails CI
+  (`.github/workflows/ci.yml`). New routes are covered automatically.
+- `MOCK_IDP=1` mounts a fake OIDC provider at `/mock-idp` for demos/tests
+  (`MOCK_IDP_AUTOCONFIGURE=1` wires the default tenant to it). Never in production.
 - `npm run test:worker` — smoke test against a running `wrangler dev`
-  (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM` env vars; see `support/worker-smoke.js`).
+  (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM`, optional `IDP` env vars; see `support/worker-smoke.js`).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after
-  pulling — `0003_multitenant.sql` adds the relational multi-tenant schema.
+  pulling — `0003_multitenant.sql` adds the relational multi-tenant schema,
+  `0004_identity.sql` sessions, SSO and directory tables. Set `SECRETS_KEY`
+  as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
 connecting real locks or real user data: per-tenant vendor accounts, verify
-TTLock capability flags per lock model, anchor the audit head externally, move
-tokens to HttpOnly sessions/SSO, and complete an independent security review.
+TTLock capability flags per lock model, anchor the audit head externally,
+DNS-verify SSO domains, and complete an independent security review.

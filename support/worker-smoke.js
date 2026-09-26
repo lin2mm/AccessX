@@ -12,6 +12,17 @@ const call = async (method, url, token, body) => {
   const res = await fetch(BASE + url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: res.status, body: await res.json() };
 };
+/** Lower-level call: headers, cookies, content type, no redirect following. */
+const raw = async (method, url, { token, body, headers = {}, contentType = 'application/json', base = BASE } = {}) => {
+  const h = { ...headers };
+  if (token) h.authorization = `Bearer ${token}`;
+  if (body !== undefined) h['content-type'] = contentType;
+  const res = await fetch(url.startsWith('http') ? url : base + url, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
+  const text = await res.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+  return { status: res.status, body: parsed, headers: res.headers, cookies: res.headers.getSetCookie() };
+};
 const checks = [];
 const check = (name, fn) => checks.push([name, fn]);
 const { OWNER, GYM, AUDIT, PLATFORM } = process.env;
@@ -162,6 +173,74 @@ check('policy compiler reports enforcement levels', async () => {
   const gym = await call('GET', '/api/compile', GYM);
   assert.ok(gym.body.locks.every(l => [9101, 9102].includes(l.lockId)));
 });
+check('browser session: HttpOnly cookie, CSRF required for writes, logout', async () => {
+  const login = await raw('POST', '/api/auth/login', { body: { token: OWNER } });
+  assert.equal(login.status, 200);
+  const set = login.cookies.find(c => /ax_session=/.test(c));
+  assert.match(set, /HttpOnly/);
+  const cookie = set.split(';')[0];
+  assert.equal((await raw('GET', '/api/auth/session', { headers: { cookie } })).body.authenticated, true);
+  assert.equal((await raw('POST', '/api/reconcile', { headers: { cookie }, body: {} })).status, 403, 'no CSRF token');
+  assert.equal((await raw('POST', '/api/reconcile', { headers: { cookie, 'x-csrf-token': login.body.csrf }, body: {} })).status, 200);
+  await raw('POST', '/api/auth/logout', { headers: { cookie, 'x-csrf-token': login.body.csrf }, body: {} });
+  assert.equal((await raw('GET', '/api/me', { headers: { cookie } })).status, 401);
+});
+check('SCIM on D1: deactivation revokes the code; parallel PATCHes lose nothing', async () => {
+  const prov = (await call('POST', '/api/operators', OWNER, { name: 'Smoke Entra', role: 'r_provisioner' })).body.token;
+  const scim = (m, u, b) => raw(m, `/scim/v2${u}`, { token: prov, body: b, contentType: 'application/scim+json' });
+  const stamp = Date.now().toString(36);
+  const u = await scim('POST', '/Users', { userName: `smoke-${stamp}@riverside.example`, displayName: 'Smoke User', active: true });
+  assert.equal(u.status, 201, JSON.stringify(u.body));
+  assert.match(u.headers.get('content-type'), /scim\+json/);
+  const g = (await scim('POST', '/Groups', { displayName: `SG-Smoke-${stamp}`, members: [{ value: u.body.id }] })).body;
+  assert.equal((await call('PUT', `/api/directory/groups/${g.id}`, OWNER, { userGroupId: 'ug_it' })).status, 200);
+  const code = await call('POST', '/api/passcode', OWNER, { lockId: 9002, userId: u.body.id });
+  assert.equal(code.status, 200, JSON.stringify(code.body));
+  const off = await scim('PATCH', `/Users/${u.body.id}`, { Operations: [{ op: 'Replace', value: { active: 'False' } }] });
+  assert.equal(off.body.active, false);
+  const cred = (await call('GET', '/api/credentials', OWNER)).body.credentials.find(c => c.id === code.body.credential.id);
+  assert.equal(cred.status, 'revoked');
+  const ids = [];
+  for (let i = 0; i < 8; i++) ids.push((await scim('POST', '/Users', { userName: `burst-${stamp}-${i}@riverside.example` })).body.id);
+  const burst = (await scim('POST', '/Groups', { displayName: `SG-Burst-${stamp}` })).body;
+  const res = await Promise.all(ids.map(id => scim('PATCH', `/Groups/${burst.id}`, { Operations: [{ op: 'Add', path: 'members', value: [{ value: id }] }] })));
+  assert.deepEqual(res.map(r => r.status), ids.map(() => 200));
+  assert.equal((await scim('GET', `/Groups/${burst.id}`)).body.members.length, 8);
+  assert.equal((await raw('GET', '/scim/v2/Users', { token: GYM })).status, 403, 'a manager token is not a SCIM token');
+});
+check('time-to-revoke report on D1', async () => {
+  const r = await call('GET', '/api/reports/revocation?days=7', OWNER);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.remote.count >= 1, JSON.stringify(r.body.remote));
+});
+if (process.env.IDP) {
+  check('SSO on the Worker against an external IdP (mock)', async () => {
+    const put = await raw('PUT', '/api/sso', { token: OWNER, body: { issuer: `${process.env.IDP}/mock-idp`, clientId: 'worker-smoke', clientSecret: 'smoke-secret', domains: ['riverside.example'] } });
+    assert.equal(put.status, 200, JSON.stringify(put.body));
+    assert.equal(put.body.sso.hasClientSecret, true);
+    const email = `alice@riverside.example`;
+    const ops = (await call('GET', '/api/operators', OWNER)).body.operators;
+    if (!ops.some(o => o.email === email && !o.revokedAt)) {
+      assert.equal((await call('POST', '/api/operators', OWNER, { name: 'Alice', role: 'r_manager', siteIds: ['site_river'], email, auth: 'sso' })).status, 200);
+    }
+    const start = await raw('GET', `/api/auth/sso/start?email=${email}`);
+    assert.equal(start.status, 302);
+    const flow = start.cookies.find(c => /ax_sso=/.test(c)).split(';')[0];
+    // The mock advertises a relative authorize endpoint (same-origin demo); here it lives elsewhere.
+    const sent = new URL(start.headers.get('location'), BASE);
+    const loc = new URL(sent.pathname + sent.search, process.env.IDP);
+    loc.searchParams.set('user', 'mock|alice');
+    const idp = await fetch(loc, { redirect: 'manual' });
+    const cb = new URL(idp.headers.get('location'));
+    const done = await raw('GET', cb.pathname + cb.search, { headers: { cookie: flow } });
+    assert.equal(done.status, 302);
+    assert.equal(done.headers.get('location'), '/', done.headers.get('location'));
+    const cookie = done.cookies.find(c => /ax_session=[^;]/.test(c)).split(';')[0];
+    const me = await raw('GET', '/api/auth/session', { headers: { cookie } });
+    assert.equal(me.body.via, 'sso');
+    assert.deepEqual(me.body.operator.siteIds, ['site_river']);
+  });
+}
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });

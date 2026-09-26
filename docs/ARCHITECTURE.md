@@ -49,6 +49,13 @@
   more (large sites, bulk imports, HR sync), serialise writes per tenant
   with a Durable Object (one DO per tenant owns the audit head) instead of
   optimistic retries.
+- **Read-modify-write** (SCIM group members, mappings) uses
+  `tenant.transact(fn)`: read the audit head, then the snapshot, compute,
+  and commit with `expectHead`. Any commit in between moves the head, so the
+  commit conflicts and `fn` re-runs on fresh state. The audit chain doubles
+  as the tenant's version number — no per-row version columns. Measured on
+  local D1: 8 parallel PATCHes on one group all land, the slowest after
+  ~730 ms (they serialise).
 - `audit_events` has triggers that reject UPDATE/DELETE. Someone with raw
   database access can drop them — the hash chain still pinpoints the edit
   (`GET /api/audit/verify`). Anchor the head hash daily somewhere the app
@@ -80,6 +87,26 @@
   all-site operators only. Legacy groups get a site inferred from their rules.
 - Locks must belong to the tenant's vendor fleet; site scope alone is not
   enough because an all-site owner's scope is "everything".
+- **Sessions:** `sessions` stores SHA-256(cookie), CSRF token, via
+  (token|sso), expiry. Cookie auth never applies to platform routes or
+  `/scim`. Revoking an operator or removing SSO revokes their sessions.
+- **OIDC** (`oidc-core.js`, WebCrypto only): code + PKCE S256, state bound
+  to the browser by a 10-minute HttpOnly cookie (login CSRF), single-use
+  `auth_flows` row, nonce, RS256 against JWKS (refetch on unknown kid at
+  most once a minute), iss/aud/azp/exp/iat checks, discovery must name the
+  configured issuer. Identity = `(sso_issuer, sso_subject)`; the email is
+  only used once, to claim an invitation, and only if `email_verified`
+  (nOAuth). Email domains route `/api/auth/sso/start?email=` to a tenant;
+  a domain can be claimed by one tenant (**not DNS-verified yet**).
+- **Secrets** (`secrets-core.js`): AES-256-GCM with `SECRETS_KEY`, AAD =
+  tenant + purpose, so ciphertexts cannot be moved between tenants.
+  Rotation = re-encrypt with a key id prefix (`v1.` today).
+- **SCIM** (`scim-core.js`): Users/Groups/discovery under `/scim/v2`,
+  `r_provisioner` tokens only. The directory manages only people it created
+  or adopted by email; `directory_status` is separate from the operator's
+  `suspended` flag (neither undoes the other). Mapped SCIM groups set the
+  user groups of directory-managed people; manual members are untouched.
+  Stored attributes: userName, externalId, name, one email.
 
 ## Vendors
 
@@ -100,10 +127,13 @@
   (server `setInterval`, Worker cron). Vendor failures are audited as
   `credential.revoke_failed` and retried next run.
 - Vendor calls happen before the DB commit. If the commit fails after a
-  successful delete, the next run deletes again — vendor deletes must be
-  idempotent ("not found" = success). For create-type side effects use an
-  outbox table instead.
-- `dstNotices()` warns 14 days before a site's clock change.
+  successful delete, the next run deletes again. TTLock deletes are
+  idempotent: `deleteType=2` (gateway; TTLock's default 1 only works via the
+  phone app over Bluetooth), `-2012` (no gateway) → `pending_removal`, any
+  other failure is checked against `listKeyboardPwd` — not present = done.
+  For create-type side effects use an outbox table instead.
+- `dstNotices()` warns 14 days before a site's clock change
+  (`test/dst.sydney.test.js` covers the 4 Oct 2026 gap and 5 Apr fall-back).
 
 ## Known gaps
 
@@ -111,5 +141,7 @@
   per-tenant version counter + cache when it shows up in latency.
 - Auth rate limiting is in-memory (per process / per isolate). Use a
   Durable Object or Cloudflare rate-limiting rules in production.
-- Bearer tokens in the browser. Move to HttpOnly session cookies + CSRF, then
-  SSO (OIDC/SAML) for operators.
+- SSO email domains are first-come, not DNS-verified. SAML is not supported
+  (OIDC covers Entra, Okta, Google; add SAML only when a customer needs it).
+- SCIM has no ETags and no `/Bulk`; filters are `attr eq "value"` only.
+- The mock IdP (`support/mock-idp.js`) must never be enabled in production.
