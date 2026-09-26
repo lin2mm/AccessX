@@ -2,6 +2,7 @@ import aclDefaults from './data/acl.json';
 import mirrorDefaults from './data/mirror.json';
 import policy from './policy-core.js';
 import rbac from './rbac-core.js';
+import creds from './credentials-core.js';
 
 const DEMO_LOCKS = [
   { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
@@ -362,14 +363,46 @@ async function handleApi(request, env) {
     if (method === 'POST' && pathname === '/api/passcode') {
       const body = await readBody(request);
       if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const name = String(body.name || 'Demo passcode').slice(0, 100);
+      if (!canLock(body.lockId)) return forbiddenSite(body.lockId);
+      const plan = creds.planPasscode(acl, {
+        userId: body.userId, lockId: body.lockId, startAt: body.startAt, endAt: body.endAt,
+        acknowledgeScheduleGap: body.acknowledgeScheduleGap === true,
+      });
+      if (!plan.ok) {
+        policy.audit(acl, 'passcode.denied', `lock ${body.lockId} user ${body.userId}: ${plan.error}`, actor);
+        await saveState(db, 'acl', acl);
+        const { ok: _ok, status, ...rest } = plan;
+        return json({ ok: false, ...rest }, status);
+      }
+      const c = plan.credential;
       const passcode = {
         keyboardPwd: String(Math.floor(100000 + Math.random() * 899999)),
         keyboardPwdId: Date.now(),
       };
-      policy.audit(acl, 'passcode.create', `lock ${Number(body.lockId)} "${name}"`);
+      const entry = creds.register(acl, c, { issuedBy: actor, vendorRef: passcode.keyboardPwdId, code: passcode.keyboardPwd });
+      policy.audit(acl, 'passcode.create',
+        `${entry.id} lock ${c.lockId} user ${body.userId} ${c.startAt}..${c.endAt} enforcement=${c.enforcement}`
+        + (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), actor);
       await saveState(db, 'acl', acl);
-      return json(ok({ passcode }));
+      return json(ok({ passcode, credential: entry, warnings: plan.warnings }));
+    }
+
+    if (method === 'GET' && pathname === '/api/credentials') {
+      const visible = (acl.credentials || []).filter(c => canLock(c.lockId));
+      const ids = new Set(visible.map(c => c.id));
+      return json(ok({ credentials: visible, review: creds.reviewCredentials(acl).filter(f => ids.has(f.id)) }));
+    }
+
+    const credMatch = pathname.match(/^\/api\/credentials\/([^/]+)$/);
+    if (method === 'DELETE' && credMatch) {
+      const id = decodeURIComponent(credMatch[1]);
+      const cred = (acl.credentials || []).find(c => c.id === id);
+      if (!cred) return json({ ok: false, error: 'not found' }, 404);
+      if (!canLock(cred.lockId)) return forbiddenSite(cred.lockId);
+      creds.revoke(acl, id, { revokedBy: actor, reason: 'manual' });
+      policy.audit(acl, 'credential.revoke', `${id} lock ${cred.lockId} user ${cred.userId}`, actor);
+      await saveState(db, 'acl', acl);
+      return json(ok({ credential: cred }));
     }
 
     const recordsMatch = pathname.match(/^\/api\/records\/(\d+)$/);

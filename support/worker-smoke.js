@@ -51,6 +51,24 @@ check('evaluate uses site time zone', async () => {
   assert.equal(r.body.timeZone, 'Europe/London');
   assert.equal(r.body.result.allowed, true);
 });
+check('passcode requires a permitted person', async () => {
+  assert.equal((await call('POST', '/api/passcode', OWNER, { lockId: 9002 })).status, 400);
+  assert.equal((await call('POST', '/api/passcode', OWNER, { lockId: 9001, userId: 'u5' })).status, 403);
+  assert.equal((await call('POST', '/api/passcode', OWNER, { lockId: 9001, userId: 'u1' })).status, 409);
+  const r = await call('POST', '/api/passcode', OWNER, { lockId: 9002, userId: 'u2' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.credential.enforcement, 'lock');
+});
+check('gym manager cannot issue office passcodes', async () => {
+  assert.equal((await call('POST', '/api/passcode', GYM, { lockId: 9002, userId: 'u2' })).status, 403);
+});
+check('credential registry and revoke', async () => {
+  const list = await call('GET', '/api/credentials', OWNER);
+  assert.ok(list.body.credentials.length >= 1);
+  const active = list.body.credentials.find(c => c.status === 'active');
+  const r = await call('DELETE', `/api/credentials/${active.id}`, OWNER);
+  assert.equal(r.body.credential.status, 'revoked');
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });

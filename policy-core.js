@@ -1,6 +1,6 @@
 const BLANK = {
   sites: [], doorGroups: [], userGroups: [], users: [], schedules: [],
-  holidays: [], assignments: [], roles: [], auditLog: [],
+  holidays: [], assignments: [], roles: [], auditLog: [], credentials: [],
 };
 
 const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;

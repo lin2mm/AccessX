@@ -5,6 +5,7 @@ const { getDriver, availableVendors } = require('./drivers');
 const mirror = require('./mirror');
 const { createAuth, authStatus: getAuthStatus } = require('./auth');
 const acl = require('./acl');
+const creds = require('./credentials-core');
 
 const app = express();
 app.use(express.json());
@@ -216,14 +217,53 @@ for (const coll of ['sites','doorGroups','userGroups','users','schedules','assig
 // ---- Credentials -------------------------------------------------
 app.post('/api/passcode', async (req, res) => {
   try {
-    const { lockId, name, type = 3, startDate, endDate } = req.body;
+    const db = acl.load();
+    const { lockId, name, userId, startAt, endAt, acknowledgeScheduleGap } = req.body || {};
+    if (!rbac.canAccessLock(db, req.operator, lockId)) return forbiddenSite(res, lockId);
+    // ★ Policy check BEFORE the lock gets a code — same rule as remote unlock.
+    const plan = creds.planPasscode(db, { userId, lockId, startAt, endAt, acknowledgeScheduleGap: acknowledgeScheduleGap === true });
+    if (!plan.ok) {
+      acl.audit(db, 'passcode.denied', `lock ${lockId} user ${userId}: ${plan.error}`, actor(req));
+      acl.save(db);
+      const { ok: _ok, status, ...rest } = plan;
+      return res.status(status).json({ ok: false, ...rest });
+    }
+    const c = plan.credential;
+    const label = String(name || `AccessX ${userId}`).slice(0, 100);
     let out;
     if (DEMO) out = { keyboardPwd: String(Math.floor(100000 + Math.random()*899999)), keyboardPwdId: Date.now() };
-    else out = await tt.createPasscode({ lockId, keyboardPwdName: name, keyboardPwdType: type, startDate, endDate });
-    const db = acl.load();
-    acl.audit(db, 'passcode.create', `lock ${lockId} "${name}"`);
+    else out = await tt.createPasscode({
+      lockId: c.lockId, keyboardPwdName: label, keyboardPwdType: 3,
+      startDate: Date.parse(c.startAt), endDate: Date.parse(c.endAt),
+    });
+    const entry = creds.register(db, c, { issuedBy: actor(req), vendorRef: out.keyboardPwdId, code: out.keyboardPwd });
+    acl.audit(db, 'passcode.create',
+      `${entry.id} lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt} enforcement=${c.enforcement}` +
+      (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), actor(req));
     acl.save(db);
-    ok(res, { passcode: out });
+    // The full code is returned exactly once and never stored.
+    ok(res, { passcode: out, credential: entry, warnings: plan.warnings });
+  } catch (e) { fail(res, e); }
+});
+
+app.get('/api/credentials', (req, res) => {
+  const db = acl.load();
+  const visible = (db.credentials || []).filter(c => rbac.canAccessLock(db, req.operator, c.lockId));
+  const ids = new Set(visible.map(c => c.id));
+  ok(res, { credentials: visible, review: creds.reviewCredentials(db).filter(f => ids.has(f.id)) });
+});
+
+app.delete('/api/credentials/:id', async (req, res) => {
+  try {
+    const db = acl.load();
+    const cred = (db.credentials || []).find(c => c.id === req.params.id);
+    if (!cred) return res.status(404).json({ ok: false, error: 'not found' });
+    if (!rbac.canAccessLock(db, req.operator, cred.lockId)) return forbiddenSite(res, cred.lockId);
+    if (!DEMO && cred.type === 'passcode' && cred.vendorRef) await tt.deletePasscode(cred.lockId, cred.vendorRef);
+    creds.revoke(db, cred.id, { revokedBy: actor(req), reason: String((req.body && req.body.reason) || 'manual').slice(0, 200) });
+    acl.audit(db, 'credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId}`, actor(req));
+    acl.save(db);
+    ok(res, { credential: cred });
   } catch (e) { fail(res, e); }
 });
 
