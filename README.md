@@ -1,7 +1,10 @@
 # AccessX demo
 
 AccessX is an access-control demo with a browser-based PWA. The local Express
-server and Cloudflare Worker both use demo data and do not control physical locks.
+server and Cloudflare Worker run the **same API core** (`api-core.js`) over the
+same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). Both
+use demo data and do not control physical locks. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
 ## Run locally
 
@@ -9,6 +12,11 @@ server and Cloudflare Worker both use demo data and do not control physical lock
 npm ci
 npm start
 ```
+
+Requires Node 22+ (`node:sqlite`). State lives in `DATA_DIR/accessx.sqlite`;
+migrations in `migrations/` are applied automatically on start. An older
+install's `DATA_DIR/acl.json` + `audit.jsonl` are imported once (the audit
+chain is verified and carried over) and renamed to `*.migrated`.
 
 The demo serves read-only API data by default. Set `ADMIN_TOKEN` in the process
 environment to enable writes; the browser's Admin token field keeps the token
@@ -34,7 +42,9 @@ operations are intentionally not enabled in the Worker.
    ```
 
 3. Apply the schema locally before `npm run dev:cloudflare`, or remotely before
-   deployment:
+   deployment (**always migrate before deploying new code**; `0003` moves the
+   old JSON blob into tables on the first request and copies the audit chain
+   unchanged):
 
    ```sh
    npm run cf:db:migrate:local
@@ -48,28 +58,34 @@ operations are intentionally not enabled in the Worker.
    npm run cf:deploy
    ```
 
-Do not enable public writes. For live lock data, this prototype still needs
-role-based authorization, stronger audit controls, and a separate production
-security review.
+   The Worker's cron trigger (`*/15 * * * *`) runs the credential reconciler.
+
+Do not enable public writes. For live lock data, this prototype still needs a
+separate production security review.
 
 ## Authentication and roles
 
 Operators (people who administer the system) are separate from door users.
 
-- `ADMIN_TOKEN` — an implicit **Account Owner** (all permissions, all sites).
-- `OPERATORS` — JSON array of additional operators, each with a role and an
-  optional site scope. Only the SHA-256 of each token is stored:
-
-  ```sh
-  npm run operator:new -- --id op_gym --name "Gym manager" --role r_manager --sites site_gym
-  # prints the token once + the JSON entry to add to OPERATORS
-  ```
+- **In the app (normal path):** owners create operators with
+  `POST /api/operators {name, role, siteIds}`. The token is returned once;
+  only its SHA-256 is stored. `DELETE /api/operators/:id` revokes instantly.
+  Nobody can grant permissions or sites they do not hold themselves.
+- **Bootstrap:** `ADMIN_TOKEN` is the default tenant's owner; `OPERATORS` (env
+  JSON, `npm run operator:new`) adds fixed operators. Use these to get in,
+  then create real operators in the app.
+- **Tenants:** with `PLATFORM_TOKEN` set, `POST /api/tenants {name}` creates an
+  isolated tenant and returns its owner token once. Every request is bound to
+  the operator's tenant; data, audit chains and lock fleets never cross.
 
 - Built-in roles: `r_owner`, `r_manager` (site manager), `r_installer`, `r_view`
   (auditor). Every API route maps to one permission in `rbac-core.js`; routes
   not listed there require the owner (fail closed).
 - Site-scoped operators only see, unlock, issue codes for and read records of
-  doors at their sites.
+  doors at their sites. They see people with at least one group at their sites
+  and may change/remove only people whose groups are **all** at their sites.
+  Their audit view shows their own actions.
+- A remote unlock without a `userId` (operator override) requires a `reason`.
 - Demo mode allows anonymous read-only access (`AUTH_OPEN_READS`). Writes always
   need a token. Failed token attempts are rate-limited per client IP.
 
@@ -80,16 +96,25 @@ Operators (people who administer the system) are separate from door users.
 - **No bypass through credentials** — `POST /api/passcode` requires a person and
   a rule that grants the door. If the rule has a daily schedule the lock cannot
   enforce, the API returns `409` until the operator acknowledges the gap.
-  Every credential is registered (the full code is never stored), and
-  `GET /api/credentials` flags codes current policy would no longer issue.
+  Every credential is registered (the full code is never stored).
+- **Access removal is automatic** — suspending/deleting a person or removing a
+  rule revokes affected credentials at once (reconciler, `reconcile-core.js`),
+  and a timer/cron re-checks every 15 minutes (`RECONCILE_INTERVAL_MIN`, 0 =
+  off). Locks without a gateway get `pending_removal` until someone confirms
+  on site (`POST /api/credentials/:id/confirm-removed`). Vendor failures are
+  audited and retried. `POST /api/reconcile {dryRun:true}` previews.
 - **Enforcement map** — `GET /api/compile` reports, per rule and per lock,
   whether the rule is enforced by the lock (`lock`), depends on the cloud
   pushing changes through a gateway (`synced`), or only applies to remote
   unlocks (`cloud`). It also flags daylight-saving drift on fixed-offset lock clocks.
-- **Tamper-evident audit** — hash-chained, append-only (`DATA_DIR/audit.jsonl`
-  locally; D1 `audit_log` with UPDATE/DELETE-blocking triggers on Cloudflare).
+- **Tamper-evident audit** — one hash chain per tenant in `audit_events`,
+  written in the same transaction as the change, with UPDATE/DELETE-blocking
+  triggers.
   `GET /api/audit/verify` checks the chain and returns the head hash; export it
   regularly to storage the app cannot write to.
+- **GDPR-ready audit** — entries about people carry ids only, so deleting a
+  person erases their personal data without breaking the chain.
+  `GET /api/users/:id/export` answers a subject access request.
 - **Input validation + strict CSP** — collection writes are allow-listed and
   type-checked; the UI escapes all data and runs with `script-src 'self'`.
 
@@ -97,13 +122,13 @@ Operators (people who administer the system) are separate from door users.
 
 - `data/*.json` are read-only seeds. Runtime state lives in `DATA_DIR`
   (default `data/runtime/`, git-ignored).
-- `npm test` — unit + in-process API tests.
+- `npm test` — unit, storage, tenancy and in-process API tests.
 - `npm run test:worker` — smoke test against a running `wrangler dev`
-  (`BASE`, `OWNER`, `GYM`, `AUDIT` env vars; see `support/worker-smoke.js`).
+  (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM` env vars; see `support/worker-smoke.js`).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after
-  pulling — `0002_audit_log.sql` adds the audit table.
+  pulling — `0003_multitenant.sql` adds the relational multi-tenant schema.
 
 This is still a prototype, not a production access-control service. Before
-connecting real locks or real user data: move state to a real database with
-multi-tenancy, verify TTLock capability flags per lock model, anchor the audit
-head externally, and complete an independent security review.
+connecting real locks or real user data: per-tenant vendor accounts, verify
+TTLock capability flags per lock model, anchor the audit head externally, move
+tokens to HttpOnly sessions/SSO, and complete an independent security review.
