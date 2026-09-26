@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000028">
+<title>Axess — Access Control</title>
+<link rel="manifest" href="manifest.json">
+<style>
+/* ============================================================
+   Siemens iX / Element design tokens (Classic Dark)
+   Source: element.siemens.io/fundamentals/colors/color-palette
+   NOTE: these hexes are Siemens brand colours. Fine for an
+   internal prototype; must be re-tokenised before commercial use.
+   ============================================================ */
+:root{
+  /* brand */
+  --petrol:#009999; --light-petrol:#00C1B6; --coral:#00CCCC;
+  --teal:#005159; --teal90:#196269; --focus:#199FFF;
+  /* deep-blue neutral ramp */
+  --db900:#000028; --db875:#12122E; --db850:#161632; --db800:#23233C;
+  --db775:#2D2D45; --db750:#333353; --db700:#40405E; --db650:#4C4C68;
+  --db600:#66667E; --db500:#7D8099; --db400:#9999A9; --db300:#B3B3BE;
+  --db100:#E5E5E9;
+  /* status */
+  --green:#4DD384; --green7:#1C703F; --bold-green:#00FFB9;
+  --yellow:#FFD732; --orange:#FF9000; --red:#D72339; --red3:#FF8E9C;
+  --blue:#206ED9;
+  /* semantic (dark theme mapping) */
+  --bg:var(--db900); --surface:var(--db850); --surface2:var(--db800);
+  --line:var(--db650); --txt:#FFFFFF; --txt2:var(--db300); --txt3:var(--db500);
+  --action:var(--coral); --action-hover:var(--bold-green); --action-txt:var(--db900);
+  --rad:4px; /* Siemens iX uses tight radii */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);
+  font:14px/1.5 "Siemens Sans","Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif;
+  padding-bottom:76px;-webkit-font-smoothing:antialiased}
+/* --- header --- */
+header{background:var(--db850);border-bottom:1px solid var(--line);
+  padding:0 16px;position:sticky;top:0;z-index:20}
+.hbar{display:flex;align-items:center;gap:12px;height:56px}
+.mark{width:4px;height:26px;background:var(--petrol);border-radius:1px;flex:0 0 4px}
+h1{font-size:16px;font-weight:700;letter-spacing:.2px}
+.sub{color:var(--txt3);font-size:11px}
+.pill{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;
+  font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+  background:var(--teal);color:var(--coral);border:1px solid var(--teal90)}
+main{padding:16px;max-width:1180px;margin:0 auto}
+.view{display:none}.view.on{display:block}
+/* --- card --- */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--rad);
+  padding:16px;margin-bottom:12px}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--txt3);
+  margin-bottom:12px;font-weight:700}
+.grid{display:grid;gap:10px}
+@media(min-width:720px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+/* --- door tile --- */
+.door{background:var(--surface2);border:1px solid var(--line);border-left:3px solid var(--petrol);
+  border-radius:var(--rad);padding:12px 14px;display:flex;justify-content:space-between;
+  align-items:center;gap:12px}
+.door.warn{border-left-color:var(--orange)}
+.door.off{border-left-color:var(--red)}
+.door b{display:block;font-size:14px;font-weight:600}
+.meta{color:var(--txt3);font-size:11px;margin-top:2px}
+/* --- buttons (iX: square, coral primary on dark) --- */
+button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:var(--rad);
+  padding:8px 16px;font-weight:600;font-size:13px;transition:.12s}
+.btn{background:var(--action);color:var(--action-txt)}
+.btn:hover{background:var(--action-hover)}
+.btn2{background:transparent;color:var(--action);border-color:var(--action)}
+.btn2:hover{background:var(--db800)}
+.btn.sm{padding:6px 12px;font-size:12px}
+button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.bat{font-weight:700;font-size:12px}
+.bat.hi{color:var(--green)}.bat.mid{color:var(--yellow)}.bat.lo{color:var(--red3)}
+/* --- bottom nav --- */
+nav{position:fixed;bottom:0;left:0;right:0;background:var(--db850);
+  border-top:1px solid var(--line);display:flex;padding:0 0 env(safe-area-inset-bottom);z-index:30}
+nav button{flex:1;background:0;color:var(--txt3);font-size:10px;font-weight:600;
+  padding:9px 2px 8px;border-radius:0;border-top:2px solid transparent;letter-spacing:.3px}
+nav button.on{color:var(--coral);border-top-color:var(--coral);background:var(--db800)}
+nav .ic{display:block;font-size:17px;margin-bottom:2px}
+/* --- table --- */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--txt3);font-weight:700;font-size:10px;text-transform:uppercase;
+  letter-spacing:.8px;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px;border-bottom:1px solid var(--db800)}
+tr:last-child td{border-bottom:0}
+/* --- form --- */
+select,input,textarea{background:var(--db800);border:1px solid var(--line);color:var(--txt);
+  padding:9px 11px;border-radius:var(--rad);font:inherit;width:100%}
+select:focus,input:focus,textarea:focus{outline:0;border-color:var(--coral)}
+label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
+  font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+/* --- result banner (iX status style: left bar) --- */
+.res{padding:12px 14px;border-radius:var(--rad);margin-top:12px;font-size:13px;
+  border-left:3px solid}
+.res.y{background:#0d2a1e;border-left-color:var(--green);color:#C1F2D6}
+.res.n{background:#2b0d14;border-left-color:var(--red);color:var(--red3)}
+.chip{display:inline-block;background:var(--db800);border:1px solid var(--line);
+  border-radius:2px;padding:2px 7px;font-size:10.5px;color:var(--txt2);margin:2px 3px 2px 0}
+.kpi{text-align:center;padding:14px 8px;background:var(--surface2);
+  border:1px solid var(--line);border-radius:var(--rad)}
+.kpi .n{font-size:26px;font-weight:700;line-height:1;color:var(--coral)}
+.kpi .n.warn{color:var(--orange)}.kpi .n.bad{color:var(--red3)}.kpi .n.ok{color:var(--green)}
+.kpi .l{font-size:10px;color:var(--txt3);margin-top:6px;text-transform:uppercase;letter-spacing:.7px}
+.tag{font-size:9.5px;padding:2px 6px;border-radius:2px;background:var(--teal);
+  color:var(--coral);font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.tag.g{background:var(--green7);color:#C1F2D6}
+.tag.r{background:#4a0f1a;color:var(--red3)}
+.tag.o{background:#5c2d00;color:#FFCD88}
+.empty{color:var(--txt3);text-align:center;padding:20px;font-size:12px}
+.sched{font-size:11px;color:var(--txt3);margin-top:4px}
+.hint{font-size:11.5px;color:var(--txt3);margin-bottom:10px;line-height:1.55}
+/* --- AI assistant --- */
+.ai{background:linear-gradient(180deg,var(--db800),var(--db850));
+  border:1px solid var(--teal90);border-left:3px solid var(--coral);
+  border-radius:var(--rad);padding:14px}
+.ai .q{display:flex;gap:8px;margin-top:10px}
+.ai .q input{flex:1}
+.bubble{background:var(--db800);border:1px solid var(--line);border-radius:var(--rad);
+  padding:11px 13px;margin-top:10px;font-size:13px;line-height:1.6}
+.bubble.me{background:var(--teal);border-color:var(--teal90);color:#D1FFF2}
+.sugg{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.sugg button{background:var(--db800);border:1px solid var(--line);color:var(--txt2);
+  font-size:11px;padding:5px 10px;font-weight:500}
+.sugg button:hover{border-color:var(--coral);color:var(--coral)}
+</style>
+</head>
+<body>
+<header>
+  <div class="hbar">
+    <div class="mark"></div>
+    <div style="flex:1">
+      <h1>Axess <span style="font-weight:400;color:var(--txt3)">| Access Control</span></h1>
+      <div class="sub">Siemens iX theme · <span class="pill" id="mode">…</span></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- DOORS -->
+  <section id="v-doors" class="view on">
+    <div class="card"><h2>Fleet status</h2><div class="grid c3" id="kpis"></div></div>
+    <div class="card"><h2>Doors</h2><div class="grid c2" id="doors"><div class="empty">Loading…</div></div></div>
+  </section>
+
+  <!-- ACCESS -->
+  <section id="v-access" class="view">
+    <div class="card">
+      <h2>Access decision engine</h2>
+      <div class="hint">Ask the policy engine whether a person may open a door at a given moment — and see the exact rule path behind the answer.</div>
+      <label>Person</label><select id="e-user"></select>
+      <label>Door</label><select id="e-door"></select>
+      <label>Date &amp; time (UTC)</label><input type="datetime-local" id="e-when">
+      <div style="margin-top:14px"><button class="btn" onclick="evaluate()">Evaluate access</button></div>
+      <div id="e-res"></div>
+    </div>
+    <div class="card"><h2>Access rules</h2><div id="rules"></div></div>
+  </section>
+
+  <!-- AI -->
+  <section id="v-ai" class="view">
+    <div class="card">
+      <h2>Access copilot</h2>
+      <div class="hint">Natural-language control and diagnostics. Type an instruction — the copilot maps it to a policy action and explains what it will do <b>before</b> executing.</div>
+      <div class="ai">
+        <div id="chat"></div>
+        <div class="sugg">
+          <button onclick="ask(this.textContent)">Why was Sarah denied at 9pm?</button>
+          <button onclick="ask(this.textContent)">Which doors need a battery visit?</button>
+          <button onclick="ask(this.textContent)">Give the cleaners Friday evening access</button>
+          <button onclick="ask(this.textContent)">Anything unusual this week?</button>
+          <button onclick="ask(this.textContent)">Who can open the Server Room?</button>
+        </div>
+        <div class="q">
+          <input id="ai-in" placeholder="Ask or instruct…" onkeydown="if(event.key==='Enter')ask()">
+          <button class="btn" onclick="ask()">Send</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PEOPLE -->
+  <section id="v-people" class="view">
+    <div class="card"><h2>People</h2><div id="people"></div></div>
+    <div class="card"><h2>User groups</h2><div id="ugroups"></div></div>
+    <div class="card"><h2>Schedules</h2><div id="scheds"></div></div>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section id="v-log" class="view">
+    <div class="card">
+      <h2>Door audit trail</h2>
+      <label>Door</label><select id="r-door" onchange="loadRecords()"></select>
+      <div style="overflow-x:auto;margin-top:10px"><table id="recs"></table></div>
+    </div>
+    <div class="card"><h2>System activity</h2><div style="overflow-x:auto"><table id="alog"></table></div></div>
+  </section>
+</main>
+
+<nav>
+  <button class="on" data-v="doors"><span class="ic">▣</span>Doors</button>
+  <button data-v="access"><span class="ic">⛨</span>Access</button>
+  <button data-v="ai"><span class="ic">✦</span>Copilot</button>
+  <button data-v="people"><span class="ic">◉</span>People</button>
+  <button data-v="log"><span class="ic">≡</span>Activity</button>
+</nav>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const api=(u,o)=>fetch(u,o).then(r=>r.json());
+let DOORS=[],USERS=[];
+
+$$('nav button').forEach(b=>b.onclick=()=>{
+  $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
+});
+const batClass=n=>n>50?'hi':n>25?'mid':'lo';
+
+async function init(){
+  const st=await api('/api/status');
+  $('#mode').textContent=st.mode.startsWith('DEMO')?'Demo data':'Live';
+  const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
+  $('#e-when').value=now.toISOString().slice(0,16);
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();
+  addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
+}
+async function loadDoors(){
+  const d=await api('/api/doors');DOORS=d.doors||[];
+  $('#doors').innerHTML=DOORS.map(l=>{
+    const cls=!l.hasGateway?'off':(l.electricQuantity<=25?'warn':'');
+    return `<div class="door ${cls}">
+      <div><b>${l.lockAlias}</b>
+        <div class="meta">${l.site||'—'} ${l.doorGroup?'· '+l.doorGroup:''}</div>
+        <div class="meta"><span class="bat ${batClass(l.electricQuantity)}">${l.electricQuantity}% battery</span>
+        ${l.hasGateway?'<span class="tag g" style="margin-left:6px">online</span>':'<span class="tag r" style="margin-left:6px">no gateway</span>'}</div>
+      </div><button class="btn sm" onclick="unlock(${l.lockId},this)">Unlock</button></div>`}).join('');
+  const opts=DOORS.map(l=>`<option value="${l.lockId}">${l.lockAlias}</option>`).join('');
+  $('#e-door').innerHTML=opts;$('#r-door').innerHTML=opts;loadRecords();
+}
+async function loadHealth(){
+  const h=await api('/api/health');
+  $('#kpis').innerHTML=`
+    <div class="kpi"><div class="n">${h.total}</div><div class="l">Doors</div></div>
+    <div class="kpi"><div class="n ${h.lowBattery.length?'warn':'ok'}">${h.lowBattery.length}</div><div class="l">Low battery</div></div>
+    <div class="kpi"><div class="n ${h.offline.length?'bad':'ok'}">${h.offline.length}</div><div class="l">No gateway</div></div>`;
+}
+async function unlock(id,btn){
+  btn.textContent='…';
+  const r=await api('/api/doors/'+id+'/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  btn.textContent=r.ok?'Sent':'Denied';setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
+}
+async function loadPeople(){
+  const [u,g,s]=await Promise.all([api('/api/users'),api('/api/userGroups'),api('/api/schedules')]);
+  USERS=u.users||[];
+  const gname=id=>(g.userGroups.find(x=>x.id===id)||{}).name||id;
+  $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th></tr>`+
+    USERS.map(p=>`<tr><td><b>${p.name}</b><div class="meta">${p.email||''}</div></td>
+    <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+gname(i)+'</span>').join('')}</td>
+    <td>${p.suspended?'<span class="tag r">suspended</span>':'<span class="tag g">active</span>'}
+    ${p.validTo?'<div class="meta">until '+p.validTo.slice(0,10)+'</div>':''}</td></tr>`).join('')+`</table>`;
+  $('#ugroups').innerHTML=g.userGroups.map(x=>`<span class="chip">${x.name}</span>`).join('');
+  $('#scheds').innerHTML=s.schedules.map(x=>`<div style="margin-bottom:10px"><b>${x.name}</b>
+    ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
+    <div class="sched">${(x.windows||[]).map(w=>'Days '+w.days.join(',')+' · '+w.from+'–'+w.to).join('<br>')}</div></div>`).join('');
+  $('#e-user').innerHTML=USERS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
+}
+async function loadRules(){
+  const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
+  const n=(arr,id)=>(arr.find(x=>x.id===id)||{}).name||'—';
+  $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th></tr>`+
+    a.assignments.map(r=>`<tr><td>${n(ug.userGroups,r.userGroupId)}</td>
+    <td>${n(dg.doorGroups,r.doorGroupId)}</td><td>${n(s.schedules,r.scheduleId)}</td></tr>`).join('')+`</table>`;
+}
+async function evaluate(){
+  const r=await api('/api/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({userId:$('#e-user').value,lockId:$('#e-door').value,when:new Date($('#e-when').value).toISOString()})});
+  const x=r.result;
+  $('#e-res').innerHTML=`<div class="res ${x.allowed?'y':'n'}">
+    <b style="font-size:14px;letter-spacing:.5px">${x.allowed?'ACCESS GRANTED':'ACCESS DENIED'}</b>
+    <div style="margin-top:5px">${x.reason}</div>
+    ${(x.path&&x.path.length)?'<div style="margin-top:8px;font-size:11.5px;opacity:.85">Rules evaluated:<br>'+
+      x.path.map(p=>`· ${p.group} → ${p.doorGroup} (${p.schedule}): ${p.reason}`).join('<br>')+'</div>':''}</div>`;
+}
+async function loadRecords(){
+  const id=$('#r-door').value;if(!id)return;
+  const r=await api('/api/records/'+id);
+  $('#recs').innerHTML=`<tr><th>When</th><th>Who</th><th>Method</th><th></th></tr>`+
+    (r.records||[]).map(x=>`<tr><td>${new Date(x.lockDate).toLocaleString()}</td>
+    <td>${x.username||'—'}</td><td>${x.typeLabel}</td>
+    <td>${x.success?'<span class="tag g">ok</span>':'<span class="tag r">failed</span>'}</td></tr>`).join('');
+}
+async function loadAudit(){
+  const r=await api('/api/audit');
+  $('#alog').innerHTML=`<tr><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr>`+
+    (r.log||[]).slice(0,25).map(x=>`<tr><td>${new Date(x.ts).toLocaleString()}</td>
+    <td>${x.actor}</td><td><span class="chip">${x.action}</span></td>
+    <td style="color:var(--txt3)">${(x.detail||'').slice(0,70)}</td></tr>`).join('');
+}
+/* ---- Copilot ---- */
+function addBubble(t,me){
+  const d=document.createElement('div');d.className='bubble'+(me?' me':'');d.innerHTML=t;
+  $('#chat').appendChild(d);d.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function ask(text){
+  const q=text||$('#ai-in').value.trim();if(!q)return;
+  $('#ai-in').value='';addBubble(q,true);
+  const r=await api('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
+  addBubble(r.answer||'—',false);
+}
+init();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>

@@ -1,0 +1,419 @@
+{
+  "sites": [
+    {
+      "id": "site_river",
+      "name": "Riverside Office",
+      "address": "12 Riverside Way, Bristol"
+    },
+    {
+      "id": "site_gym",
+      "name": "Northgate Gym",
+      "address": "4 Northgate, Leeds"
+    },
+    {
+      "id": "site_store",
+      "name": "Selfstore Depot",
+      "address": "Unit 7, Enfield"
+    }
+  ],
+  "doorGroups": [
+    {
+      "id": "dg_pub",
+      "siteId": "site_river",
+      "name": "Public Doors",
+      "lockIds": [
+        9001
+      ]
+    },
+    {
+      "id": "dg_sec",
+      "siteId": "site_river",
+      "name": "Secure Areas",
+      "lockIds": [
+        9002
+      ]
+    },
+    {
+      "id": "dg_ops",
+      "siteId": "site_river",
+      "name": "Operations",
+      "lockIds": [
+        9003,
+        9004
+      ]
+    },
+    {
+      "id": "dg_gym",
+      "siteId": "site_gym",
+      "name": "Gym Member Doors",
+      "lockIds": [
+        9101
+      ]
+    },
+    {
+      "id": "dg_gstaff",
+      "siteId": "site_gym",
+      "name": "Gym Staff Only",
+      "lockIds": [
+        9102
+      ]
+    },
+    {
+      "id": "dg_store",
+      "siteId": "site_store",
+      "name": "Storage Gates",
+      "lockIds": [
+        9201
+      ]
+    }
+  ],
+  "userGroups": [
+    {
+      "id": "ug_staff",
+      "name": "Office Staff"
+    },
+    {
+      "id": "ug_it",
+      "name": "IT Admins"
+    },
+    {
+      "id": "ug_clean",
+      "name": "Cleaning Contractor"
+    },
+    {
+      "id": "ug_member",
+      "name": "Gym Members"
+    },
+    {
+      "id": "ug_gymstaff",
+      "name": "Gym Staff"
+    },
+    {
+      "id": "ug_tenant",
+      "name": "Storage Tenants"
+    }
+  ],
+  "users": [
+    {
+      "id": "u1",
+      "name": "Sarah Kelly",
+      "email": "sarah@acme.co.uk",
+      "groupIds": [
+        "ug_staff"
+      ],
+      "suspended": false
+    },
+    {
+      "id": "u2",
+      "name": "Dev Patel",
+      "email": "dev@acme.co.uk",
+      "groupIds": [
+        "ug_staff",
+        "ug_it"
+      ],
+      "suspended": false
+    },
+    {
+      "id": "u3",
+      "name": "CleanCo Ltd",
+      "email": "ops@cleanco.uk",
+      "groupIds": [
+        "ug_clean"
+      ],
+      "suspended": false,
+      "validTo": "2026-11-18T13:01:33.315Z"
+    },
+    {
+      "id": "u4",
+      "name": "Tom Nguyen",
+      "email": "tom@x.com",
+      "groupIds": [
+        "ug_member"
+      ],
+      "suspended": false
+    },
+    {
+      "id": "u5",
+      "name": "Ex-Employee",
+      "email": "gone@acme.co.uk",
+      "groupIds": [
+        "ug_staff"
+      ],
+      "suspended": true
+    }
+  ],
+  "schedules": [
+    {
+      "id": "sch_office",
+      "name": "Office Hours",
+      "denyOnHolidays": true,
+      "windows": [
+        {
+          "days": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "from": "08:00",
+          "to": "18:30"
+        }
+      ]
+    },
+    {
+      "id": "sch_24",
+      "name": "24/7",
+      "denyOnHolidays": false,
+      "windows": [
+        {
+          "days": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "from": "00:00",
+          "to": "23:59"
+        }
+      ]
+    },
+    {
+      "id": "sch_clean",
+      "name": "Cleaning Window",
+      "denyOnHolidays": false,
+      "windows": [
+        {
+          "days": [
+            1,
+            3,
+            5
+          ],
+          "from": "18:00",
+          "to": "21:00"
+        }
+      ]
+    },
+    {
+      "id": "sch_night",
+      "name": "Night Shift",
+      "denyOnHolidays": false,
+      "windows": [
+        {
+          "days": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "from": "22:00",
+          "to": "06:00"
+        }
+      ]
+    }
+  ],
+  "holidays": [
+    {
+      "date": "2026-08-23",
+      "name": "Bank Holiday"
+    }
+  ],
+  "assignments": [
+    {
+      "id": "as1",
+      "userGroupId": "ug_staff",
+      "doorGroupId": "dg_pub",
+      "scheduleId": "sch_office"
+    },
+    {
+      "id": "as2",
+      "userGroupId": "ug_staff",
+      "doorGroupId": "dg_ops",
+      "scheduleId": "sch_office"
+    },
+    {
+      "id": "as3",
+      "userGroupId": "ug_it",
+      "doorGroupId": "dg_pub",
+      "scheduleId": "sch_24"
+    },
+    {
+      "id": "as4",
+      "userGroupId": "ug_it",
+      "doorGroupId": "dg_sec",
+      "scheduleId": "sch_24"
+    },
+    {
+      "id": "as5",
+      "userGroupId": "ug_clean",
+      "doorGroupId": "dg_ops",
+      "scheduleId": "sch_clean"
+    },
+    {
+      "id": "as6",
+      "userGroupId": "ug_clean",
+      "doorGroupId": "dg_pub",
+      "scheduleId": "sch_clean"
+    },
+    {
+      "id": "as7",
+      "userGroupId": "ug_member",
+      "doorGroupId": "dg_gym",
+      "scheduleId": "sch_24"
+    },
+    {
+      "id": "as8",
+      "userGroupId": "ug_gymstaff",
+      "doorGroupId": "dg_gstaff",
+      "scheduleId": "sch_24"
+    },
+    {
+      "id": "as9",
+      "userGroupId": "ug_tenant",
+      "doorGroupId": "dg_store",
+      "scheduleId": "sch_24"
+    }
+  ],
+  "roles": [
+    {
+      "id": "r_owner",
+      "name": "Account Owner",
+      "perms": [
+        "*"
+      ]
+    },
+    {
+      "id": "r_manager",
+      "name": "Site Manager",
+      "perms": [
+        "door.read",
+        "door.unlock",
+        "user.manage",
+        "report.read"
+      ]
+    },
+    {
+      "id": "r_installer",
+      "name": "Installer",
+      "perms": [
+        "door.read",
+        "door.commission",
+        "diag.read"
+      ]
+    },
+    {
+      "id": "r_view",
+      "name": "Auditor",
+      "perms": [
+        "door.read",
+        "report.read"
+      ]
+    }
+  ],
+  "auditLog": [
+    {
+      "id": "log_x8c5fd8",
+      "ts": "2026-09-07T15:04:22.523Z",
+      "actor": "u2",
+      "action": "unlock.granted",
+      "detail": "lock 9002 user u2"
+    },
+    {
+      "id": "log_ut3fgs8",
+      "ts": "2026-09-07T15:04:22.406Z",
+      "actor": "u2",
+      "action": "unlock.granted",
+      "detail": "lock 9002 user u2"
+    },
+    {
+      "id": "log_md2ue1y",
+      "ts": "2026-09-07T15:03:45.503Z",
+      "actor": "u2",
+      "action": "unlock.granted",
+      "detail": "lock 9002 user u2"
+    },
+    {
+      "id": "log_10fenav",
+      "ts": "2026-09-07T15:02:42.030Z",
+      "actor": "u2",
+      "action": "unlock.granted",
+      "detail": "lock 9002 user u2"
+    },
+    {
+      "id": "log_l6blvfa",
+      "ts": "2026-08-25T16:00:11.342Z",
+      "actor": "u5",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u5: user suspended"
+    },
+    {
+      "id": "log_bhri5fv",
+      "ts": "2026-08-25T16:00:11.308Z",
+      "actor": "u3",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u3: no access rule grants this door"
+    },
+    {
+      "id": "log_315ax4j",
+      "ts": "2026-08-25T16:00:11.273Z",
+      "actor": "u2",
+      "action": "unlock.granted",
+      "detail": "lock 9002 user u2"
+    },
+    {
+      "id": "log_yuoigh0",
+      "ts": "2026-08-25T16:00:11.239Z",
+      "actor": "u1",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u1: no access rule grants this door"
+    },
+    {
+      "id": "log_0hqqdqg",
+      "ts": "2026-08-25T15:59:56.275Z",
+      "actor": "u3",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u3: no access rule grants this door"
+    },
+    {
+      "id": "log_p3b8g5p",
+      "ts": "2026-08-25T15:59:56.235Z",
+      "actor": "u1",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u1: no access rule grants this door"
+    },
+    {
+      "id": "log_s1daa0t",
+      "ts": "2026-08-20T13:18:50.001Z",
+      "actor": "u1",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u1: no access rule grants this door"
+    },
+    {
+      "id": "log_g77ca8x",
+      "ts": "2026-08-20T13:01:52.946Z",
+      "actor": "u1",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u1: no access rule grants this door"
+    },
+    {
+      "id": "log_lpotglw",
+      "ts": "2026-08-20T13:01:52.931Z",
+      "actor": "u1",
+      "action": "unlock.denied",
+      "detail": "lock 9002 user u1: no access rule grants this door"
+    },
+    {
+      "id": "log_3dcunuu",
+      "ts": "2026-08-20T13:01:33.315Z",
+      "actor": "system",
+      "action": "seed",
+      "detail": "demo dataset created"
+    }
+  ]
+}
