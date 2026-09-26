@@ -73,27 +73,33 @@
   "userGroups": [
     {
       "id": "ug_staff",
-      "name": "Office Staff"
+      "name": "Office Staff",
+      "siteId": "site_river"
     },
     {
       "id": "ug_it",
-      "name": "IT Admins"
+      "name": "IT Admins",
+      "siteId": "site_river"
     },
     {
       "id": "ug_clean",
-      "name": "Cleaning Contractor"
+      "name": "Cleaning Contractor",
+      "siteId": "site_river"
     },
     {
       "id": "ug_member",
-      "name": "Gym Members"
+      "name": "Gym Members",
+      "siteId": "site_gym"
     },
     {
       "id": "ug_gymstaff",
-      "name": "Gym Staff"
+      "name": "Gym Staff",
+      "siteId": "site_gym"
     },
     {
       "id": "ug_tenant",
-      "name": "Storage Tenants"
+      "name": "Storage Tenants",
+      "siteId": "site_store"
     }
   ],
   "users": [

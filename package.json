@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --no-warnings --test --test-concurrency=1",
     "dev:cloudflare": "npx wrangler dev",
     "cf:db:migrate:local": "npx wrangler d1 migrations apply accessx-demo --local",
     "cf:deploy": "npx wrangler deploy",
