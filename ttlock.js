@@ -13,8 +13,20 @@ const REGION = {
   cn: { api: 'https://api.sciener.com',  oauth: 'https://api.sciener.com'  },
 };
 
+/** TTLock answers HTTP 200 with {errcode, errmsg}; keep the code for callers. */
+class TTLockError extends Error {
+  constructor(path, errcode, errmsg) {
+    super(`TTLock ${path} ${errcode}: ${errmsg}`);
+    this.errcode = Number(errcode);
+    this.path = path;
+  }
+}
+// https://euopen.ttlock.com/doc/api/error
+const ERR = { NO_GATEWAY: -2012, RATE_LIMIT: 30006, CLOCK_SKEW: 80000 };
+
 class TTLock {
   constructor(opts = {}) {
+    this.fetch = opts.fetch || ((...a) => globalThis.fetch(...a));
     this.clientId = opts.clientId || process.env.TTLOCK_CLIENT_ID || '';
     this.clientSecret = opts.clientSecret || process.env.TTLOCK_CLIENT_SECRET || '';
     this.username = opts.username || process.env.TTLOCK_USER || '';
@@ -39,7 +51,7 @@ class TTLock {
       username: this.username,
       password: TTLock.md5(this.password),
     });
-    const r = await fetch(`${this.base}/oauth2/token`, {
+    const r = await this.fetch(`${this.base}/oauth2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
@@ -62,9 +74,9 @@ class TTLock {
     const init = method === 'GET'
       ? { method }
       : { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: qs };
-    const r = await fetch(url, init);
+    const r = await this.fetch(url, init);
     const j = await r.json();
-    if (j.errcode) throw new Error(`TTLock ${path} ${j.errcode}: ${j.errmsg}`);
+    if (j.errcode) throw new TTLockError(path, j.errcode, j.errmsg);
     return j;
   }
 
@@ -91,8 +103,23 @@ class TTLock {
   listPasscodes(lockId, pageNo = 1, pageSize = 100) {
     return this.call('/v3/lock/listKeyboardPwd', { lockId, pageNo, pageSize });
   }
-  deletePasscode(lockId, keyboardPwdId) {
-    return this.call('/v3/keyboardPwd/delete', { lockId, keyboardPwdId }, 'POST');
+  /**
+   * deleteType: 1 = via the app over Bluetooth (TTLock's DEFAULT — the cloud
+   * then only forgets the code and it keeps working on the lock!),
+   * 2 = via gateway/WiFi, 3 = NB-IoT. A cloud-side revoke must send 2.
+   */
+  deletePasscode(lockId, keyboardPwdId, { deleteType = 2 } = {}) {
+    return this.call('/v3/keyboardPwd/delete', { lockId, keyboardPwdId, deleteType }, 'POST');
+  }
+  /** Is this passcode still registered on the lock? (pages through the list) */
+  async passcodeExists(lockId, keyboardPwdId, { maxPages = 20 } = {}) {
+    for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+      const r = await this.listPasscodes(lockId, pageNo, 100);
+      const list = r.list || [];
+      if (list.some(p => String(p.keyboardPwdId) === String(keyboardPwdId))) return true;
+      if (list.length < 100 || pageNo >= (r.pages || Infinity)) return false;
+    }
+    throw new Error(`passcode list for lock ${lockId} exceeds ${maxPages} pages; cannot verify`);
   }
 
   // ---- eKeys (mobile credentials) ------------------------------------
@@ -127,4 +154,4 @@ const RECORD_TYPES = {
   '-5': 'Face unlock', '-4': 'QR code unlock', 123: 'Network exception',
 };
 
-module.exports = { TTLock, RECORD_TYPES };
+module.exports = { TTLock, TTLockError, ERR, RECORD_TYPES };

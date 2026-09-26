@@ -107,11 +107,25 @@ async function execute(planned, { vendor, uow, snapshot, actor = ACTOR, now = Da
     if (!cred) continue;
     const why = action.reasons.join('; ');
     try {
-      if (action.remote && cred.type === 'passcode' && cred.vendorRef) await vendor.deletePasscode(cred.lockId, cred.vendorRef);
-      const status = action.type === 'expire' ? 'expired' : action.type === 'revoke' ? 'revoked' : 'pending_removal';
+      let note = '';
+      let type = action.type;
+      if (action.remote && cred.type === 'passcode' && cred.vendorRef) {
+        try {
+          const out = await vendor.deletePasscode(cred.lockId, cred.vendorRef);
+          if (out && out.alreadyGone) note = ' (already gone from the lock)';
+        } catch (error) {
+          // Lock turned out to be unreachable (gateway unbound/offline):
+          // same as an offline lock — someone has to remove it on site.
+          if (!(error && error.code === 'NO_GATEWAY') || action.type === 'pending_removal') throw error;
+          if (cred.status === 'pending_removal') { results.push({ ...action, ok: true, status: 'pending_removal', unchanged: true }); continue; }
+          type = 'pending_removal';
+          note = `; ${error.message}, on-site removal required`;
+        }
+      }
+      const status = type === 'expire' ? 'expired' : type === 'revoke' ? 'revoked' : 'pending_removal';
       uow.update('credentials', cred.id, { status, revokedAt: at, revokedBy: actor, revokeReason: why.slice(0, 200) });
       const verb = status === 'pending_removal' ? 'credential.pending_removal' : status === 'expired' ? 'credential.expire' : 'credential.auto_revoke';
-      uow.audit(verb, `${cred.id} lock ${cred.lockId} user ${cred.userId}: ${why}`, actor);
+      uow.audit(verb, `${cred.id} lock ${cred.lockId} user ${cred.userId}: ${why}${note}`, actor);
       results.push({ ...action, ok: true, status });
     } catch (error) {
       uow.audit('credential.revoke_failed', `${cred.id} lock ${cred.lockId}: ${String(error.message || error).slice(0, 160)}`, actor);
@@ -123,7 +137,7 @@ async function execute(planned, { vendor, uow, snapshot, actor = ACTOR, now = Da
     summary: {
       revoked: results.filter(r => r.ok && r.status === 'revoked').length,
       expired: results.filter(r => r.ok && r.status === 'expired').length,
-      pendingRemoval: results.filter(r => r.ok && r.status === 'pending_removal').length,
+      pendingRemoval: results.filter(r => r.ok && r.status === 'pending_removal' && !r.unchanged).length,
       failed: results.filter(r => !r.ok).length,
     },
   };
