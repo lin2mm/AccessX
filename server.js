@@ -3,7 +3,7 @@ const path = require('path');
 const { TTLock, RECORD_TYPES } = require('./ttlock');
 const { getDriver, availableVendors } = require('./drivers');
 const mirror = require('./mirror');
-const { requireAuth, authStatus } = require('./auth');
+const { createAuth, authStatus: getAuthStatus } = require('./auth');
 const acl = require('./acl');
 
 const app = express();
@@ -12,6 +12,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const tt = new TTLock();
 const DEMO = tt.demo;
+const authConfig = {
+  token: process.env.ADMIN_TOKEN || '',
+  openReads: process.env.AUTH_OPEN_READS === undefined
+    ? DEMO
+    : process.env.AUTH_OPEN_READS === '1',
+};
+const requireAuth = createAuth(authConfig);
+const authStatus = () => getAuthStatus(authConfig);
+
+app.get('/api/auth', (req,res)=>res.json({ ok: true, ...authStatus() }));
 
 /* ----------------------------------------------------------------- */
 /* Demo dataset — realistic commercial scenario                        */
@@ -101,7 +111,7 @@ const fail = (res, e) => res.status(500).json({ ok: false, error: String(e.messa
 
 app.use('/api', requireAuth);
 
-app.get('/api/auth', (req,res)=>ok(res,authStatus()));
+app.post('/api/auth/verify', (req,res)=>ok(res,{authenticated:true}));
 
 app.get('/api/status', (req, res) => ok(res, {
   mode: DEMO ? 'DEMO (no TTLock credentials set)' : 'LIVE (TTLock cloud)',

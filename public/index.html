@@ -41,6 +41,9 @@ header{background:var(--db850);border-bottom:1px solid var(--line);
   padding:0 16px;position:sticky;top:0;z-index:20}
 .hbar{display:flex;align-items:center;gap:12px;height:56px}
 .mark{width:4px;height:26px;background:var(--petrol);border-radius:1px;flex:0 0 4px}
+#admin-form{display:flex;align-items:center;gap:6px}
+#admin-token{width:150px;padding:6px 8px}
+#admin-status{color:var(--txt3);font-size:10px;white-space:nowrap}
 h1{font-size:16px;font-weight:700;letter-spacing:.2px}
 .sub{color:var(--txt3);font-size:11px}
 .pill{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;
@@ -55,6 +58,11 @@ main{padding:16px;max-width:1180px;margin:0 auto}
   margin-bottom:12px;font-weight:700}
 .grid{display:grid;gap:10px}
 @media(min-width:720px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){
+  .hbar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 0}
+  #admin-form{flex:1 0 100%}
+  #admin-token{flex:1;width:auto;min-width:0}
+}
 /* --- door tile --- */
 .door{background:var(--surface2);border:1px solid var(--line);border-left:3px solid var(--petrol);
   border-radius:var(--rad);padding:12px 14px;display:flex;justify-content:space-between;
@@ -136,6 +144,12 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <h1>Axess <span style="font-weight:400;color:var(--txt3)">| Access Control</span></h1>
       <div class="sub">Siemens iX theme · <span class="pill" id="mode">…</span></div>
     </div>
+    <form id="admin-form" autocomplete="off">
+      <input id="admin-token" type="password" aria-label="Admin token" autocomplete="current-password" placeholder="Admin token">
+      <button class="btn2 sm" type="submit">Unlock</button>
+      <button class="btn2 sm" id="admin-logout" type="button" hidden>Lock</button>
+      <span id="admin-status" aria-live="polite">Read-only</span>
+    </form>
   </div>
 </header>
 
@@ -210,8 +224,32 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const api=(u,o)=>fetch(u,o).then(r=>r.json());
+let adminToken='';
+const api=async(u,o={})=>{
+  const headers=new Headers(o.headers||{});
+  if(adminToken)headers.set('Authorization',`Bearer ${adminToken}`);
+  const r=await fetch(u,{...o,headers});
+  return r.json();
+};
 let DOORS=[],USERS=[];
+
+$('#admin-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const candidate=$('#admin-token').value;
+  const r=await fetch('/api/auth/verify',{method:'POST',headers:{Authorization:`Bearer ${candidate}`}});
+  const result=await r.json();
+  if(r.ok){
+    adminToken=candidate;$('#admin-token').value='';
+    $('#admin-status').textContent='Admin unlocked for this tab';
+    $('#admin-logout').hidden=false;
+    await init();
+  }else{
+    $('#admin-status').textContent=result.error||'Token rejected';
+  }
+});
+$('#admin-logout').addEventListener('click',()=>{
+  adminToken='';$('#admin-status').textContent='Read-only';$('#admin-logout').hidden=true;
+});
 
 $$('nav button').forEach(b=>b.onclick=()=>{
   $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
@@ -220,6 +258,12 @@ $$('nav button').forEach(b=>b.onclick=()=>{
 const batClass=n=>n>50?'hi':n>25?'mid':'lo';
 
 async function init(){
+  const auth=await fetch('/api/auth').then(r=>r.json());
+  if(!auth.openReads&&!adminToken){
+    $('#mode').textContent=auth.tokenConfigured?'Admin required':'Setup required';
+    $('#admin-status').textContent=auth.tokenConfigured?'Token required for live data':'Set ADMIN_TOKEN on server';
+    return;
+  }
   const st=await api('/api/status');
   $('#mode').textContent=st.mode.startsWith('DEMO')?'Demo data':'Live';
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
@@ -277,6 +321,7 @@ async function loadRules(){
 async function evaluate(){
   const r=await api('/api/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({userId:$('#e-user').value,lockId:$('#e-door').value,when:new Date($('#e-when').value).toISOString()})});
+  if(!r.ok){$('#e-res').textContent=r.error||'Request denied';return;}
   const x=r.result;
   $('#e-res').innerHTML=`<div class="res ${x.allowed?'y':'n'}">
     <b style="font-size:14px;letter-spacing:.5px">${x.allowed?'ACCESS GRANTED':'ACCESS DENIED'}</b>
@@ -308,6 +353,7 @@ async function ask(text){
   const q=text||$('#ai-in').value.trim();if(!q)return;
   $('#ai-in').value='';addBubble(q,true);
   const r=await api('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
+  if(!r.ok){const d=document.createElement('div');d.className='bubble';d.textContent=r.error||'Request denied';$('#chat').appendChild(d);return;}
   addBubble(r.answer||'—',false);
 }
 init();
