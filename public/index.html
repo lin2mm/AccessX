@@ -145,7 +145,7 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <div class="sub">Siemens iX theme · <span class="pill" id="mode">…</span></div>
     </div>
     <form id="admin-form" autocomplete="off">
-      <input id="admin-token" type="password" aria-label="Admin token" autocomplete="current-password" placeholder="Admin token">
+      <input id="admin-token" type="password" aria-label="Operator token" autocomplete="current-password" placeholder="Operator token">
       <button class="btn2 sm" type="submit">Unlock</button>
       <button class="btn2 sm" id="admin-logout" type="button" hidden>Lock</button>
       <span id="admin-status" aria-live="polite">Read-only</span>
@@ -240,7 +240,9 @@ $('#admin-form').addEventListener('submit',async e=>{
   const result=await r.json();
   if(r.ok){
     adminToken=candidate;$('#admin-token').value='';
-    $('#admin-status').textContent='Admin unlocked for this tab';
+    const op=result.operator||{};
+    const scope=(op.siteIds||['*']).includes('*')?'all sites':op.siteIds.join(', ');
+    $('#admin-status').textContent=`${op.name||'Operator'} · ${op.roleName||op.role||''} · ${scope}`;
     $('#admin-logout').hidden=false;
     await init();
   }else{
@@ -294,7 +296,7 @@ async function loadHealth(){
 async function unlock(id,btn){
   btn.textContent='…';
   const r=await api('/api/doors/'+id+'/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  btn.textContent=r.ok?'Sent':'Denied';setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
+  btn.textContent=r.ok?'Sent':(r.error==='unauthorized'?'Sign in':r.error==='forbidden'?'No permission':'Denied');setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
 }
 async function loadPeople(){
   const [u,g,s]=await Promise.all([api('/api/users'),api('/api/userGroups'),api('/api/schedules')]);

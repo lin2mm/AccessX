@@ -1,6 +1,7 @@
 import aclDefaults from './data/acl.json';
 import mirrorDefaults from './data/mirror.json';
 import policy from './policy-core.js';
+import rbac from './rbac-core.js';
 
 const DEMO_LOCKS = [
   { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
@@ -35,62 +36,84 @@ function ok(data = {}) {
   return { ok: true, demo: true, ...data };
 }
 
-function timingSafeEqual(left, right) {
-  let difference = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let i = 0; i < length; i++) {
-    difference |= (left.charCodeAt(i % (left.length || 1)) || 0)
-      ^ (right.charCodeAt(i % (right.length || 1)) || 0);
+async function sha256(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+const directoryCache = new Map();
+async function operatorDirectory(env) {
+  const cacheKey = `${env.ADMIN_TOKEN || ''}\u0000${env.OPERATORS || ''}`;
+  if (!directoryCache.has(cacheKey)) {
+    const adminHash = env.ADMIN_TOKEN ? await sha256(env.ADMIN_TOKEN) : '';
+    directoryCache.clear();
+    directoryCache.set(cacheKey, rbac.parseOperators(env.OPERATORS || '', adminHash));
   }
-  return difference === 0;
+  return directoryCache.get(cacheKey);
 }
 
 function authConfig(env) {
-  return {
-    token: env.ADMIN_TOKEN || '',
-    openReads: env.AUTH_OPEN_READS !== '0',
-  };
+  return { openReads: env.AUTH_OPEN_READS !== '0' };
 }
 
-function authStatus(env) {
+async function authStatus(env) {
   const config = authConfig(env);
+  let count = 0;
+  try { count = (await operatorDirectory(env)).length; } catch { count = 0; }
   return {
-    mode: config.token ? 'TOKEN' : config.openReads ? 'DEMO-READ-ONLY' : 'LOCKED',
-    tokenConfigured: Boolean(config.token),
+    mode: count ? 'TOKEN' : config.openReads ? 'DEMO-READ-ONLY' : 'LOCKED',
+    tokenConfigured: Boolean(env.ADMIN_TOKEN),
+    operatorsConfigured: count,
     openReads: config.openReads,
     writesRequireToken: true,
   };
 }
 
-function authorized(request, env) {
+/** Returns { operator } on success or { response } to send back. */
+async function authenticate(request, env, pathname, getAcl) {
+  const perm = rbac.requiredPermission(request.method, pathname);
+  if (perm === rbac.PUBLIC) return { operator: null };
   const config = authConfig(env);
-  const read = request.method === 'GET' || request.method === 'HEAD';
-  if (read && config.openReads) return null;
-  if (!config.token) {
-    return json({
-      ok: false,
-      error: read
-        ? 'API access is disabled until ADMIN_TOKEN is configured.'
-        : 'Writes are disabled until ADMIN_TOKEN is configured.',
-    }, 503);
+  const directory = await operatorDirectory(env);
+  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    if (config.openReads && rbac.hasPermission(null, rbac.ANONYMOUS, perm)) return { operator: rbac.ANONYMOUS };
+    if (!directory.length) {
+      const read = request.method === 'GET' || request.method === 'HEAD';
+      return { response: json({
+        ok: false,
+        error: read
+          ? 'API access is disabled until ADMIN_TOKEN or OPERATORS is configured.'
+          : 'Writes are disabled until ADMIN_TOKEN or OPERATORS is configured.',
+      }, 503) };
+    }
+    return { response: json({ ok: false, error: 'unauthorized' }, 401) };
   }
 
   const address = request.headers.get('cf-connecting-ip') || 'unknown';
   const previous = failedLogins.get(address);
   if (previous && Date.now() > previous.resetAt) failedLogins.delete(address);
-  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (match && timingSafeEqual(match[1], config.token)) {
-    failedLogins.delete(address);
-    return null;
+  const operator = rbac.findOperator(directory, await sha256(match[1].trim()));
+  if (!operator) {
+    const entry = failedLogins.get(address);
+    if (!entry) failedLogins.set(address, { count: 1, resetAt: Date.now() + RATE_WINDOW_MS });
+    else entry.count++;
+    if (failedLogins.get(address).count >= RATE_LIMIT) {
+      return { response: json({ ok: false, error: 'too many failed auth attempts, try later' }, 429) };
+    }
+    return { response: json({ ok: false, error: 'unauthorized' }, 401) };
   }
+  failedLogins.delete(address);
+  const roleDb = operator.role === 'r_owner' ? {} : await getAcl(); // custom roles live in D1
+  if (!rbac.hasPermission(roleDb, operator, perm)) {
+    return { response: json({ ok: false, error: 'forbidden', required: perm }, 403) };
+  }
+  return { operator };
+}
 
-  const entry = failedLogins.get(address);
-  if (!entry) failedLogins.set(address, { count: 1, resetAt: Date.now() + RATE_WINDOW_MS });
-  else entry.count++;
-  if (failedLogins.get(address).count >= RATE_LIMIT) {
-    return json({ ok: false, error: 'too many failed auth attempts, try later' }, 429);
-  }
-  return json({ ok: false, error: 'unauthorized' }, 401);
+function forbiddenSite(lockId) {
+  return json({ ok: false, error: 'forbidden', required: 'site scope', detail: `lock ${lockId} is outside your sites` }, 403);
 }
 
 async function state(db, key, defaults) {
@@ -211,29 +234,53 @@ async function handleApi(request, env) {
   const method = request.method;
 
   if (method === 'GET' && pathname === '/api/auth') {
-    return json({ ok: true, ...authStatus(env) });
+    return json({ ok: true, ...(await authStatus(env)) });
   }
-  const authError = authorized(request, env);
-  if (authError) return authError;
-  if (method === 'POST' && pathname === '/api/auth/verify') {
-    return json(ok({ authenticated: true }));
+
+  let aclPromise = null;
+  const getAcl = () => {
+    if (!env.DB) throw new Error('D1 binding DB is not configured.');
+    if (!aclPromise) aclPromise = state(env.DB, 'acl', aclDefaults);
+    return aclPromise;
+  };
+
+  let operator;
+  try {
+    const auth = await authenticate(request, env, pathname, getAcl);
+    if (auth.response) return auth.response;
+    operator = auth.operator;
+  } catch (error) {
+    return json({ ok: false, error: String(error.message || error) }, 503);
   }
+  const actor = operator ? operator.id : 'system';
 
   if (!env.DB) return json({ ok: false, error: 'D1 binding DB is not configured.' }, 503);
 
   try {
     const db = env.DB;
     const [acl, mirror] = await Promise.all([
-      state(db, 'acl', aclDefaults),
+      getAcl(),
       state(db, 'mirror', mirrorDefaults),
     ]);
+    const canLock = lockId => rbac.canAccessLock(acl, operator, lockId);
+    const visibleLocks = DEMO_LOCKS.filter(lock => canLock(lock.lockId));
+
+    if (method === 'POST' && pathname === '/api/auth/verify') {
+      return json(ok({ authenticated: true, operator: rbac.describe(acl, operator) }));
+    }
+    if (method === 'GET' && pathname === '/api/me') {
+      return json(ok({ operator: rbac.describe(acl, operator) }));
+    }
+    if (method === 'GET' && pathname === '/api/permissions') {
+      return json(ok({ perms: rbac.PERMS, roles: acl.roles }));
+    }
 
     if (method === 'GET' && pathname === '/api/status') {
       return json(ok({ mode: 'DEMO (Cloudflare demo; no physical lock operations)', region: 'demo' }));
     }
 
     if (method === 'GET' && pathname === '/api/doors') {
-      const doors = DEMO_LOCKS.map(lock => {
+      const doors = visibleLocks.map(lock => {
         const group = acl.doorGroups.find(item => (item.lockIds || []).includes(lock.lockId));
         const site = group && acl.sites.find(item => item.id === group.siteId);
         return {
@@ -250,16 +297,17 @@ async function handleApi(request, env) {
       const body = await readBody(request);
       if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
       const lockId = Number(unlockMatch[1]);
+      if (!canLock(lockId)) return forbiddenSite(lockId);
       const userId = body.userId;
       if (userId) {
         const decision = policy.evaluate(acl, userId, lockId, new Date());
         if (!decision.allowed) {
-          policy.audit(acl, 'unlock.denied', `lock ${lockId} user ${userId}: ${decision.reason}`, userId);
+          policy.audit(acl, 'unlock.denied', `lock ${lockId} user ${userId}: ${decision.reason}`, actor);
           await saveState(db, 'acl', acl);
           return json({ ok: false, denied: true, reason: decision.reason, path: decision.path }, 403);
         }
       }
-      policy.audit(acl, 'unlock.granted', `lock ${lockId}${userId ? ` user ${userId}` : ' (admin override)'}`, userId || 'admin');
+      policy.audit(acl, 'unlock.granted', `lock ${lockId}${userId ? ` user ${userId}` : ' (operator override)'}`, actor);
       await saveState(db, 'acl', acl);
       return json(ok({ unlocked: lockId, simulated: true }));
     }
@@ -296,16 +344,16 @@ async function handleApi(request, env) {
         if (body.__invalidJson || !body || typeof body !== 'object' || Array.isArray(body)) {
           return json({ ok: false, error: 'expected a JSON object' }, 400);
         }
-        const item = { id: policy.uid(collection.slice(0, 3)), ...body };
+        const item = { ...body, id: policy.uid(collection.slice(0, 3)) };
         acl[collection].push(item);
-        policy.audit(acl, `${collection}.create`, JSON.stringify(item).slice(0, 200));
+        policy.audit(acl, `${collection}.create`, JSON.stringify(item).slice(0, 200), actor);
         await saveState(db, 'acl', acl);
         return json(ok({ item }));
       }
       if (method === 'DELETE' && id) {
         const decodedId = decodeURIComponent(id);
         acl[collection] = acl[collection].filter(item => item.id !== decodedId);
-        policy.audit(acl, `${collection}.delete`, decodedId);
+        policy.audit(acl, `${collection}.delete`, decodedId, actor);
         await saveState(db, 'acl', acl);
         return json(ok());
       }
@@ -326,6 +374,7 @@ async function handleApi(request, env) {
 
     const recordsMatch = pathname.match(/^\/api\/records\/(\d+)$/);
     if (method === 'GET' && recordsMatch) {
+      if (!canLock(recordsMatch[1])) return forbiddenSite(recordsMatch[1]);
       return json(ok({ records: demoRecords(Number(recordsMatch[1])) }));
     }
 
@@ -359,10 +408,10 @@ async function handleApi(request, env) {
     }
 
     if (method === 'GET' && pathname === '/api/health') {
-      const lowBattery = DEMO_LOCKS.filter(door => door.electricQuantity <= 25);
-      const offline = DEMO_LOCKS.filter(door => !door.hasGateway);
+      const lowBattery = visibleLocks.filter(door => door.electricQuantity <= 25);
+      const offline = visibleLocks.filter(door => !door.hasGateway);
       return json(ok({
-        total: DEMO_LOCKS.length,
+        total: visibleLocks.length,
         lowBattery,
         offline,
         score: Math.round(100 - (lowBattery.length * 12 + offline.length * 8)),
@@ -373,7 +422,7 @@ async function handleApi(request, env) {
       const body = await readBody(request);
       if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
       const query = String(body.q || '').toLowerCase().slice(0, 1000);
-      const tools = aiTools(acl, DEMO_LOCKS);
+      const tools = aiTools(acl, visibleLocks);
       let answer;
 
       if (/batter|service|visit|maintenance|replace/.test(query)) {

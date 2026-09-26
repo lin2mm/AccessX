@@ -297,8 +297,10 @@
       "perms": [
         "door.read",
         "door.unlock",
+        "credential.issue",
         "user.manage",
-        "report.read"
+        "report.read",
+        "audit.read"
       ]
     },
     {
@@ -315,7 +317,8 @@
       "name": "Auditor",
       "perms": [
         "door.read",
-        "report.read"
+        "report.read",
+        "audit.read"
       ]
     }
   ],

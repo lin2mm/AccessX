@@ -12,14 +12,18 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const tt = new TTLock();
 const DEMO = tt.demo;
+const rbac = require('./rbac-core');
 const authConfig = {
   token: process.env.ADMIN_TOKEN || '',
+  operators: process.env.OPERATORS || '',
+  getDb: () => acl.load(),
   openReads: process.env.AUTH_OPEN_READS === undefined
     ? DEMO
     : process.env.AUTH_OPEN_READS === '1',
 };
 const requireAuth = createAuth(authConfig);
 const authStatus = () => getAuthStatus(authConfig);
+const actor = req => (req.operator ? req.operator.id : 'system');
 
 app.get('/api/auth', (req,res)=>res.json({ ok: true, ...authStatus() }));
 
@@ -91,12 +95,7 @@ function seed() {
     { id: 'u5', name: 'Ex-Employee',   email: 'gone@acme.co.uk',  groupIds: ['ug_staff'],    suspended: true },
   ];
   db.holidays = [{ date: new Date(Date.now() + 3*864e5).toISOString().slice(0,10), name: 'Bank Holiday' }];
-  db.roles = [
-    { id: 'r_owner',     name: 'Account Owner',  perms: ['*'] },
-    { id: 'r_manager',   name: 'Site Manager',   perms: ['door.read','door.unlock','user.manage','report.read'] },
-    { id: 'r_installer', name: 'Installer',      perms: ['door.read','door.commission','diag.read'] },
-    { id: 'r_view',      name: 'Auditor',        perms: ['door.read','report.read'] },
-  ];
+  db.roles = rbac.DEFAULT_ROLES.map(role => ({ ...role }));
   acl.audit(db, 'seed', 'demo dataset created');
   acl.save(db);
   return db;
@@ -111,7 +110,13 @@ const fail = (res, e) => res.status(500).json({ ok: false, error: String(e.messa
 
 app.use('/api', requireAuth);
 
-app.post('/api/auth/verify', (req,res)=>ok(res,{authenticated:true}));
+app.post('/api/auth/verify', (req,res)=>ok(res,{authenticated:true, operator: rbac.describe(acl.load(), req.operator)}));
+app.get('/api/me', (req, res) => ok(res, { operator: rbac.describe(acl.load(), req.operator) }));
+app.get('/api/permissions', (req, res) => ok(res, { perms: rbac.PERMS, roles: acl.load().roles }));
+
+const forbiddenSite = (res, lockId) => res.status(403).json({
+  ok: false, error: 'forbidden', required: 'site scope', detail: `lock ${lockId} is outside your sites`,
+});
 
 app.get('/api/status', (req, res) => ok(res, {
   mode: DEMO ? 'DEMO (no TTLock credentials set)' : 'LIVE (TTLock cloud)',
@@ -132,7 +137,8 @@ app.get('/api/doors', async (req, res) => {
       }));
     }
     // enrich with our own site / door-group metadata
-    const enriched = locks.map(l => {
+    const visible = locks.filter(l => rbac.canAccessLock(db, req.operator, l.lockId));
+    const enriched = visible.map(l => {
       const dg = db.doorGroups.find(d => (d.lockIds || []).includes(l.lockId));
       const site = dg ? db.sites.find(s => s.id === dg.siteId) : null;
       return { ...l, doorGroup: dg ? dg.name : null, site: site ? site.name : (l.groupName || 'Unassigned') };
@@ -146,17 +152,18 @@ app.post('/api/doors/:id/unlock', async (req, res) => {
     const db = acl.load();
     const lockId = Number(req.params.id);
     const { userId } = req.body || {};
+    if (!rbac.canAccessLock(db, req.operator, lockId)) return forbiddenSite(res, lockId);
     // ★ policy check BEFORE touching the lock — this is the whole point
     if (userId) {
       const v = acl.evaluate(db, userId, lockId, new Date());
       if (!v.allowed) {
-        acl.audit(db, 'unlock.denied', `lock ${lockId} user ${userId}: ${v.reason}`, userId);
+        acl.audit(db, 'unlock.denied', `lock ${lockId} user ${userId}: ${v.reason}`, actor(req));
         acl.save(db);
         return res.status(403).json({ ok: false, denied: true, reason: v.reason, path: v.path });
       }
     }
     if (!DEMO) await tt.unlock(lockId);
-    acl.audit(db, 'unlock.granted', `lock ${lockId}${userId ? ' user ' + userId : ' (admin override)'}`, userId || 'admin');
+    acl.audit(db, 'unlock.granted', `lock ${lockId}${userId ? ' user ' + userId : ' (operator override)'}`, actor(req));
     acl.save(db);
     ok(res, { unlocked: lockId, simulated: DEMO });
   } catch (e) { fail(res, e); }
@@ -191,16 +198,16 @@ for (const coll of ['sites','doorGroups','userGroups','users','schedules','assig
   app.get(`/api/${coll}`, (req, res) => ok(res, { [coll]: acl.load()[coll] }));
   app.post(`/api/${coll}`, (req, res) => {
     const db = acl.load();
-    const item = { id: acl.uid(coll.slice(0,3)), ...req.body };
+    const item = { ...(req.body || {}), id: acl.uid(coll.slice(0,3)) }; // server owns ids
     db[coll].push(item);
-    acl.audit(db, `${coll}.create`, JSON.stringify(item).slice(0,200));
+    acl.audit(db, `${coll}.create`, JSON.stringify(item).slice(0,200), actor(req));
     acl.save(db);
     ok(res, { item });
   });
   app.delete(`/api/${coll}/:id`, (req, res) => {
     const db = acl.load();
     db[coll] = db[coll].filter(x => x.id !== req.params.id);
-    acl.audit(db, `${coll}.delete`, req.params.id);
+    acl.audit(db, `${coll}.delete`, req.params.id, actor(req));
     acl.save(db);
     ok(res, {});
   });
@@ -223,6 +230,7 @@ app.post('/api/passcode', async (req, res) => {
 // ---- Audit trail (ours + TTLock's) --------------------------------
 app.get('/api/records/:lockId', async (req, res) => {
   try {
+    if (!rbac.canAccessLock(acl.load(), req.operator, req.params.lockId)) return forbiddenSite(res, req.params.lockId);
     if (DEMO) {
       const types = [1,4,7,8,12,55];
       const list = Array.from({ length: 25 }, (_, i) => {
@@ -284,7 +292,9 @@ app.get('/api/mirror/records', (req, res) => {
 // ---- Fleet health (installer view) --------------------------------
 app.get('/api/health', async (req, res) => {
   try {
-    const doors = DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []);
+    const db = acl.load();
+    const doors = (DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []))
+      .filter(d => rbac.canAccessLock(db, req.operator, d.lockId));
     const low = doors.filter(d => d.electricQuantity <= 25);
     const offline = doors.filter(d => !d.hasGateway);
     ok(res, {
@@ -344,7 +354,8 @@ app.post('/api/ai', async (req, res) => {
   try {
     const q = String((req.body && req.body.q) || '').toLowerCase();
     const db = acl.load();
-    const doors = DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []);
+    const doors = (DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []))
+      .filter(d => rbac.canAccessLock(db, req.operator, d.lockId));
     const T = aiTools(db, doors);
     let answer;
 

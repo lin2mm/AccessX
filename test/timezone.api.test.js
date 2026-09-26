@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { boot } = require('./helpers');
+const { boot } = require('../support/boot');
 
 test('POST /api/evaluate interprets localTime in the door site time zone', async t => {
   const api = await boot({ ADMIN_TOKEN: 'owner-token' });

@@ -8,7 +8,9 @@
     "dev:cloudflare": "npx wrangler dev",
     "cf:db:migrate:local": "npx wrangler d1 migrations apply accessx-demo --local",
     "cf:deploy": "npx wrangler deploy",
-    "cf:db:migrate:remote": "npx wrangler d1 migrations apply accessx-demo --remote"
+    "cf:db:migrate:remote": "npx wrangler d1 migrations apply accessx-demo --remote",
+    "operator:new": "node scripts/new-operator.js",
+    "test:worker": "node support/worker-smoke.js"
   },
   "keywords": [],
   "author": "",

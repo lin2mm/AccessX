@@ -4,7 +4,8 @@ const path = require('node:path');
 const test = require('node:test');
 const { authStatus, createAuth } = require('./auth');
 
-function request(auth, { method = 'POST', authorization, ip = '127.0.0.1' } = {}) {
+function request(auth, { method = 'POST', authorization, ip = '127.0.0.1', url } = {}) {
+  const defaultUrl = method === 'GET' || method === 'HEAD' ? '/api/doors' : '/api/sites';
   const response = {
     statusCode: 200,
     body: null,
@@ -21,6 +22,7 @@ function request(auth, { method = 'POST', authorization, ip = '127.0.0.1' } = {}
   auth(
     {
       method,
+      originalUrl: url || defaultUrl,
       headers: { authorization },
       socket: { remoteAddress: ip },
     },
