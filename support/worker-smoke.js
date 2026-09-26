@@ -78,6 +78,22 @@ check('audit chain verifies and records operators', async () => {
   assert.ok(log.body.log[0].seq > log.body.log[1].seq);
   assert.ok(log.body.log.some(e => e.actor === 'owner'));
 });
+check('validation rejects malformed records', async () => {
+  const r = await call('POST', '/api/schedules', OWNER, { name: 'Broken', windows: [{ from: '09:00' }] });
+  assert.equal(r.status, 400);
+  assert.equal((await call('DELETE', '/api/schedules/sch_office', OWNER)).status, 409);
+});
+check('copilot output escapes stored names', async () => {
+  await call('POST', '/api/users', OWNER, { name: '<img src=x onerror=alert(1)>', groupIds: ['ug_it'], suspended: true });
+  const r = await call('POST', '/api/ai', OWNER, { q: 'anything unusual?' });
+  assert.equal(r.body.answer.includes('<img src=x'), false);
+});
+check('static assets carry a strict CSP', async () => {
+  const res = await fetch(BASE + '/');
+  const csp = res.headers.get('content-security-policy') || '';
+  assert.match(csp, /script-src 'self';/);
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });

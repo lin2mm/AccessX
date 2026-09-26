@@ -6,9 +6,27 @@ const mirror = require('./mirror');
 const { createAuth, authStatus: getAuthStatus } = require('./auth');
 const acl = require('./acl');
 const creds = require('./credentials-core');
+const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
 
 const app = express();
-app.use(express.json());
+app.disable('x-powered-by');
+// Mirrors public/_headers (used by the Cloudflare build).
+// No inline scripts or handlers: script-src 'self' blocks injected <script>/on*=.
+// connect-src/img-src 'self' stop exfiltration of tokens or data.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; " +
+  "base-uri 'none'; form-action 'self'";
+app.use((req, res, next) => {
+  res.set({
+    'Content-Security-Policy': CSP,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+  next();
+});
+app.use(express.json({ limit: '64kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const tt = new TTLock();
@@ -202,7 +220,10 @@ for (const coll of ['sites','doorGroups','userGroups','users','schedules','assig
   app.get(`/api/${coll}`, (req, res) => ok(res, { [coll]: acl.load()[coll] }));
   app.post(`/api/${coll}`, (req, res) => {
     const db = acl.load();
-    const item = { ...(req.body || {}), id: acl.uid(coll.slice(0,3)) }; // server owns ids
+    let clean;
+    try { clean = validate(coll, req.body, db); }
+    catch (e) { if (e instanceof ValidationError) return res.status(400).json({ ok: false, error: e.message }); throw e; }
+    const item = { ...clean, id: acl.uid(coll.slice(0,3)) }; // server owns ids
     db[coll].push(item);
     acl.audit(db, `${coll}.create`, JSON.stringify(item).slice(0,200), actor(req));
     acl.save(db);
@@ -210,6 +231,9 @@ for (const coll of ['sites','doorGroups','userGroups','users','schedules','assig
   });
   app.delete(`/api/${coll}/:id`, (req, res) => {
     const db = acl.load();
+    if (!db[coll].some(x => x.id === req.params.id)) return res.status(404).json({ ok: false, error: 'not found' });
+    const refs = referencedBy(coll, req.params.id, db);
+    if (refs.length) return res.status(409).json({ ok: false, error: 'still referenced', referencedBy: refs.slice(0, 20) });
     db[coll] = db[coll].filter(x => x.id !== req.params.id);
     acl.audit(db, `${coll}.delete`, req.params.id, actor(req));
     acl.save(db);
@@ -411,25 +435,25 @@ app.post('/api/ai', async (req, res) => {
     if (/batter|service|visit|maintenance|replace/.test(q)) {
       const { low, off } = T.serviceVisits();
       answer = `<b>Suggested service run</b><br>` +
-        (low.length ? low.map(d => `· <b>${d.lockAlias}</b> — ${d.electricQuantity}% battery` +
+        (low.length ? low.map(d => `· <b>${h(d.lockAlias)}</b> — ${Number(d.electricQuantity)}% battery` +
           (d.electricQuantity <= 15 ? ' <span class="tag r">urgent</span>' : '')).join('<br>')
           : 'No low batteries.') +
-        (off.length ? `<br>· <b>${off.map(d=>d.lockAlias).join(', ')}</b> — no gateway, cannot be opened remotely` : '') +
+        (off.length ? `<br>· <b>${off.map(d=>h(d.lockAlias)).join(', ')}</b> — no gateway, cannot be opened remotely` : '') +
         `<br><br>Batching these into one visit saves a second call-out. Shall I draft the job sheet?`;
     }
     else if (/unusual|anomal|risk|suspicious|odd|wrong/.test(q)) {
       const a = T.anomalies();
       answer = `<b>Risk review</b><br>` +
         `· ${a.denials} denied unlock attempt(s) recorded<br>` +
-        `· ${a.suspended.length} suspended user(s): ${a.suspended.map(u=>u.name).join(', ')||'none'}<br>` +
-        `· ${a.expiring.length} credential(s) expiring within 30 days: ${a.expiring.map(u=>u.name).join(', ')||'none'}<br><br>` +
+        `· ${a.suspended.length} suspended user(s): ${a.suspended.map(u=>h(u.name)).join(', ')||'none'}<br>` +
+        `· ${a.expiring.length} credential(s) expiring within 30 days: ${a.expiring.map(u=>h(u.name)).join(', ')||'none'}<br><br>` +
         `Recommendation: remove suspended users from all groups so they disappear from reports, and renew expiring contractors before they lock themselves out.`;
     }
     else if (/who can|who has|access to/.test(q)) {
       const m = q.match(/(server room|main entrance|warehouse|cleaner|gym front|gym staff|storage)/);
       const r = m ? T.whoCanOpen(m[1]) : null;
       answer = r
-        ? `<b>${r.door}</b> — currently openable by: ${r.people.length ? r.people.join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
+        ? `<b>${h(r.door)}</b> — currently openable by: ${r.people.length ? r.people.map(h).join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
         : `Name a door and I will list who can open it right now — e.g. "who can open the Server Room?"`;
     }
     else if (/denied|why|refus|reject/.test(q)) {
@@ -437,8 +461,8 @@ app.post('/api/ai', async (req, res) => {
       const r = m ? T.explainDenial(m[1]) : null;
       if (r) {
         const denied = r.res.filter(x => !x.r.allowed).slice(0, 4);
-        answer = `<b>${r.user}</b> at 21:00 (each site's local time):<br>` +
-          denied.map(x => `· ${x.door}: ${x.r.reason}`).join('<br>') +
+        answer = `<b>${h(r.user)}</b> at 21:00 (each site's local time):<br>` +
+          denied.map(x => `· ${h(x.door)}: ${h(x.r.reason)}`).join('<br>') +
           `<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.`;
       } else {
         answer = `Tell me who was denied — e.g. "why was Sarah denied at 9pm?"`;

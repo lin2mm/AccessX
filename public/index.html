@@ -134,6 +134,7 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 .sugg button{background:var(--db800);border:1px solid var(--line);color:var(--txt2);
   font-size:11px;padding:5px 10px;font-weight:500}
 .sugg button:hover{border-color:var(--coral);color:var(--coral)}
+.code{font:700 22px/1 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--bold-green)}
 </style>
 </head>
 <body>
@@ -168,10 +169,19 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <label>Person</label><select id="e-user"></select>
       <label>Door</label><select id="e-door"></select>
       <label>Date &amp; time (local time at the door's site)</label><input type="datetime-local" id="e-when">
-      <div style="margin-top:14px"><button class="btn" onclick="evaluate()">Evaluate access</button></div>
+      <div style="margin-top:14px"><button class="btn" type="button" id="e-go">Evaluate access</button></div>
       <div id="e-res"></div>
     </div>
     <div class="card"><h2>Access rules</h2><div id="rules"></div></div>
+    <div class="card">
+      <h2>Issue passcode</h2>
+      <div class="hint">Codes go through the same policy engine as remote unlocks. The system tells you honestly whether the lock itself can enforce the rule.</div>
+      <label>Person</label><select id="p-user"></select>
+      <label>Door</label><select id="p-door"></select>
+      <label>Valid until (optional, default 7 days)</label><input type="date" id="p-end">
+      <div style="margin-top:14px"><button class="btn" type="button" id="p-issue">Issue passcode</button></div>
+      <div id="p-res"></div>
+    </div>
   </section>
 
   <!-- AI -->
@@ -181,16 +191,16 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <div class="hint">Natural-language control and diagnostics. Type an instruction — the copilot maps it to a policy action and explains what it will do <b>before</b> executing.</div>
       <div class="ai">
         <div id="chat"></div>
-        <div class="sugg">
-          <button onclick="ask(this.textContent)">Why was Sarah denied at 9pm?</button>
-          <button onclick="ask(this.textContent)">Which doors need a battery visit?</button>
-          <button onclick="ask(this.textContent)">Give the cleaners Friday evening access</button>
-          <button onclick="ask(this.textContent)">Anything unusual this week?</button>
-          <button onclick="ask(this.textContent)">Who can open the Server Room?</button>
+        <div class="sugg" id="ai-sugg">
+          <button type="button">Why was Sarah denied at 9pm?</button>
+          <button type="button">Which doors need a battery visit?</button>
+          <button type="button">Give the cleaners Friday evening access</button>
+          <button type="button">Anything unusual this week?</button>
+          <button type="button">Who can open the Server Room?</button>
         </div>
         <div class="q">
-          <input id="ai-in" placeholder="Ask or instruct…" onkeydown="if(event.key==='Enter')ask()">
-          <button class="btn" onclick="ask()">Send</button>
+          <input id="ai-in" placeholder="Ask or instruct…">
+          <button class="btn" type="button" id="ai-send">Send</button>
         </div>
       </div>
     </div>
@@ -207,10 +217,22 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
   <section id="v-log" class="view">
     <div class="card">
       <h2>Door audit trail</h2>
-      <label>Door</label><select id="r-door" onchange="loadRecords()"></select>
+      <label>Door</label><select id="r-door"></select>
       <div style="overflow-x:auto;margin-top:10px"><table id="recs"></table></div>
     </div>
-    <div class="card"><h2>System activity</h2><div style="overflow-x:auto"><table id="alog"></table></div></div>
+    <div class="card">
+      <h2>Credentials on locks</h2>
+      <div class="hint">Every code the system has issued. Anything current policy would no longer issue is flagged for revocation.</div>
+      <div style="overflow-x:auto"><table id="creds"></table></div>
+    </div>
+    <div class="card">
+      <h2>System activity</h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+        <button class="btn2 sm" type="button" id="a-verify">Verify audit chain</button>
+        <span id="a-verify-res" class="meta"></span>
+      </div>
+      <div style="overflow-x:auto"><table id="alog"></table></div>
+    </div>
   </section>
 </main>
 
@@ -222,145 +244,6 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
   <button data-v="log"><span class="ic">≡</span>Activity</button>
 </nav>
 
-<script>
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let adminToken='';
-const api=async(u,o={})=>{
-  const headers=new Headers(o.headers||{});
-  if(adminToken)headers.set('Authorization',`Bearer ${adminToken}`);
-  const r=await fetch(u,{...o,headers});
-  return r.json();
-};
-let DOORS=[],USERS=[];
-
-$('#admin-form').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const candidate=$('#admin-token').value;
-  const r=await fetch('/api/auth/verify',{method:'POST',headers:{Authorization:`Bearer ${candidate}`}});
-  const result=await r.json();
-  if(r.ok){
-    adminToken=candidate;$('#admin-token').value='';
-    const op=result.operator||{};
-    const scope=(op.siteIds||['*']).includes('*')?'all sites':op.siteIds.join(', ');
-    $('#admin-status').textContent=`${op.name||'Operator'} · ${op.roleName||op.role||''} · ${scope}`;
-    $('#admin-logout').hidden=false;
-    await init();
-  }else{
-    $('#admin-status').textContent=result.error||'Token rejected';
-  }
-});
-$('#admin-logout').addEventListener('click',()=>{
-  adminToken='';$('#admin-status').textContent='Read-only';$('#admin-logout').hidden=true;
-});
-
-$$('nav button').forEach(b=>b.onclick=()=>{
-  $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-  $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
-});
-const batClass=n=>n>50?'hi':n>25?'mid':'lo';
-
-async function init(){
-  const auth=await fetch('/api/auth').then(r=>r.json());
-  if(!auth.openReads&&!adminToken){
-    $('#mode').textContent=auth.tokenConfigured?'Admin required':'Setup required';
-    $('#admin-status').textContent=auth.tokenConfigured?'Token required for live data':'Set ADMIN_TOKEN on server';
-    return;
-  }
-  const st=await api('/api/status');
-  $('#mode').textContent=st.mode.startsWith('DEMO')?'Demo data':'Live';
-  const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
-  $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();
-  addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
-}
-async function loadDoors(){
-  const d=await api('/api/doors');DOORS=d.doors||[];
-  $('#doors').innerHTML=DOORS.map(l=>{
-    const cls=!l.hasGateway?'off':(l.electricQuantity<=25?'warn':'');
-    return `<div class="door ${cls}">
-      <div><b>${l.lockAlias}</b>
-        <div class="meta">${l.site||'—'} ${l.doorGroup?'· '+l.doorGroup:''}</div>
-        <div class="meta"><span class="bat ${batClass(l.electricQuantity)}">${l.electricQuantity}% battery</span>
-        ${l.hasGateway?'<span class="tag g" style="margin-left:6px">online</span>':'<span class="tag r" style="margin-left:6px">no gateway</span>'}</div>
-      </div><button class="btn sm" onclick="unlock(${l.lockId},this)">Unlock</button></div>`}).join('');
-  const opts=DOORS.map(l=>`<option value="${l.lockId}">${l.lockAlias}</option>`).join('');
-  $('#e-door').innerHTML=opts;$('#r-door').innerHTML=opts;loadRecords();
-}
-async function loadHealth(){
-  const h=await api('/api/health');
-  $('#kpis').innerHTML=`
-    <div class="kpi"><div class="n">${h.total}</div><div class="l">Doors</div></div>
-    <div class="kpi"><div class="n ${h.lowBattery.length?'warn':'ok'}">${h.lowBattery.length}</div><div class="l">Low battery</div></div>
-    <div class="kpi"><div class="n ${h.offline.length?'bad':'ok'}">${h.offline.length}</div><div class="l">No gateway</div></div>`;
-}
-async function unlock(id,btn){
-  btn.textContent='…';
-  const r=await api('/api/doors/'+id+'/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  btn.textContent=r.ok?'Sent':(r.error==='unauthorized'?'Sign in':r.error==='forbidden'?'No permission':'Denied');setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
-}
-async function loadPeople(){
-  const [u,g,s]=await Promise.all([api('/api/users'),api('/api/userGroups'),api('/api/schedules')]);
-  USERS=u.users||[];
-  const gname=id=>(g.userGroups.find(x=>x.id===id)||{}).name||id;
-  $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th></tr>`+
-    USERS.map(p=>`<tr><td><b>${p.name}</b><div class="meta">${p.email||''}</div></td>
-    <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+gname(i)+'</span>').join('')}</td>
-    <td>${p.suspended?'<span class="tag r">suspended</span>':'<span class="tag g">active</span>'}
-    ${p.validTo?'<div class="meta">until '+p.validTo.slice(0,10)+'</div>':''}</td></tr>`).join('')+`</table>`;
-  $('#ugroups').innerHTML=g.userGroups.map(x=>`<span class="chip">${x.name}</span>`).join('');
-  $('#scheds').innerHTML=s.schedules.map(x=>`<div style="margin-bottom:10px"><b>${x.name}</b>
-    ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
-    <div class="sched">${(x.windows||[]).map(w=>'Days '+w.days.join(',')+' · '+w.from+'–'+w.to).join('<br>')}</div></div>`).join('');
-  $('#e-user').innerHTML=USERS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
-}
-async function loadRules(){
-  const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
-  const n=(arr,id)=>(arr.find(x=>x.id===id)||{}).name||'—';
-  $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th></tr>`+
-    a.assignments.map(r=>`<tr><td>${n(ug.userGroups,r.userGroupId)}</td>
-    <td>${n(dg.doorGroups,r.doorGroupId)}</td><td>${n(s.schedules,r.scheduleId)}</td></tr>`).join('')+`</table>`;
-}
-async function evaluate(){
-  const r=await api('/api/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({userId:$('#e-user').value,lockId:$('#e-door').value,localTime:$('#e-when').value})});
-  if(!r.ok){$('#e-res').textContent=r.error||'Request denied';return;}
-  const x=r.result;
-  $('#e-res').innerHTML=`<div class="res ${x.allowed?'y':'n'}">
-    <b style="font-size:14px;letter-spacing:.5px">${x.allowed?'ACCESS GRANTED':'ACCESS DENIED'}</b>
-    <div style="margin-top:5px">${x.reason}</div>
-    <div class="meta" style="margin-top:4px">${r.site||'Unassigned door'} · ${r.localTime}</div>
-    ${(x.path&&x.path.length)?'<div style="margin-top:8px;font-size:11.5px;opacity:.85">Rules evaluated:<br>'+
-      x.path.map(p=>`· ${p.group} → ${p.doorGroup} (${p.schedule}): ${p.reason}`).join('<br>')+'</div>':''}</div>`;
-}
-async function loadRecords(){
-  const id=$('#r-door').value;if(!id)return;
-  const r=await api('/api/records/'+id);
-  $('#recs').innerHTML=`<tr><th>When</th><th>Who</th><th>Method</th><th></th></tr>`+
-    (r.records||[]).map(x=>`<tr><td>${new Date(x.lockDate).toLocaleString()}</td>
-    <td>${x.username||'—'}</td><td>${x.typeLabel}</td>
-    <td>${x.success?'<span class="tag g">ok</span>':'<span class="tag r">failed</span>'}</td></tr>`).join('');
-}
-async function loadAudit(){
-  const r=await api('/api/audit');
-  $('#alog').innerHTML=`<tr><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr>`+
-    (r.log||[]).slice(0,25).map(x=>`<tr><td>${new Date(x.ts).toLocaleString()}</td>
-    <td>${x.actor}</td><td><span class="chip">${x.action}</span></td>
-    <td style="color:var(--txt3)">${(x.detail||'').slice(0,70)}</td></tr>`).join('');
-}
-/* ---- Copilot ---- */
-function addBubble(t,me){
-  const d=document.createElement('div');d.className='bubble'+(me?' me':'');d.innerHTML=t;
-  $('#chat').appendChild(d);d.scrollIntoView({behavior:'smooth',block:'nearest'});
-}
-async function ask(text){
-  const q=text||$('#ai-in').value.trim();if(!q)return;
-  $('#ai-in').value='';addBubble(q,true);
-  const r=await api('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
-  if(!r.ok){const d=document.createElement('div');d.className='bubble';d.textContent=r.error||'Request denied';$('#chat').appendChild(d);return;}
-  addBubble(r.answer||'—',false);
-}
-init();
-if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
-</script>
+<script src="app.js"></script>
 </body>
 </html>

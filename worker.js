@@ -4,6 +4,9 @@ import policy from './policy-core.js';
 import rbac from './rbac-core.js';
 import creds from './credentials-core.js';
 import auditCore from './audit-core.js';
+import validation from './validate-core.js';
+
+const h = validation.escapeHtml;
 
 const DEMO_LOCKS = [
   { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
@@ -31,7 +34,10 @@ const RATE_LIMIT = 8;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 
 function json(data, status = 200, headers = {}) {
-  return Response.json(data, { status, headers });
+  return Response.json(data, {
+    status,
+    headers: { 'x-content-type-options': 'nosniff', 'cache-control': 'no-store', ...headers },
+  });
 }
 
 function ok(data = {}) {
@@ -382,10 +388,14 @@ async function handleApi(request, env) {
       if (method === 'GET' && !id) return json(ok({ [collection]: acl[collection] }));
       if (method === 'POST' && !id) {
         const body = await readBody(request);
-        if (body.__invalidJson || !body || typeof body !== 'object' || Array.isArray(body)) {
-          return json({ ok: false, error: 'expected a JSON object' }, 400);
+        if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
+        let clean;
+        try { clean = validation.validate(collection, body, acl); }
+        catch (error) {
+          if (error instanceof validation.ValidationError) return json({ ok: false, error: error.message }, 400);
+          throw error;
         }
-        const item = { ...body, id: policy.uid(collection.slice(0, 3)) };
+        const item = { ...clean, id: policy.uid(collection.slice(0, 3)) };
         acl[collection].push(item);
         policy.audit(acl, `${collection}.create`, JSON.stringify(item).slice(0, 200), actor);
         await saveAcl(db, acl);
@@ -393,6 +403,9 @@ async function handleApi(request, env) {
       }
       if (method === 'DELETE' && id) {
         const decodedId = decodeURIComponent(id);
+        if (!acl[collection].some(item => item.id === decodedId)) return json({ ok: false, error: 'not found' }, 404);
+        const refs = validation.referencedBy(collection, decodedId, acl);
+        if (refs.length) return json({ ok: false, error: 'still referenced', referencedBy: refs.slice(0, 20) }, 409);
         acl[collection] = acl[collection].filter(item => item.id !== decodedId);
         policy.audit(acl, `${collection}.delete`, decodedId, actor);
         await saveAcl(db, acl);
@@ -511,28 +524,28 @@ async function handleApi(request, env) {
       if (/batter|service|visit|maintenance|replace/.test(query)) {
         const { low, off } = tools.serviceVisits();
         answer = `<b>Suggested service run</b><br>`
-          + (low.length ? low.map(door => `· <b>${door.lockAlias}</b> — ${door.electricQuantity}% battery`
+          + (low.length ? low.map(door => `· <b>${h(door.lockAlias)}</b> — ${Number(door.electricQuantity)}% battery`
             + (door.electricQuantity <= 15 ? ' <span class="tag r">urgent</span>' : '')).join('<br>') : 'No low batteries.')
-          + (off.length ? `<br>· <b>${off.map(door => door.lockAlias).join(', ')}</b> — no gateway, cannot be opened remotely` : '')
+          + (off.length ? `<br>· <b>${off.map(door => h(door.lockAlias)).join(', ')}</b> — no gateway, cannot be opened remotely` : '')
           + '<br><br>Batching these into one visit saves a second call-out. Shall I draft the job sheet?';
       } else if (/unusual|anomal|risk|suspicious|odd|wrong/.test(query)) {
         const result = tools.anomalies();
         answer = `<b>Risk review</b><br>· ${result.denials} denied unlock attempt(s) recorded<br>`
-          + `· ${result.suspended.length} suspended user(s): ${result.suspended.map(user => user.name).join(', ') || 'none'}<br>`
-          + `· ${result.expiring.length} credential(s) expiring within 30 days: ${result.expiring.map(user => user.name).join(', ') || 'none'}`
+          + `· ${result.suspended.length} suspended user(s): ${result.suspended.map(user => h(user.name)).join(', ') || 'none'}<br>`
+          + `· ${result.expiring.length} credential(s) expiring within 30 days: ${result.expiring.map(user => h(user.name)).join(', ') || 'none'}`
           + '<br><br>Recommendation: remove suspended users from all groups so they disappear from reports, and renew expiring contractors before they lock themselves out.';
       } else if (/who can|who has|access to/.test(query)) {
         const match = query.match(/(server room|main entrance|warehouse|cleaner|gym front|gym staff|storage)/);
         const result = match ? tools.whoCanOpen(match[1]) : null;
         answer = result
-          ? `<b>${result.door}</b> — currently openable by: ${result.people.length ? result.people.join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
+          ? `<b>${h(result.door)}</b> — currently openable by: ${result.people.length ? result.people.map(h).join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
           : 'Name a door and I will list who can open it right now — e.g. "who can open the Server Room?"';
       } else if (/denied|why|refus|reject/.test(query)) {
         const match = query.match(/(sarah|dev|tom|cleanco|cleaner)/);
         const result = match ? tools.explainDenial(match[1]) : null;
         if (result) {
           const denied = result.res.filter(item => !item.r.allowed).slice(0, 4);
-          answer = `<b>${result.user}</b> at 21:00 (each site's local time):<br>${denied.map(item => `· ${item.door}: ${item.r.reason}`).join('<br>')}`
+          answer = `<b>${h(result.user)}</b> at 21:00 (each site's local time):<br>${denied.map(item => `· ${h(item.door)}: ${h(item.r.reason)}`).join('<br>')}`
             + '<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.';
         } else {
           answer = 'Tell me who was denied — e.g. "why was Sarah denied at 9pm?"';

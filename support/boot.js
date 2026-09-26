@@ -27,6 +27,7 @@ async function boot(env = {}) {
   }
   return {
     call,
+    base,
     dataDir,
     close: () => new Promise(resolve => server.close(() => {
       fs.rmSync(dataDir, { recursive: true, force: true });
