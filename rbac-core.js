@@ -87,6 +87,7 @@ const ROUTES = [
   ['POST', /^\/api\/ai$/, 'report.read'],
   ['GET', /^\/api\/permissions$/, 'report.read'],
   ['GET', /^\/api\/directory$/, 'report.read'],
+  ['GET', /^\/api\/reports\/revocation$/, 'report.read'],
   ['PUT', /^\/api\/directory\/groups\/[^/]+$/, 'rule.manage'],
   ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => [m, /^\/scim\/v2(\/|$)/, 'directory.sync']),
 ];

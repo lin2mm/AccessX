@@ -74,7 +74,7 @@ async function init(){
   $('#mode').textContent=(st.mode||'').startsWith('DEMO')?'Demo data':'Live';
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 async function loadDoors(){
@@ -133,7 +133,7 @@ $('#people').addEventListener('click',async e=>{
   await loadPeople();
   const rc=r.reconcile;
   if(rc&&!rc.error)$('#people-msg').textContent=`Suspended. Credentials revoked remotely: ${Number(rc.revoked)} · awaiting on-site removal: ${Number(rc.pendingRemoval)}${rc.failed?' · failed (will retry): '+Number(rc.failed):''}`;
-  loadCreds();loadAudit();loadCompile();
+  loadCreds();loadAudit();loadCompile();loadRevocation();
 });
 /* ---- operators & single sign-on (shown only with role.manage / owner) ---- */
 const when=t=>t?esc(String(t).replace('T',' ').slice(0,16))+' UTC':'never';
@@ -210,6 +210,23 @@ $('#sso-remove').addEventListener('click',async()=>{
   $('#sso-msg').textContent=r.ok?'Single sign-on removed.':errText(r);
   loadAdmin();loadAudit();
 });
+
+const dur=s=>s===null||s===undefined?'—':s<90?`${Math.round(s)} s`:s<5400?`${Math.round(s/60)} min`:s<172800?`${(s/3600).toFixed(1)} h`:`${Math.round(s/86400)} d`;
+async function loadRevocation(){
+  const r=await api('/api/reports/revocation?days=30');
+  if(!r.ok){$('#ttr-kpis').innerHTML=`<div class="empty">${esc(errText(r))}</div>`;$('#ttr-open').innerHTML='';return;}
+  const o=r.open||{};
+  $('#ttr-kpis').innerHTML=`
+    <div class="kpi"><div class="n ${r.remote.p95Sec>300?'warn':'ok'}">${dur(r.remote.p95Sec)}</div><div class="l">Remote revoke p95 (${Number(r.remote.count)})</div></div>
+    <div class="kpi"><div class="n ${r.onsite.p95Sec>172800?'warn':''}">${dur(r.onsite.p95Sec)}</div><div class="l">On-site removal p95 (${Number(r.onsite.count)})</div></div>
+    <div class="kpi"><div class="n ${o.stillActive?'bad':o.count?'warn':'ok'}">${Number(o.count)||0}</div><div class="l">Still open${o.oldestSec?' · oldest '+dur(o.oldestSec):''}</div></div>`;
+  const door=id=>(DOORS.find(d=>Number(d.lockId)===Number(id))||{}).lockAlias||`Lock ${Number(id)}`;
+  $('#ttr-open').innerHTML=(o.items||[]).length?`<table><tr><th>Door</th><th>Why</th><th>Status</th><th>Open for</th></tr>`+
+    o.items.map(i=>`<tr><td>${esc(door(i.lockId))}</td><td>${esc(i.trigger)}</td>
+    <td>${i.outcome==='open_remote'?'<span class="tag r">code still works — revoke failing</span>':'<span class="tag o">remove at the lock</span>'}</td>
+    <td>${dur(i.ageSec)}</td></tr>`).join('')+'</table>'
+    :`<div class="meta">Nothing open. ${Number(r.credentials)||0} credentials of ${r.triggers??'—'} leavers were removed in this window.</div>`;
+}
 
 async function loadRules(){
   const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);

@@ -21,6 +21,7 @@ const { operatorStatement } = require('./store/repo');
 const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
 const { createOidcClient, randomB64url } = require('./oidc-core');
 const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { revocationReport } = require('./reports-core');
 const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
 const { seedTenant } = require('./store/bootstrap');
 
@@ -542,6 +543,26 @@ function createApi({
       .raw("UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND via = 'sso' AND revoked_at IS NULL", [new Date().toISOString(), ctx.tenantId])
       .audit('sso.remove', sso.issuer, ctx.actor).commit();
     return publicSso(null, ctx.origin);
+  });
+
+  // --- reports ------------------------------------------------------------
+  route('GET', /^\/api\/reports\/revocation$/, async ctx => {
+    const days = Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 365);
+    const now = Date.now();
+    const since = now - days * 86400e3;
+    // Walk back through the chain until the window (plus 1 day of lead-in
+    // for triggers whose credential events fall inside it) is covered.
+    const events = [];
+    for (let before = null; ;) {
+      const page = await ctx.t.auditRecent({ limit: 1000, before });
+      events.push(...page);
+      if (page.length < 1000 || Date.parse(page[page.length - 1].ts) < since - 86400e3) break;
+      before = page[page.length - 1].seq;
+    }
+    const snap = await ctx.snap();
+    const report = revocationReport(events, { credentials: snap.credentials, now, since, lockVisible: id => ctx.scope.lock(id) });
+    if (!ctx.scope.all) delete report.triggers; // other sites' leavers are not yours to count
+    return { windowDays: days, generatedAt: new Date(now).toISOString(), ...report };
   });
 
   // --- directory (SCIM) overview + group mapping ---------------------------
