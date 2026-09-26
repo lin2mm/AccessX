@@ -3,17 +3,20 @@
     {
       "id": "site_river",
       "name": "Riverside Office",
-      "address": "12 Riverside Way, Bristol"
+      "address": "12 Riverside Way, Bristol",
+      "timezone": "Europe/London"
     },
     {
       "id": "site_gym",
       "name": "Northgate Gym",
-      "address": "4 Northgate, Leeds"
+      "address": "4 Northgate, Leeds",
+      "timezone": "Europe/London"
     },
     {
       "id": "site_store",
       "name": "Selfstore Depot",
-      "address": "Unit 7, Enfield"
+      "address": "Unit 7, Enfield",
+      "timezone": "Europe/London"
     }
   ],
   "doorGroups": [
@@ -415,5 +418,8 @@
       "action": "seed",
       "detail": "demo dataset created"
     }
-  ]
+  ],
+  "settings": {
+    "defaultTimezone": "UTC"
+  }
 }

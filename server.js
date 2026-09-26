@@ -41,9 +41,9 @@ function seed() {
   if (db.sites.length) return db;
 
   db.sites = [
-    { id: 'site_river', name: 'Riverside Office',  address: '12 Riverside Way, Bristol' },
-    { id: 'site_gym',   name: 'Northgate Gym',     address: '4 Northgate, Leeds' },
-    { id: 'site_store', name: 'Selfstore Depot',   address: 'Unit 7, Enfield' },
+    { id: 'site_river', name: 'Riverside Office',  address: '12 Riverside Way, Bristol', timezone: 'Europe/London' },
+    { id: 'site_gym',   name: 'Northgate Gym',     address: '4 Northgate, Leeds', timezone: 'Europe/London' },
+    { id: 'site_store', name: 'Selfstore Depot',   address: 'Unit 7, Enfield', timezone: 'Europe/London' },
   ];
   db.doorGroups = [
     { id: 'dg_pub',   siteId: 'site_river', name: 'Public Doors',    lockIds: [9001] },
@@ -165,9 +165,20 @@ app.post('/api/doors/:id/unlock', async (req, res) => {
 // ---- Access decision explainer (the killer demo feature) ----------
 app.post('/api/evaluate', (req, res) => {
   const db = acl.load();
-  const { userId, lockId, when } = req.body || {};
-  const at = when ? new Date(when) : new Date();
-  ok(res, { at: at.toISOString(), result: acl.evaluate(db, userId, Number(lockId), at) });
+  const { userId, lockId, when, localTime } = req.body || {};
+  const site = acl.siteForLock(db, lockId);
+  const timeZone = acl.siteTimeZone(db, site && site.id);
+  // localTime = wall-clock time at the door's site ("2026-09-28T21:00");
+  // when = absolute instant (ISO with offset). localTime wins if both sent.
+  const at = localTime ? acl.zonedTimeToDate(localTime, timeZone) : when ? new Date(when) : new Date();
+  if (Number.isNaN(at.getTime())) return res.status(400).json({ ok: false, error: 'invalid date' });
+  ok(res, {
+    at: at.toISOString(),
+    site: site ? site.name : null,
+    timeZone,
+    localTime: acl.localParts(at, timeZone).label,
+    result: acl.evaluate(db, userId, Number(lockId), at),
+  });
 });
 
 app.get('/api/users/:id/doors', (req, res) => {
@@ -318,9 +329,13 @@ function aiTools(db, doors) {
     explainDenial(personName) {
       const u = db.users.find(x => x.name.toLowerCase().includes(personName));
       if (!u) return null;
-      const at = new Date(); at.setUTCHours(21, 0, 0, 0);
-      const res = doors.map(d => ({ door: d.lockAlias, r: acl.evaluate(db, u.id, d.lockId, at) }));
-      return { user: u.name, at: at.toISOString(), res };
+      // "9pm" means 9pm at each door's own site, not 21:00 UTC.
+      const res = doors.map(d => {
+        const tz = acl.siteTimeZone(db, (acl.siteForLock(db, d.lockId) || {}).id);
+        const today = acl.localParts(new Date(), tz).isoDate;
+        return { door: d.lockAlias, r: acl.evaluate(db, u.id, d.lockId, acl.zonedTimeToDate(`${today}T21:00`, tz)) };
+      });
+      return { user: u.name, res };
     },
   };
 }
@@ -362,7 +377,7 @@ app.post('/api/ai', async (req, res) => {
       const r = m ? T.explainDenial(m[1]) : null;
       if (r) {
         const denied = r.res.filter(x => !x.r.allowed).slice(0, 4);
-        answer = `<b>${r.user}</b> at 21:00 UTC:<br>` +
+        answer = `<b>${r.user}</b> at 21:00 (each site's local time):<br>` +
           denied.map(x => `· ${x.door}: ${x.r.reason}`).join('<br>') +
           `<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.`;
       } else {
@@ -387,5 +402,9 @@ app.post('/api/ai', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Access control server on ${PORT} — mode: ${DEMO ? 'DEMO' : 'LIVE'}`));
+module.exports = { app };
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, '0.0.0.0', () => console.log(`Access control server on ${PORT} — mode: ${DEMO ? 'DEMO' : 'LIVE'}`));
+}

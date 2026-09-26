@@ -192,15 +192,14 @@ function aiTools(db, doors) {
     explainDenial(personName) {
       const user = db.users.find(item => item.name.toLowerCase().includes(personName));
       if (!user) return null;
-      const at = new Date();
-      at.setUTCHours(21, 0, 0, 0);
       return {
         user: user.name,
-        at: at.toISOString(),
-        res: doors.map(door => ({
-          door: door.lockAlias,
-          r: policy.evaluate(db, user.id, door.lockId, at),
-        })),
+        res: doors.map(door => {
+          const timeZone = policy.siteTimeZone(db, (policy.siteForLock(db, door.lockId) || {}).id);
+          const today = policy.localParts(new Date(), timeZone).isoDate;
+          const at = policy.zonedTimeToDate(`${today}T21:00`, timeZone);
+          return { door: door.lockAlias, r: policy.evaluate(db, user.id, door.lockId, at) };
+        }),
       };
     },
   };
@@ -268,10 +267,17 @@ async function handleApi(request, env) {
     if (method === 'POST' && pathname === '/api/evaluate') {
       const body = await readBody(request);
       if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const at = body.when ? new Date(body.when) : new Date();
+      const site = policy.siteForLock(acl, body.lockId);
+      const timeZone = policy.siteTimeZone(acl, site && site.id);
+      const at = body.localTime
+        ? policy.zonedTimeToDate(body.localTime, timeZone)
+        : body.when ? new Date(body.when) : new Date();
       if (Number.isNaN(at.getTime())) return json({ ok: false, error: 'invalid date' }, 400);
       return json(ok({
         at: at.toISOString(),
+        site: site ? site.name : null,
+        timeZone,
+        localTime: policy.localParts(at, timeZone).label,
         result: policy.evaluate(acl, body.userId, Number(body.lockId), at),
       }));
     }
@@ -394,7 +400,7 @@ async function handleApi(request, env) {
         const result = match ? tools.explainDenial(match[1]) : null;
         if (result) {
           const denied = result.res.filter(item => !item.r.allowed).slice(0, 4);
-          answer = `<b>${result.user}</b> at 21:00 UTC:<br>${denied.map(item => `· ${item.door}: ${item.r.reason}`).join('<br>')}`
+          answer = `<b>${result.user}</b> at 21:00 (each site's local time):<br>${denied.map(item => `· ${item.door}: ${item.r.reason}`).join('<br>')}`
             + '<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.';
         } else {
           answer = 'Tell me who was denied — e.g. "why was Sarah denied at 9pm?"';
