@@ -940,7 +940,8 @@ function createApi({
     }
   }
 
-  return { handle, reconcileAll, reconcileTenant, whenReady };
+  // `routes` is exported for the cross-tenant fuzz gate (test/isolation.fuzz.test.js).
+  return { handle, reconcileAll, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };
