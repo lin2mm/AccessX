@@ -78,6 +78,7 @@ button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:va
 .btn:hover{background:var(--action-hover)}
 .btn2{background:transparent;color:var(--action);border-color:var(--action)}
 .btn2:hover{background:var(--db800)}
+a.btn2{text-decoration:none;display:inline-block}
 .btn.sm{padding:6px 12px;font-size:12px}
 button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .bat{font-weight:700;font-size:12px}
@@ -149,8 +150,9 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
     </div>
     <form id="admin-form" autocomplete="off">
       <input id="admin-token" type="password" aria-label="Operator token" autocomplete="current-password" placeholder="Operator token">
-      <button class="btn2 sm" type="submit">Unlock</button>
-      <button class="btn2 sm" id="admin-logout" type="button" hidden>Lock</button>
+      <button class="btn2 sm" id="admin-submit" type="submit">Sign in</button>
+      <a class="btn2 sm" id="sso-btn" href="/api/auth/sso/start" hidden>Sign in with SSO</a>
+      <button class="btn2 sm" id="admin-logout" type="button" hidden>Sign out</button>
       <span id="admin-status" aria-live="polite">Read-only</span>
     </form>
   </div>

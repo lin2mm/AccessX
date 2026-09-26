@@ -2,50 +2,69 @@
    Server-built HTML (copilot answers) is escaped server-side. */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let adminToken='';
+// No token is ever kept in the page. Signing in exchanges it for an
+// HttpOnly session cookie; only the CSRF token lives in memory.
+let csrf='', signedIn=false;
 const api=async(u,o={})=>{
   const headers=new Headers(o.headers||{});
-  if(adminToken)headers.set('Authorization',`Bearer ${adminToken}`);
+  const m=(o.method||'GET').toUpperCase();
+  if(csrf&&m!=='GET'&&m!=='HEAD')headers.set('X-CSRF-Token',csrf);
   if(o.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
-  const r=await fetch(u,{...o,headers});
+  const r=await fetch(u,{...o,headers,credentials:'same-origin'});
   const body=await r.json().catch(()=>({ok:false,error:`HTTP ${r.status}`}));
   return {...body,_status:r.status};
 };
 const post=(u,data)=>api(u,{method:'POST',body:JSON.stringify(data||{})});
 let DOORS=[],USERS=[];
 
+function showSession(s){
+  signedIn=Boolean(s&&s.authenticated);
+  csrf=signedIn?s.csrf:'';
+  $('#admin-logout').hidden=!signedIn;
+  $('#admin-token').hidden=signedIn;$('#admin-submit').hidden=signedIn;
+  $('#sso-btn').hidden=signedIn||!(s&&s.sso);
+  if(signedIn){
+    const op=s.operator||{};
+    const scope=(op.siteIds||['*']).includes('*')?'all sites':op.siteIds.join(', ');
+    $('#admin-status').textContent=`${op.name||'Operator'} · ${op.roleName||op.role||''} · ${scope}${s.via==='sso'?' · SSO':''}`;
+  }
+}
 $('#admin-form').addEventListener('submit',async e=>{
   e.preventDefault();
-  const candidate=$('#admin-token').value;
-  const r=await fetch('/api/auth/verify',{method:'POST',headers:{Authorization:`Bearer ${candidate}`}});
-  const result=await r.json();
-  if(r.ok){
-    adminToken=candidate;$('#admin-token').value='';
-    const op=result.operator||{};
-    const scope=(op.siteIds||['*']).includes('*')?'all sites':op.siteIds.join(', ');
-    $('#admin-status').textContent=`${op.name||'Operator'} · ${op.roleName||op.role||''} · ${scope}`;
-    $('#admin-logout').hidden=false;
-    await init();
-  }else{
-    $('#admin-status').textContent=result.error||'Token rejected';
+  const token=$('#admin-token').value;$('#admin-token').value='';
+  const r=await post('/api/auth/login',{token});
+  if(r.ok){showSession(r);await init();}
+  else $('#admin-status').textContent=r._status===429?'Too many attempts — wait a few minutes':(r.error||'Token rejected');
+});
+$('#admin-logout').addEventListener('click',async()=>{
+  await post('/api/auth/logout',{});
+  showSession(null);$('#admin-status').textContent='Read-only';init();
+});
+{
+  const q=new URLSearchParams(location.search);
+  const err=q.get('sso_error');
+  if(err){
+    const msg={not_invited:'Your SSO account has no operator access here. Ask an owner to invite your email.',
+      unverified_email:'Your identity provider did not confirm your email address.',
+      expired:'The sign-in took too long. Please try again.'}[err]||'Single sign-on failed.';
+    setTimeout(()=>{$('#admin-status').textContent=msg;},0);
+    history.replaceState(null,'',location.pathname);
   }
-});
-$('#admin-logout').addEventListener('click',()=>{
-  adminToken='';$('#admin-status').textContent='Read-only';$('#admin-logout').hidden=true;init();
-});
+}
 
 $$('nav button').forEach(b=>b.onclick=()=>{
   $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
   $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
 });
 const batClass=n=>n>50?'hi':n>25?'mid':'lo';
-const errText=r=>r._status===401?'Sign in with an operator token first':r._status===403?`No permission${r.required?` (needs ${r.required})`:''}${r.detail?': '+r.detail:''}`:(r.error||'Request failed');
+const errText=r=>r._status===401?'Sign in first':r._status===403?`No permission${r.required?` (needs ${r.required})`:''}${r.detail?': '+r.detail:''}`:(r.error||'Request failed');
 
 async function init(){
-  const auth=await fetch('/api/auth').then(r=>r.json());
-  if(!auth.openReads&&!adminToken){
+  const auth=await api('/api/auth/session');
+  showSession(auth);
+  if(!auth.openReads&&!signedIn){
     $('#mode').textContent=auth.tokenConfigured||auth.operatorsConfigured?'Sign-in required':'Setup required';
-    $('#admin-status').textContent=auth.operatorsConfigured?'Token required for live data':'Set ADMIN_TOKEN on server';
+    $('#admin-status').textContent=auth.operatorsConfigured||auth.sso?'Sign in for live data':'Set ADMIN_TOKEN on server';
     return;
   }
   const st=await api('/api/status');

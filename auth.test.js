@@ -101,3 +101,33 @@ test('reports read-only and locked auth states accurately', () => {
   assert.equal(configured.mode, 'TOKEN');
   assert.equal(configured.tokenConfigured, true);
 });
+
+test('sessions expire after inactivity and at their absolute lifetime', async () => {
+  const store = memoryStore();
+  await store.sql.batch([{ sql: "INSERT OR IGNORE INTO tenants (id, name) VALUES ('t_default', 'Default')", params: [] }]);
+  let clock = Date.parse('2026-09-27T00:00:00Z');
+  const auth = createAuthenticator({ store, adminToken: 'owner', now: () => clock, sessionIdleMs: 60 * 60e3, sessionTtlMs: 12 * 3600e3 });
+  const start = await auth.login({ token: 'owner' });
+  const cookie = `ax_session=${start.cookieValue}`;
+  const read = () => auth.authenticate({ method: 'GET', path: '/api/doors', cookie });
+
+  clock += 50 * 60e3; assert.equal((await read()).operator.id, 'owner');   // active use slides the idle window
+  clock += 50 * 60e3; assert.equal((await read()).operator.id, 'owner');
+  clock += 61 * 60e3; assert.ok((await read()).error, 'idle timeout');
+  const again = await auth.login({ token: 'owner' });
+  const c2 = `ax_session=${again.cookieValue}`;
+  for (let i = 0; i < 14; i++) { clock += 55 * 60e3; await auth.authenticate({ method: 'GET', path: '/api/doors', cookie: c2 }); }
+  assert.ok((await auth.authenticate({ method: 'GET', path: '/api/doors', cookie: c2 })).error, 'absolute lifetime (12h) reached');
+});
+
+test('cookie sessions need the CSRF token for writes; bearer tokens do not', async () => {
+  const store = memoryStore();
+  await store.sql.batch([{ sql: "INSERT OR IGNORE INTO tenants (id, name) VALUES ('t_default', 'Default')", params: [] }]);
+  const auth = createAuthenticator({ store, adminToken: 'owner' });
+  const s = await auth.login({ token: 'owner' });
+  const cookie = `ax_session=${s.cookieValue}`;
+  assert.equal(status(await auth.authenticate({ method: 'POST', path: '/api/sites', cookie })), 403);
+  assert.equal(status(await auth.authenticate({ method: 'POST', path: '/api/sites', cookie, csrf: 'wrong' })), 403);
+  assert.equal(status(await auth.authenticate({ method: 'POST', path: '/api/sites', cookie, csrf: s.csrf })), 200);
+  assert.equal(status(await auth.authenticate({ method: 'POST', path: '/api/sites', authorization: 'Bearer owner' })), 200);
+});

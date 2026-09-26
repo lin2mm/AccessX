@@ -33,6 +33,8 @@ const COLLECTIONS = {
     fields: {
       name: 'name', email: 'email', groupIds: ['group_ids', j], suspended: ['suspended', b],
       validFrom: 'valid_from', validTo: 'valid_to',
+      // directory provisioning (server-managed, never client-writable)
+      source: 'source', externalId: 'external_id', userName: 'user_name',
     },
   },
   schedules: {
@@ -45,6 +47,10 @@ const COLLECTIONS = {
   assignments: { table: 'assignments', fields: { userGroupId: 'user_group_id', doorGroupId: 'door_group_id', scheduleId: 'schedule_id' } },
   holidays: { table: 'holidays', fields: { date: 'date', name: 'name', siteId: 'site_id' } },
   roles: { table: 'roles', fields: { name: 'name', perms: ['perms', j] } },
+  directoryGroups: {
+    table: 'directory_groups',
+    fields: { externalId: 'external_id', displayName: 'display_name', userGroupId: 'user_group_id', memberIds: ['member_ids', j] },
+  },
   credentials: {
     table: 'credentials',
     fields: {
@@ -200,9 +206,10 @@ function createStore(sql) {
     }
 
     async function operators() {
-      const rows = await sql.all('SELECT id, name, role, site_ids, created_by, created_at, revoked_at FROM operators WHERE tenant_id = ? ORDER BY created_at', [tenantId]);
+      const rows = await sql.all('SELECT id, name, role, site_ids, email, sso_subject, last_login_at, created_by, created_at, revoked_at FROM operators WHERE tenant_id = ? ORDER BY created_at', [tenantId]);
       return rows.map(r => ({
         id: r.id, name: r.name, role: r.role, siteIds: r.site_ids ? JSON.parse(r.site_ids) : undefined,
+        email: r.email || undefined, ssoLinked: Boolean(r.sso_subject), lastLoginAt: r.last_login_at,
         createdBy: r.created_by, createdAt: r.created_at, revokedAt: r.revoked_at,
       }));
     }
@@ -214,10 +221,59 @@ function createStore(sql) {
     return { id: tenantId, snapshot, unit, auditRecent, auditCount, auditVerify, auditHead, operators, info };
   }
 
+  const OP_COLS = 'tenant_id, id, name, role, site_ids, email, sso_issuer, sso_subject';
+  const toOperator = r => (r ? {
+    tenantId: r.tenant_id, id: r.id, name: r.name, role: r.role, siteIds: r.site_ids ? JSON.parse(r.site_ids) : undefined,
+    email: r.email || undefined, ssoIssuer: r.sso_issuer || undefined, ssoSubject: r.sso_subject || undefined,
+  } : null);
+
   /** Token hash → operator (any tenant). Revoked operators never match. */
   async function operatorByTokenHash(hash) {
-    const r = await sql.first('SELECT tenant_id, id, name, role, site_ids FROM operators WHERE token_sha256 = ? AND revoked_at IS NULL', [hash]);
-    return r ? { tenantId: r.tenant_id, id: r.id, name: r.name, role: r.role, siteIds: r.site_ids ? JSON.parse(r.site_ids) : undefined } : null;
+    return toOperator(await sql.first(`SELECT ${OP_COLS} FROM operators WHERE token_sha256 = ? AND revoked_at IS NULL`, [hash]));
+  }
+  async function operatorById(tenantId, id) {
+    return toOperator(await sql.first(`SELECT ${OP_COLS} FROM operators WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL`, [tenantId, id]));
+  }
+  async function operatorBySso(issuer, subject) {
+    return toOperator(await sql.first(`SELECT ${OP_COLS} FROM operators WHERE sso_issuer = ? AND sso_subject = ? AND revoked_at IS NULL`, [issuer, subject]));
+  }
+  /** Invited (not yet linked) operator in one tenant, by email (case-insensitive). */
+  async function operatorInvite(tenantId, email) {
+    return toOperator(await sql.first(`SELECT ${OP_COLS} FROM operators WHERE tenant_id = ? AND lower(email) = lower(?) AND sso_subject IS NULL AND revoked_at IS NULL`, [tenantId, email]));
+  }
+
+  /* ---- browser sessions (only the SHA-256 of the cookie value is stored) ---- */
+  async function createSession(s) {
+    await sql.batch([{
+      sql: 'INSERT INTO sessions (id_sha256, tenant_id, operator_id, via, csrf, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      params: [s.idSha256, s.tenantId, s.operatorId, s.via, s.csrf, s.createdAt, s.createdAt, s.expiresAt],
+    }]);
+  }
+  async function findSession(idSha256) {
+    const r = await sql.first('SELECT * FROM sessions WHERE id_sha256 = ? AND revoked_at IS NULL', [idSha256]);
+    return r ? { idSha256: r.id_sha256, tenantId: r.tenant_id, operatorId: r.operator_id, via: r.via, csrf: r.csrf, createdAt: r.created_at, lastSeenAt: r.last_seen_at, expiresAt: r.expires_at } : null;
+  }
+  async function touchSession(idSha256, at) {
+    await sql.batch([{ sql: 'UPDATE sessions SET last_seen_at = ? WHERE id_sha256 = ?', params: [at, idSha256] }]);
+  }
+  async function revokeSession(idSha256, at = new Date().toISOString()) {
+    await sql.batch([{ sql: 'UPDATE sessions SET revoked_at = ? WHERE id_sha256 = ? AND revoked_at IS NULL', params: [at, idSha256] }]);
+  }
+
+  /* ---- in-flight OIDC logins ---- */
+  async function saveFlow(f) {
+    await sql.batch([
+      { sql: 'DELETE FROM auth_flows WHERE expires_at < ?', params: [new Date().toISOString()] }, // housekeeping
+      { sql: 'INSERT INTO auth_flows (state, tenant_id, nonce, code_verifier, redirect_uri, expires_at) VALUES (?, ?, ?, ?, ?, ?)', params: [f.state, f.tenantId, f.nonce, f.codeVerifier, f.redirectUri, f.expiresAt] },
+    ]);
+  }
+  /** Read-and-delete: a state can be used exactly once. */
+  async function takeFlow(state) {
+    const r = await sql.first('SELECT * FROM auth_flows WHERE state = ?', [state]);
+    if (!r) return null;
+    await sql.batch([{ sql: 'DELETE FROM auth_flows WHERE state = ?', params: [state] }]);
+    if (r.expires_at < new Date().toISOString()) return null;
+    return { state: r.state, tenantId: r.tenant_id, nonce: r.nonce, codeVerifier: r.code_verifier, redirectUri: r.redirect_uri };
   }
 
   async function createTenant(id, name) {
@@ -229,14 +285,23 @@ function createStore(sql) {
     return sql.all('SELECT id, name, seeded, created_at FROM tenants ORDER BY created_at');
   }
 
-  return { sql, tenant, operatorByTokenHash, createTenant, listTenants, COLLECTIONS };
+  async function tenantSettings(tenantId) {
+    const r = await sql.first('SELECT settings FROM tenants WHERE id = ?', [tenantId]);
+    return r ? JSON.parse(r.settings || '{}') : null;
+  }
+
+  return {
+    sql, tenant, createTenant, listTenants, tenantSettings, COLLECTIONS,
+    operatorByTokenHash, operatorById, operatorBySso, operatorInvite,
+    createSession, findSession, touchSession, revokeSession, saveFlow, takeFlow,
+  };
 }
 
 /** Rows for an operator insert (token already hashed). */
 function operatorStatement(tenantId, op) {
   return {
-    sql: 'INSERT INTO operators (tenant_id, id, name, role, site_ids, token_sha256, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    params: [tenantId, op.id, op.name, op.role, op.siteIds && op.siteIds.length ? JSON.stringify(op.siteIds) : null, op.tokenSha256, op.createdBy || null],
+    sql: 'INSERT INTO operators (tenant_id, id, name, role, site_ids, token_sha256, email, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    params: [tenantId, op.id, op.name, op.role, op.siteIds && op.siteIds.length ? JSON.stringify(op.siteIds) : null, op.tokenSha256, op.email || null, op.createdBy || null],
   };
 }
 

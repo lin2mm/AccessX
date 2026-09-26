@@ -18,6 +18,7 @@ const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
 const { sha256Hex } = require('./audit-core');
 const { operatorStatement } = require('./store/repo');
+const { sessionCookie, clearSessionCookies } = require('./cookies');
 const { seedTenant } = require('./store/bootstrap');
 
 class HttpError extends Error {
@@ -99,7 +100,7 @@ function createDetail(collection, item) {
   return JSON.stringify(item).slice(0, 200);
 }
 
-function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log = () => {} }) {
+function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax' }) {
   let ready = null;
   const whenReady = () => {
     if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
@@ -442,7 +443,9 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
     const target = (await ctx.t.operators()).find(o => o.id === id && !o.revokedAt);
     if (!target) throw new HttpError(404, 'not found');
     if (!ctx.scope.all && (!(target.siteIds || []).length || target.siteIds.some(s => !ctx.scope.site(s)))) throw outOfScope('operator is outside your sites');
-    await ctx.t.unit().raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [new Date().toISOString(), ctx.tenantId, id])
+    const at = new Date().toISOString();
+    await ctx.t.unit().raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+      .raw('UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND operator_id = ? AND revoked_at IS NULL', [at, ctx.tenantId, id])
       .audit('operator.revoke', id, ctx.actor).commit();
     return { revoked: id };
   });
@@ -556,16 +559,67 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
   /* ---------------------------------------------------------------- */
   /* Dispatcher                                                        */
   /* ---------------------------------------------------------------- */
+  /* ---------------------------------------------------------------- */
+  /* Browser sessions (public routes; they authenticate themselves)     */
+  /* ---------------------------------------------------------------- */
+  const cookieOpts = req => ({ secure: Boolean(req.secure), sameSite: cookieSameSite });
+
+  async function describeIn(tenantId, operator) {
+    const snap = await store.tenant(tenantId).snapshot();
+    return { operator: rbac.describe(snap, operator), tenant: snap.tenant };
+  }
+
+  const sessionRoutes = {
+    async 'POST /api/auth/login'(req, body) {
+      const result = await auth.login({ token: body.token, ip: req.ip || 'unknown' });
+      if (result.error) return result.error;
+      await store.tenant(result.tenantId).unit().audit('operator.login', 'via token', result.operator.id).commit();
+      return {
+        status: 200,
+        cookies: [sessionCookie(result.cookieValue, { ...cookieOpts(req), maxAgeSec: result.maxAgeSec })],
+        body: { ok: true, authenticated: true, via: 'token', csrf: result.csrf, expiresAt: result.expiresAt, ...(await describeIn(result.tenantId, result.operator)) },
+      };
+    },
+    async 'GET /api/auth/session'(req) {
+      const found = await auth.sessionFrom(req.headers.cookie || '');
+      if (!found) return { status: 200, body: { ok: true, authenticated: false, ...auth.status() } };
+      return {
+        status: 200,
+        body: {
+          ok: true, authenticated: true, via: found.session.via, csrf: found.session.csrf, expiresAt: found.session.expiresAt,
+          ...auth.status(), ...(await describeIn(found.session.tenantId, found.operator)),
+        },
+      };
+    },
+    async 'POST /api/auth/logout'(req) {
+      const found = await auth.sessionFrom(req.headers.cookie || '');
+      if (found && !rbac.constantTimeEqual(String(req.headers['x-csrf-token'] || ''), found.session.csrf)) {
+        return { status: 403, body: { ok: false, error: 'CSRF token missing or invalid' } };
+      }
+      await auth.logout(req.headers.cookie || '');
+      return { status: 200, cookies: clearSessionCookies(cookieOpts(req)), body: { ok: true, authenticated: false } };
+    },
+  };
+
   async function handle(req) {
     const method = String(req.method || 'GET').toUpperCase() === 'HEAD' ? 'GET' : String(req.method || 'GET').toUpperCase();
     const path = (String(req.path || '/').replace(/\/+$/, '') || '/');
+    req.headers = req.headers || {};
     try {
       if (path === '/api/auth' && method === 'GET') return { status: 200, body: { ok: true, ...auth.status() } };
       await whenReady();
+      const sessionRoute = sessionRoutes[`${method} ${path}`];
+      if (sessionRoute) {
+        const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+        return await sessionRoute(req, body);
+      }
 
       const found = routes.find(r => r.method === method && r.pattern.test(path));
       const headers = req.headers || {};
-      const who = await auth.authenticate({ method, path, authorization: headers.authorization || '', ip: req.ip || 'unknown' });
+      const who = await auth.authenticate({
+        method, path, ip: req.ip || 'unknown',
+        authorization: headers.authorization || '', cookie: headers.cookie || '', csrf: headers['x-csrf-token'] || '',
+      });
       if (who.error) return who.error;
       if (!found) return { status: 404, body: { ok: false, error: 'not found' } };
 

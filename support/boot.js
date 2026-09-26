@@ -20,12 +20,15 @@ async function boot(env = {}) {
   });
   process.env = saved;
   const base = `http://127.0.0.1:${server.address().port}`;
-  async function call(method, url, { token, body } = {}) {
-    const headers = {};
+  async function call(method, url, { token, body, headers: extra = {}, contentType = 'application/json' } = {}) {
+    const headers = { ...extra };
     if (token) headers.authorization = `Bearer ${token}`;
-    if (body !== undefined) headers['content-type'] = 'application/json';
-    const res = await fetch(base + url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: res.status, body: await res.json() };
+    if (body !== undefined) headers['content-type'] = contentType;
+    const res = await fetch(base + url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'manual' });
+    const text = await res.text();
+    let parsed = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+    return { status: res.status, body: parsed, headers: res.headers, cookies: res.headers.getSetCookie() };
   }
   return {
     call,

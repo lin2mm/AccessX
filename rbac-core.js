@@ -54,6 +54,9 @@ const COLLECTION_PERMS = {
 // [method, pattern, permission]. First match wins.
 const ROUTES = [
   ['GET', /^\/api\/auth$/, PUBLIC],
+  ['GET', /^\/api\/auth\/session$/, PUBLIC],
+  ['POST', /^\/api\/auth\/(login|logout)$/, PUBLIC],
+  ['GET', /^\/api\/auth\/sso\/(start|callback)$/, PUBLIC],
   ['POST', /^\/api\/auth\/verify$/, AUTHENTICATED],
   ['GET', /^\/api\/me$/, AUTHENTICATED],
   ['GET', /^\/api\/(status|doors|vendor)$/, 'door.read'],

@@ -67,7 +67,10 @@ const auth = createAuthenticator({
   platformToken: process.env.PLATFORM_TOKEN || '',
   openReads: process.env.AUTH_OPEN_READS === undefined ? tt.demo : process.env.AUTH_OPEN_READS === '1',
 });
-const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a) });
+const api = createApi({
+  store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a),
+  cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
+});
 
 /* ---------------- HTTP ---------------- */
 const app = express();
@@ -88,11 +91,13 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
   next();
 });
-app.use('/api', express.json({ limit: '64kb' }));
-app.use('/api', async (req, res) => {
+// SCIM clients (Entra ID, Okta) send application/scim+json.
+app.use(['/api', '/scim'], express.json({ limit: '64kb', type: ['application/json', 'application/scim+json'] }));
+app.use(['/api', '/scim'], async (req, res) => {
   // NOTE: x-forwarded-for is client-controlled unless a trusted proxy
   // overwrites it. Behind a proxy, configure Express "trust proxy" instead.
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http')).split(',')[0].trim();
   const out = await api.handle({
     method: req.method,
     path: req.originalUrl.split('?')[0],
@@ -100,8 +105,15 @@ app.use('/api', async (req, res) => {
     body: req.body,
     headers: req.headers,
     ip,
+    secure: proto === 'https',
+    origin: process.env.PUBLIC_URL || `${proto}://${req.headers['x-forwarded-host'] || req.headers.host}`,
   });
-  res.status(out.status).json(out.body);
+  for (const c of out.cookies || []) res.append('Set-Cookie', c);
+  if (out.headers) res.set(out.headers);
+  if (out.redirect) return res.redirect(302, out.redirect);
+  if (out.body === null || out.body === undefined) return res.status(out.status).end();
+  if (out.contentType) return res.status(out.status).type(out.contentType).send(JSON.stringify(out.body));
+  return res.status(out.status).json(out.body);
 });
 app.use(express.static(path.join(__dirname, 'public')));
 // Malformed JSON and oversize bodies → JSON errors, not HTML stack traces.

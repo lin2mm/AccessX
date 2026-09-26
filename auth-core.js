@@ -8,10 +8,23 @@
  *   3. operators table        → created via POST /api/operators, revocable
  * PLATFORM_TOKEN is separate: it can create tenants and nothing else.
  *
+ * Browsers do not hold tokens: they exchange one (or an SSO login) for an
+ * HttpOnly session cookie. Cookie-authenticated unsafe requests must carry
+ * the session's CSRF token in X-CSRF-Token.
+ *
  * Returns { operator, tenantId } or { error: { status, body } }.
  */
 const rbac = require('./rbac-core');
 const { sha256Hex } = require('./audit-core');
+const { sessionIdFrom } = require('./cookies');
+
+const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function randomHex(bytes = 32) {
+  const buf = new Uint8Array(bytes);
+  globalThis.crypto.getRandomValues(buf);
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
 
 const DEFAULT_TENANT = 't_default';
 const MAX_FAILS = 8;
@@ -26,6 +39,9 @@ function createAuthenticator({
   defaultTenant = DEFAULT_TENANT,
   maxFails = MAX_FAILS,
   windowMs = WINDOW_MS,
+  sessionTtlMs = 12 * 3600e3,   // absolute lifetime
+  sessionIdleMs = 60 * 60e3,    // sign out after an hour without activity
+  now = () => Date.now(),
 } = {}) {
   const directory = rbac.parseOperators(operatorsJson, adminToken ? sha256Hex(adminToken) : '')
     .map(op => ({ ...op, tenantId: op.tenantId || defaultTenant, source: 'env' }));
@@ -47,11 +63,76 @@ function createAuthenticator({
     return Boolean(await store.sql.first('SELECT 1 AS x FROM operators WHERE revoked_at IS NULL LIMIT 1'));
   }
 
-  async function authenticate({ method, path, authorization = '', ip = 'unknown' }) {
+  /** Operator behind a session: env (bootstrap) or database, never revoked. */
+  async function operatorFor(tenantId, operatorId) {
+    const env = directory.find(op => op.tenantId === tenantId && op.id === operatorId);
+    if (env) { const { tokenSha256, ...safe } = env; return safe; }
+    return store.operatorById(tenantId, operatorId);
+  }
+
+  /** Valid session for a Cookie header, or null. Slides last_seen_at. */
+  async function sessionFrom(cookieHeader) {
+    const id = sessionIdFrom(cookieHeader);
+    if (!id) return null;
+    const hash = sha256Hex(id);
+    const session = await store.findSession(hash);
+    if (!session) return null;
+    const t = now();
+    if (Date.parse(session.expiresAt) <= t || Date.parse(session.lastSeenAt) + sessionIdleMs <= t) {
+      await store.revokeSession(hash);
+      return null;
+    }
+    const operator = await operatorFor(session.tenantId, session.operatorId);
+    if (!operator) { await store.revokeSession(hash); return null; }
+    // Write at most every 5 minutes: sliding expiry without a write per request.
+    if (t - Date.parse(session.lastSeenAt) > 5 * 60e3) await store.touchSession(hash, new Date(t).toISOString());
+    return { session, operator };
+  }
+
+  async function startSession(operator, tenantId, via) {
+    const id = randomHex(32);
+    const csrf = randomHex(16);
+    const createdAt = new Date(now()).toISOString();
+    const expiresAt = new Date(now() + sessionTtlMs).toISOString();
+    await store.createSession({ idSha256: sha256Hex(id), tenantId, operatorId: operator.id, via, csrf, createdAt, expiresAt });
+    return { cookieValue: id, csrf, expiresAt, maxAgeSec: Math.floor(sessionTtlMs / 1000) };
+  }
+
+  /** Exchange a bearer token for a browser session. Same rate limit as API auth. */
+  async function login({ token, ip = 'unknown' }) {
+    const failed = failures.get(ip);
+    if (failed && Date.now() > failed.resetAt) failures.delete(ip);
+    if (failed && failed.count >= maxFails && Date.now() <= failed.resetAt) return err(429, 'too many failed auth attempts, try later');
+    const hash = sha256Hex(String(token || '').trim());
+    const operator = token ? (rbac.findOperator(directory, hash) || (await store.operatorByTokenHash(hash))) : null;
+    if (!operator) {
+      if (noteFail(ip) >= maxFails) return err(429, 'too many failed auth attempts, try later');
+      return err(401, 'unauthorized');
+    }
+    failures.delete(ip);
+    const { tokenSha256, ...safe } = operator;
+    return { operator: safe, tenantId: operator.tenantId, ...(await startSession(safe, operator.tenantId, 'token')) };
+  }
+
+  async function logout(cookieHeader) {
+    const id = sessionIdFrom(cookieHeader);
+    if (id) await store.revokeSession(sha256Hex(id));
+  }
+
+  async function authenticate({ method, path, authorization = '', cookie = '', csrf = '', ip = 'unknown' }) {
     const perm = rbac.requiredPermission(method, path);
     if (perm === rbac.PUBLIC) return { operator: null, tenantId: defaultTenant, perm };
 
     const match = String(authorization).match(/^Bearer\s+(.+)$/i);
+    if (!match && cookie && perm !== rbac.PLATFORM) {
+      const found = await sessionFrom(cookie);
+      if (found) {
+        if (UNSAFE.has(method) && !rbac.constantTimeEqual(String(csrf || ''), found.session.csrf)) {
+          return err(403, 'CSRF token missing or invalid');
+        }
+        return { operator: found.operator, tenantId: found.session.tenantId, perm, via: 'session' };
+      }
+    }
     if (!match) {
       if (openReads && perm !== rbac.PLATFORM && rbac.hasPermission(null, rbac.ANONYMOUS, perm)) {
         return { operator: rbac.ANONYMOUS, tenantId: defaultTenant, perm };
@@ -105,7 +186,7 @@ function createAuthenticator({
       .map(({ id, name, role, siteIds }) => ({ id, name, role, siteIds, source: 'env (bootstrap)' }));
   }
 
-  return { authenticate, status, envOperators, defaultTenant };
+  return { authenticate, status, envOperators, defaultTenant, login, logout, sessionFrom, startSession, operatorFor };
 }
 
 module.exports = { createAuthenticator, DEFAULT_TENANT };

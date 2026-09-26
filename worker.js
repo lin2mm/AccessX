@@ -14,9 +14,15 @@ import { createDemoVendor, staticMirror } from './vendor-demo.js';
 
 const MAX_BODY = 64 * 1024;
 
-function json(data, status = 200) {
-  return Response.json(data, { status, headers: { 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } });
+function toResponse(out) {
+  const headers = new Headers({ 'x-content-type-options': 'nosniff', 'cache-control': 'no-store', ...(out.headers || {}) });
+  for (const c of out.cookies || []) headers.append('set-cookie', c);
+  if (out.redirect) { headers.set('location', out.redirect); return new Response(null, { status: 302, headers }); }
+  if (out.body === null || out.body === undefined) return new Response(null, { status: out.status, headers });
+  headers.set('content-type', out.contentType || 'application/json');
+  return new Response(JSON.stringify(out.body), { status: out.status, headers });
 }
+const json = (body, status = 200) => toResponse({ status, body });
 
 async function appState(sql, key) {
   const row = await sql.first('SELECT value FROM app_state WHERE key = ?', [key]);
@@ -30,7 +36,7 @@ async function appState(sql, key) {
  */
 let cached = null;
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -65,7 +71,7 @@ function apiFor(env) {
     });
   };
 
-  const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a) });
+  const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -86,16 +92,22 @@ async function handleApi(request, env) {
     path: url.pathname,
     query: url.searchParams,
     body,
-    headers: { authorization: request.headers.get('authorization') || '' },
+    headers: {
+      authorization: request.headers.get('authorization') || '',
+      cookie: request.headers.get('cookie') || '',
+      'x-csrf-token': request.headers.get('x-csrf-token') || '',
+    },
     ip: request.headers.get('cf-connecting-ip') || 'unknown',
+    secure: url.protocol === 'https:',
+    origin: env.PUBLIC_URL || url.origin,
   });
-  return json(out.body, out.status);
+  return toResponse(out);
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/api/')) return handleApi(request, env);
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
     return env.ASSETS.fetch(request);
   },
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
