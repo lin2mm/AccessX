@@ -70,6 +70,9 @@ const auth = createAuthenticator({
 const api = createApi({
   store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
+  secretsKey: process.env.SECRETS_KEY || '',
+  // The bundled mock IdP runs on plain http; real issuers must be https.
+  allowHttpIssuers: process.env.MOCK_IDP === '1',
 });
 
 /* ---------------- HTTP ---------------- */
@@ -115,6 +118,12 @@ app.use(['/api', '/scim'], async (req, res) => {
   if (out.contentType) return res.status(out.status).type(out.contentType).send(JSON.stringify(out.body));
   return res.status(out.status).json(out.body);
 });
+if (process.env.MOCK_IDP === '1') {
+  // Demo/test identity provider. NEVER enable in production: anyone can
+  // "log in" as any of its users.
+  console.warn('WARNING: MOCK_IDP=1 — a fake identity provider is mounted at /mock-idp (demo only)');
+  app.use('/mock-idp', require('./support/mock-idp').createMockIdp({ basePath: '/mock-idp' }).router);
+}
 app.use(express.static(path.join(__dirname, 'public')));
 // Malformed JSON and oversize bodies → JSON errors, not HTML stack traces.
 // eslint-disable-next-line no-unused-vars
@@ -135,12 +144,42 @@ function startReconciler(minutes = Number(process.env.RECONCILE_INTERVAL_MIN ?? 
   return timer;
 }
 
-module.exports = { app, api, store, startReconciler };
+/**
+ * Demo convenience (MOCK_IDP_AUTOCONFIGURE=1): point the default tenant's
+ * SSO at the bundled mock IdP and invite alice@riverside.example as a
+ * Riverside site manager, so the preview shows the whole SSO flow.
+ */
+async function autoconfigureMockSso(port) {
+  const settings = (await store.tenantSettings(DEFAULT_TENANT)) || {};
+  if (settings.sso) return;
+  const issuer = `http://127.0.0.1:${port}/mock-idp`;
+  const sso = { issuer, clientId: 'accessx-demo', domains: ['riverside.example'], trustUnverifiedEmail: false, clientSecretEnc: null, updatedAt: new Date().toISOString() };
+  const t = store.tenant(DEFAULT_TENANT);
+  const uow = t.unit().raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...settings, sso }), DEFAULT_TENANT])
+    .audit('sso.configure', `issuer=${issuer} client=accessx-demo domains=riverside.example secret=none (mock autoconfigure)`, 'system');
+  const snap = await t.snapshot();
+  const river = snap.sites.find(x => /river/i.test(x.name)) || snap.sites[0];
+  if (!(await t.operators()).some(o => o.email === 'alice@riverside.example')) {
+    const { operatorStatement } = require('./store/repo');
+    const crypto = require('node:crypto');
+    const op = { id: 'op_alice', name: 'Alice Chen', role: 'r_manager', siteIds: river ? [river.id] : [], email: 'alice@riverside.example',
+      tokenSha256: crypto.createHash('sha256').update(`unusable:${crypto.randomBytes(16).toString('hex')}`).digest('hex'), createdBy: 'system' };
+    const stmt = operatorStatement(DEFAULT_TENANT, op);
+    uow.raw(stmt.sql, stmt.params).audit('operator.create', `${op.id} role=r_manager sites=${op.siteIds.join(',')} auth=sso`, 'system');
+  }
+  await uow.commit();
+  console.log(`SSO autoconfigured against the mock IdP (${issuer}); invited alice@riverside.example`);
+}
+
+module.exports = { app, api, store, startReconciler, autoconfigureMockSso };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   api.whenReady().then(() => {
     startReconciler();
-    app.listen(PORT, '0.0.0.0', () => console.log(`Access control server on ${PORT} — mode: ${tt.demo ? 'DEMO' : 'LIVE'} — db: ${path.join(DATA_DIR, 'accessx.sqlite')}`));
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Access control server on ${PORT} — mode: ${tt.demo ? 'DEMO' : 'LIVE'} — db: ${path.join(DATA_DIR, 'accessx.sqlite')}`);
+      if (process.env.MOCK_IDP === '1' && process.env.MOCK_IDP_AUTOCONFIGURE === '1') autoconfigureMockSso(PORT).catch(e => console.error('mock SSO autoconfigure failed:', e));
+    });
   }).catch(error => { console.error('startup failed:', error); process.exit(1); });
 }

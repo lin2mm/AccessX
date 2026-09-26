@@ -206,6 +206,7 @@ function describe(db, operator) {
     roleName: role ? role.name : operator.role,
     perms: permsFor(db, operator),
     siteIds: allSites(operator) ? ['*'] : operator.siteIds,
+    siteNames: allSites(operator) ? undefined : operator.siteIds.map(id => ((db && db.sites) || []).find(s => s.id === id)?.name || id),
     anonymous: Boolean(operator.anonymous),
   };
 }

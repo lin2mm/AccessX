@@ -32,8 +32,10 @@ ALTER TABLE operators ADD COLUMN email TEXT;
 ALTER TABLE operators ADD COLUMN sso_issuer TEXT;
 ALTER TABLE operators ADD COLUMN sso_subject TEXT;
 ALTER TABLE operators ADD COLUMN last_login_at TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS operators_email ON operators (tenant_id, email) WHERE email IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS operators_sso ON operators (sso_issuer, sso_subject) WHERE sso_subject IS NOT NULL;
+-- Only live operators must be unique: a revoked row keeps its history, and
+-- re-inviting the same person (rehire) must be able to link again.
+CREATE UNIQUE INDEX IF NOT EXISTS operators_email ON operators (tenant_id, email) WHERE email IS NOT NULL AND revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS operators_sso ON operators (sso_issuer, sso_subject) WHERE sso_subject IS NOT NULL AND revoked_at IS NULL;
 
 -- Door users provisioned from a directory (Entra ID / Okta / Google via SCIM).
 ALTER TABLE users ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';   -- manual | scim

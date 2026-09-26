@@ -79,6 +79,7 @@ button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:va
 .btn2{background:transparent;color:var(--action);border-color:var(--action)}
 .btn2:hover{background:var(--db800)}
 a.btn2{text-decoration:none;display:inline-block}
+[hidden]{display:none!important}
 .btn.sm{padding:6px 12px;font-size:12px}
 button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .bat{font-weight:700;font-size:12px}
@@ -228,6 +229,32 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
     <div class="card"><h2>People</h2><div id="people"></div></div>
     <div class="card"><h2>User groups</h2><div id="ugroups"></div></div>
     <div class="card"><h2>Schedules</h2><div id="scheds"></div></div>
+    <div class="card" id="admin-card" hidden>
+      <h2>Operators &amp; sign-in</h2>
+      <div id="ops"></div>
+      <form id="invite-form" class="grid c3" style="margin-top:12px;align-items:end">
+        <label>Name<input id="i-name" required maxlength="100" autocomplete="off"></label>
+        <label>Work email<input id="i-email" type="email" required maxlength="254" autocomplete="off"></label>
+        <label>Role<select id="i-role">
+          <option value="r_manager">Site Manager</option><option value="r_installer">Installer</option>
+          <option value="r_view">Auditor</option><option value="r_owner">Account Owner</option></select></label>
+        <label>Sites<select id="i-site"></select></label>
+        <div><button class="btn sm" type="submit">Invite (single sign-on)</button></div>
+        <div id="invite-msg" class="meta"></div>
+      </form>
+      <div id="sso-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Single sign-on (OpenID Connect)</b>
+        <div id="sso-state" class="meta" style="margin:4px 0 8px"></div>
+        <form id="sso-form" class="grid c3" style="align-items:end">
+          <label>Issuer URL<input id="s-issuer" required placeholder="https://login.microsoftonline.com/&lt;tenant&gt;/v2.0" autocomplete="off"></label>
+          <label>Client ID<input id="s-client" required autocomplete="off"></label>
+          <label>Client secret<input id="s-secret" type="password" placeholder="leave empty to keep" autocomplete="new-password"></label>
+          <label>Email domains<input id="s-domains" placeholder="example.com, example.org" autocomplete="off"></label>
+          <div><button class="btn sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="sso-remove">Remove</button></div>
+          <div id="sso-msg" class="meta"></div>
+        </form>
+      </div>
+    </div>
   </section>
 
   <!-- ACTIVITY -->

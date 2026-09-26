@@ -25,7 +25,7 @@ function showSession(s){
   $('#sso-btn').hidden=signedIn||!(s&&s.sso);
   if(signedIn){
     const op=s.operator||{};
-    const scope=(op.siteIds||['*']).includes('*')?'all sites':op.siteIds.join(', ');
+    const scope=(op.siteIds||['*']).includes('*')?'all sites':(op.siteNames||op.siteIds).join(', ');
     $('#admin-status').textContent=`${op.name||'Operator'} · ${op.roleName||op.role||''} · ${scope}${s.via==='sso'?' · SSO':''}`;
   }
 }
@@ -46,7 +46,10 @@ $('#admin-logout').addEventListener('click',async()=>{
   if(err){
     const msg={not_invited:'Your SSO account has no operator access here. Ask an owner to invite your email.',
       unverified_email:'Your identity provider did not confirm your email address.',
-      expired:'The sign-in took too long. Please try again.'}[err]||'Single sign-on failed.';
+      expired:'The sign-in took too long or was started in another browser. Please try again.',
+      not_configured:'Single sign-on is not set up for this account.',
+      provider_unavailable:'Your identity provider could not be reached. Try again or use a token.',
+      denied:'Sign-in was cancelled at the identity provider.'}[err]||'Single sign-on failed.';
     setTimeout(()=>{$('#admin-status').textContent=msg;},0);
     history.replaceState(null,'',location.pathname);
   }
@@ -71,7 +74,7 @@ async function init(){
   $('#mode').textContent=(st.mode||'').startsWith('DEMO')?'Demo data':'Live';
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 async function loadDoors(){
@@ -132,6 +135,61 @@ $('#people').addEventListener('click',async e=>{
   if(rc&&!rc.error)$('#people-msg').textContent=`Suspended. Credentials revoked remotely: ${Number(rc.revoked)} · awaiting on-site removal: ${Number(rc.pendingRemoval)}${rc.failed?' · failed (will retry): '+Number(rc.failed):''}`;
   loadCreds();loadAudit();loadCompile();
 });
+/* ---- operators & single sign-on (shown only with role.manage / owner) ---- */
+const when=t=>t?esc(String(t).replace('T',' ').slice(0,16))+' UTC':'never';
+async function loadAdmin(){
+  const [o,sso,sites]=await Promise.all([api('/api/operators'),api('/api/sso'),api('/api/sites')]);
+  $('#admin-card').hidden=!o.ok;
+  if(!o.ok)return;
+  const siteName=id=>((sites.sites||[]).find(x=>x.id===id)||{}).name||id;
+  const live=(o.operators||[]).filter(x=>!x.revokedAt);
+  $('#ops').innerHTML=`<table><tr><th>Operator</th><th>Role</th><th>Sites</th><th>Sign-in</th><th>Last login</th><th></th></tr>`+
+    live.map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">${esc(x.email||'')}</div></td><td>${esc(x.role)}</td>
+    <td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td>
+    <td>${x.ssoLinked?'<span class="tag g">SSO</span>':x.email?'<span class="tag o">SSO invited</span>':'<span class="tag">token</span>'}</td>
+    <td class="meta">${when(x.lastLoginAt)}</td>
+    <td><button class="btn2 sm" type="button" data-revoke-op="${esc(x.id)}">Revoke</button></td></tr>`).join('')+
+    (o.bootstrap||[]).map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">server configuration</div></td><td>${esc(x.role)}</td><td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td><td><span class="tag">env token</span></td><td></td><td></td></tr>`).join('')+'</table>';
+  $('#i-site').innerHTML='<option value="*">All sites</option>'+(sites.sites||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
+  $('#sso-box').hidden=!sso.ok;
+  if(sso.ok){
+    const c=sso.sso;
+    $('#sso-state').textContent=c?`Active · ${c.issuer} · domains: ${(c.domains||[]).join(', ')||'any'} · secret: ${c.hasClientSecret?'stored (encrypted)':'none (PKCE public client)'} · redirect URI: ${sso.redirectUri}`
+      :`Not configured. Register this redirect URI at your identity provider: ${sso.redirectUri}`;
+    if(c){$('#s-issuer').value=c.issuer;$('#s-client').value=c.clientId;$('#s-domains').value=(c.domains||[]).join(', ');}
+    $('#sso-remove').hidden=!c;
+  }
+}
+$('#ops').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-revoke-op]');if(!b)return;
+  if(!confirm('Revoke this operator? Their sessions end immediately.'))return;
+  const r=await api('/api/operators/'+encodeURIComponent(b.dataset.revokeOp),{method:'DELETE'});
+  if(!r.ok){b.textContent=errText(r);return;}
+  loadAdmin();loadAudit();
+});
+$('#invite-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const site=$('#i-site').value;
+  const r=await post('/api/operators',{name:$('#i-name').value,email:$('#i-email').value,role:$('#i-role').value,siteIds:site==='*'?[]:[site],auth:'sso'});
+  $('#invite-msg').textContent=r.ok?`Invited ${r.operator.email}. They sign in with "Sign in with SSO".`:errText(r);
+  if(r.ok){$('#i-name').value='';$('#i-email').value='';loadAdmin();loadAudit();}
+});
+$('#sso-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const body={issuer:$('#s-issuer').value.trim(),clientId:$('#s-client').value.trim(),domains:$('#s-domains').value.split(/[\s,]+/).filter(Boolean)};
+  if($('#s-secret').value)body.clientSecret=$('#s-secret').value;
+  const r=await api('/api/sso',{method:'PUT',body:JSON.stringify(body)});
+  $('#s-secret').value='';
+  $('#sso-msg').textContent=r.ok?'Saved. Discovery document verified.':errText(r);
+  if(r.ok){loadAdmin();loadAudit();}
+});
+$('#sso-remove').addEventListener('click',async()=>{
+  if(!confirm('Remove single sign-on? Everyone signed in via SSO is signed out.'))return;
+  const r=await api('/api/sso',{method:'DELETE'});
+  $('#sso-msg').textContent=r.ok?'Single sign-on removed.':errText(r);
+  loadAdmin();loadAudit();
+});
+
 async function loadRules(){
   const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
   const n=(arr,id)=>((arr||[]).find(x=>x.id===id)||{}).name||'24/7';

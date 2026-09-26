@@ -36,7 +36,7 @@ async function appState(sql, key) {
  */
 let cached = null;
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -71,7 +71,7 @@ function apiFor(env) {
     });
   };
 
-  const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax' });
+  const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }

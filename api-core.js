@@ -18,7 +18,9 @@ const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
 const { sha256Hex } = require('./audit-core');
 const { operatorStatement } = require('./store/repo');
-const { sessionCookie, clearSessionCookies } = require('./cookies');
+const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
+const { createOidcClient, randomB64url } = require('./oidc-core');
+const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { seedTenant } = require('./store/bootstrap');
 
 class HttpError extends Error {
@@ -100,7 +102,13 @@ function createDetail(collection, item) {
   return JSON.stringify(item).slice(0, 200);
 }
 
-function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax' }) {
+const EMAIL_RE = /^[^\s@<>"']{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,}$/i;
+const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+function createApi({
+  store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
+  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }),
+}) {
   let ready = null;
   const whenReady = () => {
     if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
@@ -429,12 +437,22 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
     const theirs = b.role === 'r_owner' ? ['*'] : role.perms || [];
     if (!mine.includes('*') && theirs.some(p => !mine.includes(p))) throw new HttpError(403, 'forbidden', { detail: 'cannot grant a role with permissions you do not hold' });
     if (!ctx.scope.all && (!siteIds.length || siteIds.some(s => !ctx.scope.site(s)))) throw outOfScope('new operator must be limited to your own sites');
-    const token = `ax_${randomToken()}`;
-    const op = { id: policy.uid('op'), name, role: b.role, siteIds, tokenSha256: sha256Hex(token), createdBy: ctx.actor };
-    await ctx.t.unit().raw(operatorStatement(ctx.tenantId, op).sql, operatorStatement(ctx.tenantId, op).params)
-      .audit('operator.create', `${op.id} role=${op.role} sites=${siteIds.join(',') || '*'}`, ctx.actor).commit();
-    // Shown once. Only the hash is stored.
-    return { operator: { id: op.id, name, role: op.role, siteIds }, token };
+    const viaSso = b.auth === 'sso';
+    const email = typeof b.email === 'string' && b.email.trim() ? b.email.trim().toLowerCase() : null;
+    if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'email is not a valid address');
+    if (viaSso && !email) throw new HttpError(400, 'email is required for single sign-on operators');
+    if (viaSso && !(await store.tenantSettings(ctx.tenantId) || {}).sso) throw new HttpError(409, 'configure single sign-on first');
+    if (email && (await ctx.t.operators()).some(o => !o.revokedAt && o.email === email)) throw new HttpError(409, 'an operator with this email already exists');
+    // SSO operators get an unusable random token hash: they can only sign in
+    // through the identity provider (and are cut off when IT disables them there).
+    const token = viaSso ? null : `ax_${randomToken()}`;
+    const op = { id: policy.uid('op'), name, role: b.role, siteIds, email, tokenSha256: sha256Hex(token || `unusable:${randomToken()}`), createdBy: ctx.actor };
+    const stmt = operatorStatement(ctx.tenantId, op);
+    await ctx.t.unit().raw(stmt.sql, stmt.params)
+      .audit('operator.create', `${op.id} role=${op.role} sites=${siteIds.join(',') || '*'}${viaSso ? ' auth=sso' : ''}`, ctx.actor).commit();
+    const operator = { id: op.id, name, role: op.role, siteIds, email: email || undefined, auth: viaSso ? 'sso' : 'token' };
+    // Token shown once; only the hash is stored.
+    return viaSso ? { operator, invited: true } : { operator, token };
   });
 
   route('DELETE', /^\/api\/operators\/([^/]+)$/, async (ctx, [id]) => {
@@ -448,6 +466,65 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
       .raw('UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND operator_id = ? AND revoked_at IS NULL', [at, ctx.tenantId, id])
       .audit('operator.revoke', id, ctx.actor).commit();
     return { revoked: id };
+  });
+
+  // --- single sign-on configuration (owner only) ----------------------------
+  const SSO_PURPOSE = 'sso.clientSecret';
+  const publicSso = (cfg, origin) => ({
+    sso: cfg ? { issuer: cfg.issuer, clientId: cfg.clientId, domains: cfg.domains || [], trustUnverifiedEmail: Boolean(cfg.trustUnverifiedEmail), hasClientSecret: Boolean(cfg.clientSecretEnc), updatedAt: cfg.updatedAt } : null,
+    redirectUri: origin ? `${origin}/api/auth/sso/callback` : null,
+    secretsKeyConfigured: Boolean(secretsKey),
+  });
+  const saveSettings = (ctx, settings) => ctx.t.unit().raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify(settings), ctx.tenantId]);
+
+  route('GET', /^\/api\/sso$/, async ctx => publicSso((await store.tenantSettings(ctx.tenantId) || {}).sso, ctx.origin));
+
+  route('PUT', /^\/api\/sso$/, async ctx => {
+    const b = ctx.body;
+    const settings = (await store.tenantSettings(ctx.tenantId)) || {};
+    const prev = settings.sso || null;
+    let issuer;
+    try { issuer = new URL(String(b.issuer || '')); } catch { throw new HttpError(400, 'issuer must be a URL'); }
+    // Owner-supplied URL fetched by the server: https only (SSRF / downgrade).
+    if (issuer.protocol !== 'https:' && !allowHttpIssuers) throw new HttpError(400, 'issuer must use https');
+    if (issuer.username || issuer.password || issuer.search || issuer.hash) throw new HttpError(400, 'issuer must be a plain URL');
+    const issuerStr = String(b.issuer).replace(/\/+$/, '');
+    const clientId = typeof b.clientId === 'string' ? b.clientId.trim() : '';
+    if (!clientId || clientId.length > 200) throw new HttpError(400, 'clientId is required');
+    const domains = [...new Set((Array.isArray(b.domains) ? b.domains : []).map(d => String(d).trim().toLowerCase()).filter(Boolean))];
+    for (const d of domains) if (!DOMAIN_RE.test(d)) throw new HttpError(400, `domains: "${d}" is not a domain`);
+    // First tenant to claim a domain keeps it (email → tenant routing must be unambiguous).
+    for (const other of await store.listTenants()) {
+      if (other.id === ctx.tenantId) continue;
+      const theirs = ((await store.tenantSettings(other.id)) || {}).sso;
+      const clash = theirs && (theirs.domains || []).find(d => domains.includes(d));
+      if (clash) throw new HttpError(409, `domain ${clash} is already claimed by another account`);
+    }
+    try { await oidc.discover(issuerStr); } catch (e) { throw new HttpError(400, `issuer discovery failed: ${e.message}`); }
+    let clientSecretEnc = null;
+    let secretNote = 'none';
+    if (typeof b.clientSecret === 'string' && b.clientSecret) {
+      if (!secretsKey) throw new HttpError(400, 'SECRETS_KEY is not configured on the server; cannot store a client secret (use a public client with PKCE, or set SECRETS_KEY)');
+      clientSecretEnc = await encryptSecret(secretsKey, b.clientSecret, { tenantId: ctx.tenantId, purpose: SSO_PURPOSE });
+      secretNote = 'set';
+    } else if (b.clientSecret === undefined && prev && prev.clientSecretEnc && prev.issuer === issuerStr && prev.clientId === clientId) {
+      clientSecretEnc = prev.clientSecretEnc;
+      secretNote = 'kept';
+    }
+    const sso = { issuer: issuerStr, clientId, domains, trustUnverifiedEmail: b.trustUnverifiedEmail === true, clientSecretEnc, updatedAt: new Date().toISOString() };
+    await saveSettings(ctx, { ...settings, sso })
+      .audit('sso.configure', `issuer=${issuerStr} client=${clientId} domains=${domains.join(',') || '-'} secret=${secretNote}${sso.trustUnverifiedEmail ? ' trustUnverifiedEmail' : ''}`, ctx.actor).commit();
+    return publicSso(sso, ctx.origin);
+  });
+
+  route('DELETE', /^\/api\/sso$/, async ctx => {
+    const settings = (await store.tenantSettings(ctx.tenantId)) || {};
+    if (!settings.sso) throw new HttpError(404, 'single sign-on is not configured');
+    const { sso, ...rest } = settings;
+    await saveSettings(ctx, rest)
+      .raw("UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND via = 'sso' AND revoked_at IS NULL", [new Date().toISOString(), ctx.tenantId])
+      .audit('sso.remove', sso.issuer, ctx.actor).commit();
+    return publicSso(null, ctx.origin);
   });
 
   // --- vendor / mirror / health ---------------------------------------------
@@ -569,11 +646,24 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
     return { operator: rbac.describe(snap, operator), tenant: snap.tenant };
   }
 
+  const ssoFail = (req, code) => ({ status: 302, redirect: `/?sso_error=${encodeURIComponent(code)}`, cookies: [flowCookie('', { ...cookieOpts(req), maxAgeSec: 0 })] });
+
+  async function tenantForDomain(domain) {
+    if (!DOMAIN_RE.test(domain)) return null;
+    for (const t of await store.listTenants()) {
+      const sso = ((await store.tenantSettings(t.id)) || {}).sso;
+      if (sso && (sso.domains || []).includes(domain)) return t.id;
+    }
+    return null;
+  }
+
   const sessionRoutes = {
     async 'POST /api/auth/login'(req, body) {
       const result = await auth.login({ token: body.token, ip: req.ip || 'unknown' });
       if (result.error) return result.error;
-      await store.tenant(result.tenantId).unit().audit('operator.login', 'via token', result.operator.id).commit();
+      await store.tenant(result.tenantId).unit()
+        .raw('UPDATE operators SET last_login_at = ? WHERE tenant_id = ? AND id = ?', [new Date().toISOString(), result.tenantId, result.operator.id])
+        .audit('operator.login', 'via token', result.operator.id).commit();
       return {
         status: 200,
         cookies: [sessionCookie(result.cookieValue, { ...cookieOpts(req), maxAgeSec: result.maxAgeSec })],
@@ -582,7 +672,10 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
     },
     async 'GET /api/auth/session'(req) {
       const found = await auth.sessionFrom(req.headers.cookie || '');
-      if (!found) return { status: 200, body: { ok: true, authenticated: false, ...auth.status() } };
+      if (!found) {
+        const settings = (await store.tenantSettings(auth.defaultTenant)) || {};
+        return { status: 200, body: { ok: true, authenticated: false, sso: Boolean(settings.sso), ...auth.status() } };
+      }
       return {
         status: 200,
         body: {
@@ -591,6 +684,85 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
         },
       };
     },
+    async 'GET /api/auth/sso/start'(req) {
+      const q = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
+      const email = String(q.get('email') || '').trim().toLowerCase().slice(0, 254);
+      let tenantId = String(q.get('tenant') || '').slice(0, 64) || null;
+      if (!tenantId && email.includes('@')) tenantId = await tenantForDomain(email.split('@').pop());
+      tenantId ||= auth.defaultTenant;
+      const cfg = ((await store.tenantSettings(tenantId)) || {}).sso;
+      if (!cfg) return ssoFail(req, 'not_configured');
+      const state = randomB64url(24);
+      const nonce = randomB64url(24);
+      const codeVerifier = randomB64url(48);
+      const redirectUri = `${req.origin}/api/auth/sso/callback`;
+      let url;
+      try {
+        url = await oidc.authorizationUrl({ config: cfg, redirectUri, state, nonce, codeVerifier, loginHint: EMAIL_RE.test(email) ? email : undefined, origin: req.origin });
+      } catch (e) {
+        log('sso start', e.message);
+        return ssoFail(req, 'provider_unavailable');
+      }
+      await store.saveFlow({ state, tenantId, nonce, codeVerifier, redirectUri, expiresAt: new Date(Date.now() + 600e3).toISOString() });
+      return { status: 302, redirect: url, cookies: [flowCookie(state, cookieOpts(req))] };
+    },
+
+    async 'GET /api/auth/sso/callback'(req) {
+      const q = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
+      if (q.get('error')) return ssoFail(req, 'denied');
+      const state = String(q.get('state') || '');
+      const flow = state ? await store.takeFlow(state) : null; // single use
+      if (!flow) return ssoFail(req, 'expired');
+      const bound = flowStateFrom(req.headers.cookie || '');
+      if (!bound || !rbac.constantTimeEqual(bound, state)) return ssoFail(req, 'expired');
+      const cfg = ((await store.tenantSettings(flow.tenantId)) || {}).sso;
+      if (!cfg) return ssoFail(req, 'not_configured');
+      const t = store.tenant(flow.tenantId);
+      let claims;
+      try {
+        const clientSecret = cfg.clientSecretEnc ? await decryptSecret(secretsKey, cfg.clientSecretEnc, { tenantId: flow.tenantId, purpose: SSO_PURPOSE }) : null;
+        const idToken = await oidc.exchangeCode({ config: cfg, clientSecret, code: String(q.get('code') || ''), redirectUri: flow.redirectUri, codeVerifier: flow.codeVerifier });
+        claims = await oidc.verifyIdToken(idToken, { issuer: cfg.issuer, clientId: cfg.clientId, nonce: flow.nonce });
+      } catch (e) {
+        log('sso callback', e.message);
+        await t.unit().audit('operator.login_denied', `via sso: ${e.code || 'error'}`, 'anonymous').commit();
+        return ssoFail(req, e.code === 'expired' ? 'expired' : 'failed');
+      }
+      const deny = async (code, why) => {
+        await t.unit().audit('operator.login_denied', `via sso: ${why}`, 'anonymous').commit();
+        return ssoFail(req, code);
+      };
+      // 1) Already linked: the (issuer, subject) pair is the identity. Email is not.
+      let op = await store.operatorBySso(claims.iss, claims.sub);
+      if (op && op.tenantId !== flow.tenantId) op = null;
+      let link = false;
+      if (!op) {
+        // 2) First login: match an invitation by email — only if the IdP vouches
+        //    for the address (nOAuth: unverified "email" claims are attacker-set).
+        const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
+        const domain = email.split('@')[1] || '-';
+        if (!email) return deny('not_invited', 'no email claim');
+        if (claims.email_verified !== true && !cfg.trustUnverifiedEmail) return deny('unverified_email', `unverified email (domain ${domain})`);
+        if ((cfg.domains || []).length && !cfg.domains.includes(domain)) return deny('not_invited', `domain ${domain} not allowed`);
+        op = await store.operatorInvite(flow.tenantId, email);
+        if (!op) return deny('not_invited', `no invitation (domain ${domain})`);
+        link = true;
+      }
+      const at = new Date().toISOString();
+      const uow = t.unit();
+      if (link) {
+        uow.raw('UPDATE operators SET sso_issuer = ?, sso_subject = ? WHERE tenant_id = ? AND id = ? AND sso_subject IS NULL', [claims.iss, claims.sub, flow.tenantId, op.id])
+          .audit('operator.sso_linked', op.id, op.id);
+      }
+      await uow.raw('UPDATE operators SET last_login_at = ? WHERE tenant_id = ? AND id = ?', [at, flow.tenantId, op.id])
+        .audit('operator.login', 'via sso', op.id).commit();
+      const s = await auth.startSession(op, flow.tenantId, 'sso');
+      return {
+        status: 302, redirect: '/',
+        cookies: [sessionCookie(s.cookieValue, { ...cookieOpts(req), maxAgeSec: s.maxAgeSec }), flowCookie('', { ...cookieOpts(req), maxAgeSec: 0 })],
+      };
+    },
+
     async 'POST /api/auth/logout'(req) {
       const found = await auth.sessionFrom(req.headers.cookie || '');
       if (found && !rbac.constantTimeEqual(String(req.headers['x-csrf-token'] || ''), found.session.csrf)) {
@@ -638,6 +810,7 @@ function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log =
       let locksPromise = null;
       const ctx = {
         body, query, t, vendor,
+        origin: req.origin || '',
         tenantId: who.tenantId,
         operator: who.operator,
         actor: who.operator ? who.operator.id : 'system',
