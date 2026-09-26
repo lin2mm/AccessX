@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Create an operator entry for the OPERATORS env var.
+// BOOTSTRAP ONLY: create an operator entry for the OPERATORS env var.
+// Day-to-day, owners create operators in the app (POST /api/operators):
+// those live in the database, are revocable instantly and audited.
 //   npm run operator:new -- --id op_gym --name "Gym manager" --role r_manager --sites site_gym
 // Prints the token ONCE (give it to the operator) and the JSON entry to
 // append to OPERATORS. Only the SHA-256 is stored server-side.

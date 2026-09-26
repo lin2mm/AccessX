@@ -12,12 +12,33 @@ const policy = require('../policy-core');
 const { COLLECTIONS } = require('./repo');
 const { ConflictError } = require('./sql');
 
+/**
+ * Pre-0003 data has no userGroups[].siteId. Infer it: if every rule for a
+ * group points at door groups of ONE site, the group belongs there.
+ * Groups spanning sites stay cross-site (all-site operators only).
+ */
+function inferGroupSites(data) {
+  const inferred = [];
+  const groups = (data.userGroups || []).map(g => {
+    if (g.siteId) return g;
+    const sites = new Set((data.assignments || []).filter(a => a.userGroupId === g.id)
+      .map(a => ((data.doorGroups || []).find(d => d.id === a.doorGroupId) || {}).siteId).filter(Boolean));
+    if (sites.size !== 1) return g;
+    const siteId = [...sites][0];
+    inferred.push(`${g.id}→${siteId}`);
+    return { ...g, siteId };
+  });
+  return { data: { ...data, userGroups: groups }, inferred };
+}
+
 async function seedTenant(store, tenantId, { data, sealedAudit = null, legacyAudit = null, source = 'seed' } = {}) {
   const t = store.tenant(tenantId);
   const info = await t.info();
   if (!info) throw new Error(`tenant ${tenantId} does not exist`);
   if (info.seeded) return { seeded: false };
 
+  const { data: withSites, inferred } = inferGroupSites(data || {});
+  data = withSites;
   const uow = t.unit();
   const counts = {};
   for (const collection of Object.keys(COLLECTIONS)) {
@@ -41,6 +62,7 @@ async function seedTenant(store, tenantId, { data, sealedAudit = null, legacyAud
   }
   const summary = Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${k}=${n}`).join(' ');
   uow.audit('tenant.seeded', `source=${source} ${summary}`);
+  if (inferred.length) uow.audit('userGroups.site_inferred', inferred.join(' '));
 
   try {
     await uow.commit();
@@ -52,4 +74,4 @@ async function seedTenant(store, tenantId, { data, sealedAudit = null, legacyAud
   return { seeded: true, counts };
 }
 
-module.exports = { seedTenant };
+module.exports = { seedTenant, inferGroupSites };

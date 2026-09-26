@@ -97,7 +97,8 @@ const perms = () => (v, field) => {
 const SCHEMAS = {
   sites: { name: str(100, { required: true }), address: str(200), timezone: timezone() },
   doorGroups: { name: str(100, { required: true }), siteId: ref('sites', { required: true }), lockIds: lockIds() },
-  userGroups: { name: str(100, { required: true }) },
+  // siteId: the site this group belongs to (omit = cross-site group, managed by all-site operators only)
+  userGroups: { name: str(100, { required: true }), siteId: ref('sites') },
   users: {
     name: str(100, { required: true }), email: email(), groupIds: refs('userGroups'),
     suspended: bool(), validFrom: instant(), validTo: instant(),
@@ -132,7 +133,7 @@ function validate(collection, body, db) {
 }
 
 const REFERENCES = {
-  sites: [['doorGroups', 'siteId'], ['holidays', 'siteId']],
+  sites: [['doorGroups', 'siteId'], ['holidays', 'siteId'], ['userGroups', 'siteId']],
   userGroups: [['users', 'groupIds'], ['assignments', 'userGroupId']],
   doorGroups: [['assignments', 'doorGroupId']],
   schedules: [['assignments', 'scheduleId']],

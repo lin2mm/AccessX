@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Smoke-test a running Worker (wrangler dev) with the same RBAC scenarios
 // as the Express tests. Usage:
-//   BASE=http://127.0.0.1:8787 OWNER=owner-token GYM=gym-token AUDIT=audit-token node support/worker-smoke.js
+//   BASE=http://127.0.0.1:8787 OWNER=owner-token GYM=gym-token AUDIT=audit-token PLATFORM=platform-token node support/worker-smoke.js
 const assert = require('node:assert/strict');
 
 const BASE = process.env.BASE || 'http://127.0.0.1:8787';
@@ -14,7 +14,7 @@ const call = async (method, url, token, body) => {
 };
 const checks = [];
 const check = (name, fn) => checks.push([name, fn]);
-const { OWNER, GYM, AUDIT } = process.env;
+const { OWNER, GYM, AUDIT, PLATFORM } = process.env;
 
 check('public auth status', async () => {
   const r = await call('GET', '/api/auth');
@@ -33,7 +33,26 @@ check('gym manager sees only gym doors', async () => {
 });
 check('gym manager cannot unlock office doors', async () => {
   assert.equal((await call('POST', '/api/doors/9002/unlock', GYM, {})).status, 403);
-  assert.equal((await call('POST', '/api/doors/9101/unlock', GYM, {})).status, 200);
+  assert.equal((await call('POST', '/api/doors/9101/unlock', GYM, { reason: 'delivery' })).status, 200);
+});
+check('operator override unlock requires a reason', async () => {
+  assert.equal((await call('POST', '/api/doors/9101/unlock', GYM, {})).status, 400);
+});
+check('legacy D1 state was migrated into rows with its audit chain', async () => {
+  const log = await call('GET', '/api/audit?limit=1000', OWNER);
+  const seeded = log.body.log.find(e => e.action === 'tenant.seeded');
+  assert.ok(seeded, 'tenant.seeded present');
+  if (process.env.EXPECT_LEGACY) {
+    assert.match(seeded.detail, /legacy app_state blob/);
+    assert.ok(log.body.log.some(e => e.action === 'userGroups.site_inferred'));
+    assert.ok(seeded.seq > Number(process.env.EXPECT_LEGACY));
+  }
+});
+check('gym manager sees and manages only gym people', async () => {
+  const r = await call('GET', '/api/users', GYM);
+  assert.deepEqual(r.body.users.map(u => u.id), ['u4']);
+  assert.equal((await call('POST', '/api/users/u1/suspend', GYM)).status, 404);
+  assert.equal((await call('POST', '/api/users', GYM, { name: 'Office person', groupIds: ['ug_staff'] })).status, 403);
 });
 check('gym manager cannot edit rules', async () => {
   assert.equal((await call('POST', '/api/schedules', GYM, { name: 'x' })).status, 403);
@@ -68,6 +87,47 @@ check('credential registry and revoke', async () => {
   const active = list.body.credentials.find(c => c.status === 'active');
   const r = await call('DELETE', `/api/credentials/${active.id}`, OWNER);
   assert.equal(r.body.credential.status, 'revoked');
+});
+check('suspending a user auto-revokes their credentials', async () => {
+  const issued = await call('POST', '/api/passcode', OWNER, { lockId: 9002, userId: 'u2' });
+  assert.equal(issued.status, 200);
+  const r = await call('POST', '/api/users/u2/suspend', OWNER);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.reconcile.revoked >= 1, JSON.stringify(r.body.reconcile));
+  const creds = await call('GET', '/api/credentials', OWNER);
+  const c = creds.body.credentials.find(x => x.id === issued.body.credential.id);
+  assert.equal(c.status, 'revoked');
+  assert.equal(c.revokedBy, 'system:reconciler');
+  assert.equal((await call('POST', '/api/users/u2/unsuspend', OWNER)).status, 200);
+});
+check('audit entries for people carry ids, never names or emails', async () => {
+  const created = await call('POST', '/api/users', OWNER, { name: 'Zed Private', email: 'zed@private.example', groupIds: ['ug_staff'] });
+  const log = await call('GET', '/api/audit?limit=5&action=users.create', OWNER);
+  const entry = log.body.log.find(e => e.detail.startsWith(created.body.item.id));
+  assert.ok(entry);
+  assert.doesNotMatch(entry.detail, /Zed|zed@/);
+  assert.equal((await call('DELETE', `/api/users/${created.body.item.id}`, OWNER)).status, 200);
+});
+check('platform creates an isolated tenant', async () => {
+  if (!PLATFORM) return;
+  assert.equal((await call('POST', '/api/tenants', OWNER, { name: 'x' })).status, 401);
+  const t = await call('POST', '/api/tenants', PLATFORM, { name: 'Smoke Co' });
+  assert.equal(t.status, 200);
+  const token = t.body.owner.token;
+  assert.deepEqual((await call('GET', '/api/users', token)).body.users, []);
+  assert.deepEqual((await call('GET', '/api/doors', token)).body.doors, []);
+  assert.equal((await call('DELETE', '/api/users/u1', token)).status, 404);
+  assert.equal((await call('POST', '/api/doors/9001/unlock', token, { reason: 'try' })).status, 404);
+  assert.equal((await call('POST', '/api/passcode', token, { lockId: 9001, userId: 'u1' })).status, 404);
+  assert.equal((await call('GET', '/api/records/9001', token)).status, 404);
+  const audit = await call('GET', '/api/audit', token);
+  assert.ok(audit.body.log.every(e => e.seq <= 3));
+  assert.equal((await call('GET', '/api/audit/verify', token)).body.verification.ok, true);
+  assert.equal((await call('GET', '/api/tenants', token)).status, 401);
+});
+check('cron reconcile runs', async () => {
+  const res = await fetch(`${BASE}/cdn-cgi/local/scheduled`);
+  assert.equal(res.status, 200);
 });
 check('audit chain verifies and records operators', async () => {
   const v = await call('GET', '/api/audit/verify', OWNER);

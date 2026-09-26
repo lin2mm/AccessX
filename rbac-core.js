@@ -28,6 +28,7 @@ const PERMS = {
 const OWNER = '*';
 const AUTHENTICATED = 'authenticated';
 const PUBLIC = 'public';
+const PLATFORM = 'platform'; // SaaS operator (PLATFORM_TOKEN): create tenants. Never a tenant role.
 
 const DEFAULT_ROLES = [
   { id: 'r_owner', name: 'Account Owner', perms: ['*'] },
@@ -57,7 +58,16 @@ const ROUTES = [
   ['GET', /^\/api\/me$/, AUTHENTICATED],
   ['GET', /^\/api\/(status|doors|vendor)$/, 'door.read'],
   ['GET', /^\/api\/health$/, 'door.read'],
+  ['GET', /^\/api\/tenants$/, PLATFORM],
+  ['POST', /^\/api\/tenants$/, PLATFORM],
   ['POST', /^\/api\/doors\/\d+\/unlock$/, 'door.unlock'],
+  ['POST', /^\/api\/users\/[^/]+\/(suspend|unsuspend)$/, 'user.manage'],
+  ['GET', /^\/api\/users\/[^/]+\/export$/, 'user.manage'],
+  ['POST', /^\/api\/credentials\/[^/]+\/confirm-removed$/, 'credential.issue'],
+  ['POST', /^\/api\/reconcile$/, 'credential.issue'],
+  ['GET', /^\/api\/operators$/, 'role.manage'],
+  ['POST', /^\/api\/operators$/, 'role.manage'],
+  ['DELETE', /^\/api\/operators\/[^/]+$/, 'role.manage'],
   ['POST', /^\/api\/evaluate$/, 'report.read'],
   ['GET', /^\/api\/users\/[^/]+\/doors$/, 'report.read'],
   ['POST', /^\/api\/passcode$/, 'credential.issue'],
@@ -162,6 +172,7 @@ function parseOperators(json, adminTokenSha256) {
       name: String(op.name || op.id || `Operator ${index}`),
       role: String(op.role || 'r_view'),
       siteIds: Array.isArray(op.siteIds) ? op.siteIds.map(String) : undefined,
+      tenantId: op.tenantId ? String(op.tenantId) : undefined,
       tokenSha256: op.tokenSha256.toLowerCase(),
     };
   });
@@ -197,7 +208,7 @@ function describe(db, operator) {
 }
 
 module.exports = {
-  PERMS, DEFAULT_ROLES, PUBLIC_PERMS, OWNER, AUTHENTICATED, PUBLIC, ANONYMOUS, ROUTES,
+  PERMS, DEFAULT_ROLES, PUBLIC_PERMS, OWNER, AUTHENTICATED, PUBLIC, PLATFORM, ANONYMOUS, ROUTES,
   requiredPermission, permsFor, hasPermission, canAccessSite, canAccessLock, allSites,
   parseOperators, findOperator, constantTimeEqual, describe, roleFor,
 };

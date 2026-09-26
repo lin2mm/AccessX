@@ -160,7 +160,10 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
   <!-- DOORS -->
   <section id="v-doors" class="view on">
     <div class="card"><h2>Fleet status</h2><div class="grid c3" id="kpis"></div></div>
-    <div class="card"><h2>Doors</h2><div class="grid c2" id="doors"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h2>Doors</h2>
+      <div class="hint">A remote unlock without a person bypasses every rule, so it needs a reason. It is recorded in the audit trail.</div>
+      <input id="u-reason" maxlength="200" placeholder="Reason for remote unlock, e.g. &quot;courier delivery&quot;" style="margin-bottom:12px">
+      <div class="grid c2" id="doors"><div class="empty">Loading…</div></div></div>
   </section>
 
   <!-- ACCESS -->
@@ -180,6 +183,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <span class="tag o">synced</span> needs the cloud to push changes in time ·
         <span class="tag r">cloud</span> only remote unlocks are checked — codes/cards would bypass the rule.</div>
       <div class="grid c3" id="cm-kpis"></div>
+      <div id="cm-notices" style="margin-top:12px"></div>
       <div id="cm-rules" style="margin-top:12px;overflow-x:auto"></div>
       <div id="cm-locks" style="margin-top:12px;overflow-x:auto"></div>
     </div>

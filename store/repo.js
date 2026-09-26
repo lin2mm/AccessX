@@ -19,6 +19,8 @@
 const auditCore = require('../audit-core');
 const { ConflictError } = require('./sql');
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 const j = { json: true };
 const b = { bool: true };
 const i = { int: true };
@@ -151,7 +153,7 @@ function createStore(sql) {
          * one transaction. If another writer took the same seq first, the
          * PK rejects the batch; re-seal on the new head and retry.
          */
-        async commit({ retries = 3 } = {}) {
+        async commit({ retries = 12 } = {}) {
           for (let attempt = 0; ; attempt++) {
             const lastImport = sealedImports[sealedImports.length - 1];
             const head = lastImport ? { seq: lastImport.seq, hash: lastImport.hash } : await auditHead();
@@ -166,6 +168,9 @@ function createStore(sql) {
               return sealed;
             } catch (error) {
               if (!(error instanceof ConflictError) || attempt >= retries || sealedImports.length) throw error;
+              // Full-jitter exponential backoff: colliding writers spread out
+              // instead of re-colliding in lockstep.
+              await sleep(Math.random() * Math.min(1000, 8 * 2 ** attempt));
             }
           }
         },

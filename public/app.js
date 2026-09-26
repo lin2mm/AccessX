@@ -80,8 +80,10 @@ async function loadHealth(){
 }
 async function unlock(id,btn){
   btn.textContent='…';
-  const r=await post('/api/doors/'+encodeURIComponent(id)+'/unlock',{});
-  btn.textContent=r.ok?'Sent':(r._status===401?'Sign in':r._status===403?'No permission':'Denied');
+  const reason=$('#u-reason').value.trim();
+  const r=await post('/api/doors/'+encodeURIComponent(id)+'/unlock',{reason});
+  if(r._status===400){btn.textContent='Reason?';$('#u-reason').focus();setTimeout(()=>btn.textContent='Unlock',1700);return;}
+  btn.textContent=r.ok?'Sent':(r._status===401?'Sign in':r._status===403?'No permission':r._status===404?'Unknown lock':'Denied');
   setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
 }
 async function loadPeople(){
@@ -89,11 +91,12 @@ async function loadPeople(){
   USERS=u.users||[];
   const groups=g.userGroups||[];
   const gname=id=>(groups.find(x=>x.id===id)||{}).name||id;
-  $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th></tr>`+
+  $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th><th></th></tr>`+
     USERS.map(p=>`<tr><td><b>${esc(p.name)}</b><div class="meta">${esc(p.email||'')}</div></td>
     <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+esc(gname(i))+'</span>').join('')}</td>
     <td>${p.suspended?'<span class="tag r">suspended</span>':'<span class="tag g">active</span>'}
-    ${p.validTo?'<div class="meta">until '+esc(String(p.validTo).slice(0,10))+'</div>':''}</td></tr>`).join('')+`</table>`;
+    ${p.validTo?'<div class="meta">until '+esc(String(p.validTo).slice(0,10))+'</div>':''}</td>
+    <td><button class="btn2 sm" type="button" data-suspend="${esc(p.id)}" data-to="${p.suspended?'unsuspend':'suspend'}">${p.suspended?'Reinstate':'Suspend'}</button></td></tr>`).join('')+`</table><div id="people-msg" class="meta" style="margin-top:8px"></div>`;
   $('#ugroups').innerHTML=groups.map(x=>`<span class="chip">${esc(x.name)}</span>`).join('');
   $('#scheds').innerHTML=(s.schedules||[]).map(x=>`<div style="margin-bottom:10px"><b>${esc(x.name)}</b>
     ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
@@ -101,6 +104,15 @@ async function loadPeople(){
   const opts=USERS.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
   $('#e-user').innerHTML=opts;$('#p-user').innerHTML=opts;
 }
+$('#people').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-suspend]');if(!b)return;
+  const r=await post('/api/users/'+encodeURIComponent(b.dataset.suspend)+'/'+b.dataset.to,{});
+  if(!r.ok){b.textContent=r._status===401?'Sign in':r._status===403?'Outside your sites':'Failed';return;}
+  await loadPeople();
+  const rc=r.reconcile;
+  if(rc&&!rc.error)$('#people-msg').textContent=`Suspended. Credentials revoked remotely: ${Number(rc.revoked)} · awaiting on-site removal: ${Number(rc.pendingRemoval)}${rc.failed?' · failed (will retry): '+Number(rc.failed):''}`;
+  loadCreds();loadAudit();loadCompile();
+});
 async function loadRules(){
   const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
   const n=(arr,id)=>((arr||[]).find(x=>x.id===id)||{}).name||'24/7';
@@ -133,6 +145,12 @@ async function loadCompile(){
     <div class="kpi"><div class="n ${s.fullyEnforcedPct>=80?'ok':s.fullyEnforcedPct>=50?'warn':'bad'}">${Number(s.fullyEnforcedPct)}%</div><div class="l">Rules enforced at the lock</div></div>
     <div class="kpi"><div class="n ${s.cloud?'bad':'ok'}">${Number(s.cloud)}</div><div class="l">Cloud-only rules</div></div>
     <div class="kpi"><div class="n ${(r.drift||[]).length?'bad':'ok'}">${(r.drift||[]).length}</div><div class="l">Credentials to revoke</div></div>`;
+  const dn=id=>(DOORS.find(d=>Number(d.lockId)===Number(id))||{}).lockAlias||id;
+  $('#cm-notices').innerHTML=(r.pendingRemoval||[]).map(c=>`<div class="res n" style="margin-top:6px"><b>Code still on ${esc(dn(c.lockId))}</b> (${esc(c.codeHint||c.id)}) — no gateway, remove it at the lock.
+      <div class="meta">${esc(c.revokeReason||'')}</div>
+      <div style="margin-top:8px"><button class="btn2 sm" type="button" data-confirm="${esc(c.id)}">Confirm removed on site</button></div></div>`).join('')+
+    (r.notices||[]).map(n=>`<div class="res" style="margin-top:6px;border-left:3px solid var(--warn,#e5a50a)"><b>Clock change at ${esc(n.site)} on ${esc(n.date)}</b> (${Number(n.shiftMinutes)>0?'+':''}${Number(n.shiftMinutes)} min, ${esc(n.timeZone)})
+      <div class="meta">${esc(n.advice)}${(n.offlineLocks||[]).length?' Offline: '+n.offlineLocks.map(dn).map(esc).join(', '):''}</div></div>`).join('');
   $('#cm-rules').innerHTML=`<table><tr><th>Rule</th><th>Level</th><th>Per door</th></tr>`+
     r.rules.map(x=>`<tr><td><b>${esc(x.who)}</b> → ${esc(x.doorGroup)}<div class="meta">${esc(x.schedule)} · ${Number(x.members)} people</div></td>
       <td>${lv(x.level)}</td>
@@ -142,6 +160,13 @@ async function loadCompile(){
     r.locks.map(l=>`<tr><td><b>${esc(l.name)}</b><div class="meta">${l.hasGateway?'gateway':'no gateway'} · ${l.cyclic?'weekly windows':'period only'}</div></td>
       <td>${lv(l.level)}</td><td>${Number(l.rules)}</td><td class="meta">${l.issues.map(esc).join('<br>')||'—'}</td></tr>`).join('')+`</table>`;
 }
+
+async function confirmRemoved(id,b){
+  const r=await post('/api/credentials/'+encodeURIComponent(id)+'/confirm-removed',{});
+  if(!r.ok){b.textContent=r._status===403?'No permission':r._status===401?'Sign in':'Failed';return;}
+  loadCreds();loadAudit();loadCompile();
+}
+$('#cm-notices').addEventListener('click',e=>{const b=e.target.closest('[data-confirm]');if(b)confirmRemoved(b.dataset.confirm,b);});
 
 /* ---- passcodes ---- */
 async function issuePasscode(acknowledge=false){
@@ -178,11 +203,12 @@ async function loadCreds(){
     list.map(c=>`<tr><td>${esc(uname(c.userId))}<div class="meta">${esc(c.codeHint||'')}</div></td><td>${esc(dname(c.lockId))}</td>
       <td>${esc(String(c.endAt).slice(0,10))}</td>
       <td>${c.enforcement==='lock'?'<span class="tag g">lock</span>':'<span class="tag o">partial</span>'}</td>
-      <td>${c.status!=='active'?'<span class="tag">revoked</span>':flags[c.id]?'<span class="tag r">revoke</span><div class="meta">'+esc(flags[c.id].join('; '))+'</div>':'<span class="tag g">ok</span>'}</td>
-      <td>${c.status==='active'?`<button class="btn2 sm" type="button" data-revoke="${esc(c.id)}">Revoke</button>`:''}</td></tr>`).join('')
+      <td>${c.status==='pending_removal'?'<span class="tag o">remove on site</span>':c.status!=='active'?'<span class="tag">'+esc(c.status)+'</span>':flags[c.id]?'<span class="tag r">revoke</span><div class="meta">'+esc(flags[c.id].join('; '))+'</div>':'<span class="tag g">ok</span>'}</td>
+      <td>${c.status==='active'?`<button class="btn2 sm" type="button" data-revoke="${esc(c.id)}">Revoke</button>`:c.status==='pending_removal'?`<button class="btn2 sm" type="button" data-confirm="${esc(c.id)}">Confirm removed</button>`:''}</td></tr>`).join('')
     :'<tr><td class="empty">No credentials issued yet</td></tr>';
 }
 $('#creds').addEventListener('click',async e=>{
+  const cb=e.target.closest('[data-confirm]');if(cb)return confirmRemoved(cb.dataset.confirm,cb);
   const b=e.target.closest('[data-revoke]');if(!b)return;
   const r=await api('/api/credentials/'+encodeURIComponent(b.dataset.revoke),{method:'DELETE'});
   if(!r.ok)b.textContent=r._status===403?'No permission':'Failed';else{loadCreds();loadAudit();loadCompile();}

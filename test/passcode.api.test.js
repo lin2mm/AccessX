@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { boot } = require('../support/boot');
-const { sha256 } = require('../auth');
+const { sha256Hex: sha256 } = require('../audit-core');
 
 const OPERATORS = JSON.stringify([
   { id: 'op_gym', name: 'Gym manager', role: 'r_manager', siteIds: ['site_gym'], tokenSha256: sha256('gym-token') },

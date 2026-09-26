@@ -1,100 +1,103 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { authStatus, createAuth } = require('./auth');
+const { createAuthenticator } = require('./auth-core');
+const { nodeSqliteAdapter, migrateNode } = require('./store/sqlite-node');
+const { createStore, operatorStatement } = require('./store/repo');
+const { sha256Hex } = require('./audit-core');
 
-function request(auth, { method = 'POST', authorization, ip = '127.0.0.1', url } = {}) {
-  const defaultUrl = method === 'GET' || method === 'HEAD' ? '/api/doors' : '/api/sites';
-  const response = {
-    statusCode: 200,
-    body: null,
-    status(code) {
-      this.statusCode = code;
-      return this;
-    },
-    json(body) {
-      this.body = body;
-      return this;
-    },
-  };
-  let passed = false;
-  auth(
-    {
-      method,
-      originalUrl: url || defaultUrl,
-      headers: { authorization },
-      socket: { remoteAddress: ip },
-    },
-    response,
-    () => {
-      passed = true;
-    },
-  );
-  return { passed, ...response };
+function memoryStore() {
+  const sql = nodeSqliteAdapter(':memory:');
+  migrateNode(sql, path.join(__dirname, 'migrations'));
+  return createStore(sql);
 }
 
-test('allows public read-only requests when open reads are enabled', () => {
-  const auth = createAuth({ token: '', openReads: true });
-  assert.equal(request(auth, { method: 'GET' }).passed, true);
-  assert.equal(request(auth, { method: 'HEAD' }).passed, true);
+function make(options = {}) {
+  const store = options.store || memoryStore();
+  const auth = createAuthenticator({ store, ...options });
+  const call = ({ method = 'POST', token, ip = '127.0.0.1', path: p } = {}) => auth.authenticate({
+    method,
+    path: p || (method === 'GET' || method === 'HEAD' ? '/api/doors' : '/api/sites'),
+    authorization: token ? `Bearer ${token}` : '',
+    ip,
+  });
+  return { auth, call, store };
+}
+const status = r => (r.error ? r.error.status : 200);
+
+test('allows public read-only requests when open reads are enabled', async () => {
+  const { call } = make({ openReads: true });
+  const r = await call({ method: 'GET' });
+  assert.equal(r.operator.anonymous, true);
+  assert.equal(r.tenantId, 't_default');
 });
 
-test('fails closed on writes when ADMIN_TOKEN is not configured', () => {
-  const auth = createAuth({ token: '', openReads: true });
+test('fails closed on writes and protected reads when nothing is configured', async () => {
+  const { call } = make({ openReads: true });
   for (const method of ['POST', 'PUT', 'DELETE']) {
-    const result = request(auth, { method });
-    assert.equal(result.passed, false);
-    assert.equal(result.statusCode, 503);
-    assert.match(result.body.error, /ADMIN_TOKEN/);
+    const r = await call({ method });
+    assert.equal(status(r), 503);
+    assert.match(r.error.body.error, /ADMIN_TOKEN/);
   }
+  const locked = await make({ openReads: false }).call({ method: 'GET' });
+  assert.equal(status(locked), 503);
+  assert.match(locked.error.body.error, /API access/);
 });
 
-test('fails closed on protected reads when ADMIN_TOKEN is not configured', () => {
-  const result = request(createAuth({ token: '', openReads: false }), { method: 'GET' });
-  assert.equal(result.passed, false);
-  assert.equal(result.statusCode, 503);
-  assert.match(result.body.error, /API access/);
-});
-
-test('requires a valid bearer token for writes', () => {
-  const auth = createAuth({ token: 'correct-token', openReads: true });
+test('requires a valid bearer token; a wrong token is 401 even with open reads', async () => {
+  const { call } = make({ adminToken: 'correct-token', openReads: true });
   for (const method of ['POST', 'PUT', 'DELETE']) {
-    assert.equal(request(auth, { method, authorization: 'Bearer wrong-token' }).statusCode, 401);
-    assert.equal(request(auth, { method, authorization: 'Bearer correct-token' }).passed, true);
+    assert.equal(status(await call({ method, token: 'wrong-token' })), 401);
+    assert.equal((await call({ method, token: 'correct-token' })).operator.role, 'r_owner');
   }
+  assert.equal(status(await call({ method: 'GET', token: 'wrong-token' })), 401);
 });
 
-test('protects reads when openReads is disabled', () => {
-  const auth = createAuth({ token: 'correct-token', openReads: false });
-  assert.equal(request(auth, { method: 'GET' }).statusCode, 401);
-  assert.equal(request(auth, { method: 'GET', authorization: 'Bearer correct-token' }).passed, true);
+test('protects reads when openReads is disabled', async () => {
+  const { call } = make({ adminToken: 'correct-token', openReads: false });
+  assert.equal(status(await call({ method: 'GET' })), 401);
+  assert.equal(status(await call({ method: 'GET', token: 'correct-token' })), 200);
 });
 
-test('rate-limits failed attempts without locking out a valid token', () => {
-  const auth = createAuth({ token: 'correct-token', maxFails: 2 });
-  assert.equal(request(auth, { authorization: 'Bearer wrong', ip: 'test-client' }).statusCode, 401);
-  assert.equal(request(auth, { authorization: 'Bearer wrong', ip: 'test-client' }).statusCode, 429);
-  assert.equal(request(auth, { authorization: 'Bearer correct-token', ip: 'test-client' }).passed, true);
-  assert.equal(request(auth, { authorization: 'Bearer wrong', ip: 'test-client' }).statusCode, 401);
+test('rate-limits failed attempts without locking out a valid token', async () => {
+  const { call } = make({ adminToken: 'correct-token', maxFails: 2 });
+  assert.equal(status(await call({ token: 'wrong', ip: 'c' })), 401);
+  assert.equal(status(await call({ token: 'wrong', ip: 'c' })), 429);
+  assert.equal(status(await call({ token: 'correct-token', ip: 'c' })), 200);
+  assert.equal(status(await call({ token: 'wrong', ip: 'c' })), 401);
 });
 
-test('mounts authentication before API routes, including token verification', () => {
-  const server = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
-  const statusRoute = server.indexOf("app.get('/api/auth'");
-  const middleware = server.indexOf("app.use('/api', requireAuth)");
-  const verifyRoute = server.indexOf("app.post('/api/auth/verify'");
-  assert.ok(statusRoute !== -1 && statusRoute < middleware);
-  assert.ok(verifyRoute > middleware);
-  assert.match(
-    server,
-    /openReads:\s*process\.env\.AUTH_OPEN_READS === undefined\s*\?\s*DEMO\s*:/,
-  );
+test('operators stored in the database authenticate into their own tenant; revocation is immediate', async () => {
+  const store = memoryStore();
+  await store.createTenant('t_acme', 'Acme');
+  const stmt = operatorStatement('t_acme', { id: 'op_1', name: 'Acme owner', role: 'r_owner', tokenSha256: sha256Hex('acme-token') });
+  await store.sql.batch([stmt]);
+  const { call } = make({ store, adminToken: 'default-owner' });
+
+  const r = await call({ token: 'acme-token' });
+  assert.equal(r.tenantId, 't_acme');
+  assert.equal(r.operator.id, 'op_1');
+  assert.equal('tokenSha256' in r.operator, false); // the hash never leaves auth
+  assert.equal((await call({ token: 'default-owner' })).tenantId, 't_default');
+
+  await store.sql.batch([{ sql: "UPDATE operators SET revoked_at = 'now' WHERE id = 'op_1'", params: [] }]);
+  assert.equal(status(await call({ token: 'acme-token' })), 401);
+});
+
+test('the platform token only opens platform routes, and tenant tokens never do', async () => {
+  const { call } = make({ adminToken: 'owner', platformToken: 'platform-secret' });
+  assert.equal((await call({ method: 'POST', path: '/api/tenants', token: 'platform-secret' })).operator.platform, true);
+  assert.equal(status(await call({ method: 'POST', path: '/api/tenants', token: 'owner' })), 401);
+  assert.equal(status(await call({ method: 'POST', path: '/api/sites', token: 'platform-secret' })), 401);
+  // not configured → the route does not exist
+  assert.equal(status(await make({ adminToken: 'owner' }).call({ method: 'POST', path: '/api/tenants', token: 'owner' })), 404);
 });
 
 test('reports read-only and locked auth states accurately', () => {
-  assert.equal(authStatus({ token: '', openReads: true }).mode, 'DEMO-READ-ONLY');
-  assert.equal(authStatus({ token: '', openReads: false }).mode, 'LOCKED');
-  assert.equal(authStatus({ token: 'configured', openReads: false }).mode, 'TOKEN');
-  assert.equal(authStatus({ token: 'configured', openReads: false }).tokenConfigured, true);
+  const store = memoryStore();
+  assert.equal(createAuthenticator({ store, openReads: true }).status().mode, 'DEMO-READ-ONLY');
+  assert.equal(createAuthenticator({ store, openReads: false }).status().mode, 'LOCKED');
+  const configured = createAuthenticator({ store, adminToken: 'configured' }).status();
+  assert.equal(configured.mode, 'TOKEN');
+  assert.equal(configured.tokenConfigured, true);
 });

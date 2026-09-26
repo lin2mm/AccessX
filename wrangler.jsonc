@@ -16,6 +16,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Reconcile credentials against policy every 15 minutes (worker.js scheduled()).
+  "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
     "AUTH_OPEN_READS": "1"
   },

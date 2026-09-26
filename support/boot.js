@@ -7,12 +7,14 @@ const path = require('node:path');
 async function boot(env = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'accessx-'));
   const saved = { ...process.env };
-  for (const key of ['ADMIN_TOKEN', 'AUTH_OPEN_READS', 'OPERATORS', 'TTLOCK_CLIENT_ID']) delete process.env[key];
+  for (const key of ['ADMIN_TOKEN', 'AUTH_OPEN_READS', 'OPERATORS', 'TTLOCK_CLIENT_ID', 'PLATFORM_TOKEN']) delete process.env[key];
   Object.assign(process.env, { DATA_DIR: dataDir, ...env });
   for (const key of Object.keys(require.cache)) {
     if (!key.includes('node_modules')) delete require.cache[key];
   }
-  const { app } = require('../server');
+  const mod = require('../server');
+  const { app } = mod;
+  await mod.api.whenReady();
   const server = await new Promise(resolve => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -28,8 +30,10 @@ async function boot(env = {}) {
   return {
     call,
     base,
+    server: mod, // { app, api, store } — for tests that need to reach below HTTP
     dataDir,
     close: () => new Promise(resolve => server.close(() => {
+      mod.store.sql.close();
       fs.rmSync(dataDir, { recursive: true, force: true });
       resolve();
     })),

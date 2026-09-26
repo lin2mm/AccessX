@@ -1,0 +1,628 @@
+/**
+ * AccessX API — one implementation for both runtimes.
+ * ====================================================================
+ * server.js (Express + node:sqlite) and worker.js (Cloudflare + D1) are
+ * thin adapters: they turn their native request into
+ *   { method, path, query, body, headers, ip }
+ * call api.handle(), and send back { status, body }.
+ *
+ * Every request is bound to exactly one tenant — the operator's — before
+ * any handler runs. Handlers read a tenant snapshot and write through a
+ * unit of work, so each change and its audit entry commit together.
+ */
+const rbac = require('./rbac-core');
+const policy = require('./policy-core');
+const creds = require('./credentials-core');
+const compiler = require('./compiler-core');
+const reconciler = require('./reconcile-core');
+const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
+const { sha256Hex } = require('./audit-core');
+const { operatorStatement } = require('./store/repo');
+const { seedTenant } = require('./store/bootstrap');
+
+class HttpError extends Error {
+  constructor(status, error, extra = {}) { super(error); this.status = status; this.extra = extra; }
+}
+const forbiddenSite = lockId => new HttpError(403, 'forbidden', { required: 'site scope', detail: `lock ${lockId} is outside your sites` });
+const outOfScope = detail => new HttpError(403, 'forbidden', { required: 'site scope', detail });
+
+const COLLECTIONS = ['sites', 'doorGroups', 'userGroups', 'users', 'schedules', 'assignments', 'holidays', 'roles'];
+/** Collections whose records hold personal data: audit details carry ids only. */
+const PERSONAL = new Set(['users']);
+
+function randomToken(bytes = 24) {
+  const buf = new Uint8Array(bytes);
+  globalThis.crypto.getRandomValues(buf);
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* ------------------------------------------------------------------ */
+/* Site scope helpers (operators limited to some sites)                 */
+/* ------------------------------------------------------------------ */
+function scopeFor(snap, op) {
+  const all = rbac.allSites(op);
+  const site = id => rbac.canAccessSite(op, id);
+  const group = gid => {
+    if (all) return true;
+    const g = (snap.userGroups || []).find(x => x.id === gid);
+    return Boolean(g && g.siteId && site(g.siteId));
+  };
+  const doorGroup = dgid => {
+    const dg = (snap.doorGroups || []).find(x => x.id === dgid);
+    return all || Boolean(dg && site(dg.siteId));
+  };
+  return {
+    all,
+    site,
+    group,
+    doorGroup,
+    lock: lockId => rbac.canAccessLock(snap, op, lockId),
+    /** sees a user if they belong to at least one group in scope */
+    userVisible: u => all || (u.groupIds || []).some(group),
+    /** may change/delete a user only if EVERY group is in scope —
+     *  a gym manager must not be able to suspend an office employee who
+     *  also happens to hold a gym membership */
+    userManageable: u => all || ((u.groupIds || []).length > 0 && u.groupIds.every(group)),
+    filter(collection, items) {
+      if (all) return items;
+      switch (collection) {
+        case 'sites': return items.filter(s => site(s.id));
+        case 'doorGroups': return items.filter(d => site(d.siteId));
+        case 'userGroups': return items.filter(g => group(g.id));
+        case 'users': return items.filter(u => (u.groupIds || []).some(group));
+        case 'assignments': return items.filter(a => doorGroup(a.doorGroupId) && group(a.userGroupId));
+        case 'holidays': return items.filter(x => !x.siteId || site(x.siteId));
+        default: return items; // schedules, roles: tenant-wide definitions
+      }
+    },
+    /** may this operator create/delete this record? */
+    canWrite(collection, item) {
+      if (all) return true;
+      switch (collection) {
+        case 'users': return (item.groupIds || []).length > 0 && item.groupIds.every(group);
+        case 'doorGroups': return site(item.siteId);
+        case 'userGroups': return Boolean(item.siteId) && site(item.siteId);
+        case 'holidays': return Boolean(item.siteId) && site(item.siteId);
+        case 'assignments': return doorGroup(item.doorGroupId) && group(item.userGroupId);
+        default: return false; // sites, schedules, roles need all-site scope
+      }
+    },
+  };
+}
+
+/** Audit detail for a created record — personal data never enters the chain. */
+function createDetail(collection, item) {
+  if (PERSONAL.has(collection)) {
+    const fields = Object.keys(item).filter(k => k !== 'id').sort();
+    return `${item.id} groups=${(item.groupIds || []).join(',') || '-'} fields=${fields.join(',')}`;
+  }
+  return JSON.stringify(item).slice(0, 200);
+}
+
+function createApi({ store, auth, vendorFor, ensureReady = async () => {}, log = () => {} }) {
+  let ready = null;
+  const whenReady = () => {
+    if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
+    return ready;
+  };
+
+  /* ---------------------------------------------------------------- */
+  /* Reconciliation                                                    */
+  /* ---------------------------------------------------------------- */
+  async function reconcileTenant(tenantId, { userId = null, lockFilter = () => true, dryRun = false, actor } = {}) {
+    const t = store.tenant(tenantId);
+    const vendor = vendorFor(tenantId);
+    const [snap, locks] = await Promise.all([t.snapshot(), vendor.listLocks()]);
+    const planned = reconciler.plan(snap, locks, { userId, lockFilter });
+    if (dryRun || !planned.actions.length) return { dryRun, plan: planned, summary: { revoked: 0, expired: 0, pendingRemoval: 0, failed: 0 } };
+    const uow = t.unit();
+    const outcome = await reconciler.execute(planned, { vendor, uow, snapshot: snap, actor });
+    await uow.commit();
+    return { dryRun, plan: planned, ...outcome };
+  }
+
+  /** Run after a write that can remove access. Never fails the request:
+   *  the periodic job is the safety net. */
+  async function reconcileAfter(ctx, opts) {
+    try {
+      const out = await reconcileTenant(ctx.tenantId, { ...opts, actor: reconciler.ACTOR });
+      return out.summary;
+    } catch (error) {
+      log('reconcile after write failed', error);
+      return { error: 'reconcile deferred to the next scheduled run' };
+    }
+  }
+
+  async function reconcileAll() {
+    await whenReady();
+    const results = [];
+    for (const tenant of await store.listTenants()) {
+      if (!tenant.seeded) continue;
+      try {
+        const out = await reconcileTenant(tenant.id, { actor: reconciler.ACTOR });
+        results.push({ tenantId: tenant.id, ...out.summary, notices: out.plan.notices.length });
+      } catch (error) {
+        log(`reconcile ${tenant.id} failed`, error);
+        results.push({ tenantId: tenant.id, error: String(error.message || error) });
+      }
+    }
+    return results;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Routes                                                            */
+  /* ---------------------------------------------------------------- */
+  const routes = [];
+  const route = (method, pattern, fn) => routes.push({ method, pattern, fn });
+
+  // --- identity ------------------------------------------------------
+  route('POST', /^\/api\/auth\/verify$/, async ctx => ({ authenticated: true, operator: rbac.describe(await ctx.snap(), ctx.operator), tenant: (await ctx.snap()).tenant }));
+  route('GET', /^\/api\/me$/, async ctx => ({ operator: rbac.describe(await ctx.snap(), ctx.operator), tenant: (await ctx.snap()).tenant }));
+  route('GET', /^\/api\/permissions$/, async ctx => ({ perms: rbac.PERMS, roles: (await ctx.snap()).roles }));
+  route('GET', /^\/api\/status$/, async ctx => ({ ...ctx.vendor.status(), tenant: (await ctx.snap()).tenant }));
+
+  // --- doors ---------------------------------------------------------
+  route('GET', /^\/api\/doors$/, async ctx => {
+    const snap = await ctx.snap();
+    const doors = (await ctx.visibleLocks()).map(l => {
+      const dg = snap.doorGroups.find(d => (d.lockIds || []).map(Number).includes(Number(l.lockId)));
+      const site = dg ? snap.sites.find(s => s.id === dg.siteId) : null;
+      return { ...l, doorGroup: dg ? dg.name : null, site: site ? site.name : (l.groupName || 'Unassigned') };
+    });
+    return { doors };
+  });
+
+  route('POST', /^\/api\/doors\/(\d+)\/unlock$/, async (ctx, [lockParam]) => {
+    const snap = await ctx.snap();
+    const lockId = Number(lockParam);
+    const { userId, reason } = ctx.body;
+    await ctx.requireLock(lockId);
+    if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
+    const uow = ctx.t.unit();
+    // ★ policy check BEFORE touching the lock — this is the whole point
+    if (userId) {
+      const v = policy.evaluate(snap, userId, lockId, new Date());
+      if (!v.allowed) {
+        await uow.audit('unlock.denied', `lock ${lockId} user ${userId}: ${v.reason}`, ctx.actor).commit();
+        throw new HttpError(403, v.reason, { denied: true, reason: v.reason, path: v.path });
+      }
+    } else if (typeof reason !== 'string' || reason.trim().length < 3) {
+      // An override bypasses every rule — make the operator say why, on the record.
+      throw new HttpError(400, 'reason is required for an operator override unlock (or pass userId to check policy)');
+    }
+    if (!ctx.vendor.demo) await ctx.vendor.unlock(lockId);
+    const detail = userId ? `lock ${lockId} user ${userId}` : `lock ${lockId} (operator override) reason: ${String(reason).trim().slice(0, 200)}`;
+    await uow.audit('unlock.granted', detail, ctx.actor).commit();
+    return { unlocked: lockId, simulated: ctx.vendor.demo };
+  });
+
+  // --- decisions -----------------------------------------------------
+  route('POST', /^\/api\/evaluate$/, async ctx => {
+    const snap = await ctx.snap();
+    const { userId, lockId, when, localTime } = ctx.body;
+    if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
+    const site = policy.siteForLock(snap, lockId);
+    const timeZone = policy.siteTimeZone(snap, site && site.id);
+    // localTime = wall-clock time at the door's site ("2026-09-28T21:00");
+    // when = absolute instant (ISO with offset). localTime wins if both sent.
+    const at = localTime ? policy.zonedTimeToDate(localTime, timeZone) : when ? new Date(when) : new Date();
+    if (Number.isNaN(at.getTime())) throw new HttpError(400, 'invalid date');
+    return {
+      at: at.toISOString(), site: site ? site.name : null, timeZone,
+      localTime: policy.localParts(at, timeZone).label,
+      result: policy.evaluate(snap, userId, Number(lockId), at),
+    };
+  });
+
+  route('GET', /^\/api\/users\/([^/]+)\/doors$/, async (ctx, [userId]) => {
+    const snap = await ctx.snap();
+    const user = snap.users.find(u => u.id === userId);
+    if (!user || !ctx.scope.userVisible(user)) throw new HttpError(404, 'not found');
+    return { doors: policy.doorsForUser(snap, userId, new Date()).filter(d => ctx.scope.lock(d.lockId)) };
+  });
+
+  // --- people lifecycle ----------------------------------------------
+  for (const [verb, suspended] of [['suspend', true], ['unsuspend', false]]) {
+    route('POST', new RegExp(`^/api/users/([^/]+)/${verb}$`), async (ctx, [userId]) => {
+      const snap = await ctx.snap();
+      const user = snap.users.find(u => u.id === userId);
+      if (!user || !ctx.scope.userVisible(user)) throw new HttpError(404, 'not found');
+      if (!ctx.scope.userManageable(user)) throw outOfScope(`${userId} belongs to groups outside your sites`);
+      await ctx.t.unit().update('users', userId, { suspended }).audit(`users.${verb}`, userId, ctx.actor).commit();
+      const reconcile = suspended ? await reconcileAfter(ctx, { userId }) : undefined;
+      return { user: { ...user, suspended }, reconcile };
+    });
+  }
+
+  /** GDPR Art. 15 subject access: everything we hold about one person. */
+  route('GET', /^\/api\/users\/([^/]+)\/export$/, async (ctx, [userId]) => {
+    const snap = await ctx.snap();
+    const user = snap.users.find(u => u.id === userId);
+    if (!user || !ctx.scope.userVisible(user)) throw new HttpError(404, 'not found');
+    const events = [];
+    for (let before = null; ;) {
+      const page = await ctx.t.auditRecent({ limit: 1000, before });
+      events.push(...page.filter(e => new RegExp(`\\b${userId}\\b`).test(e.detail) || e.actor === userId));
+      if (page.length < 1000) break;
+      before = page[page.length - 1].seq;
+    }
+    await ctx.t.unit().audit('users.export', userId, ctx.actor).commit();
+    return {
+      exportedAt: new Date().toISOString(),
+      user,
+      groups: snap.userGroups.filter(g => (user.groupIds || []).includes(g.id)),
+      credentials: snap.credentials.filter(c => c.userId === userId),
+      auditEvents: events,
+    };
+  });
+
+  // --- collections (CRUD) ----------------------------------------------
+  for (const coll of COLLECTIONS) {
+    route('GET', new RegExp(`^/api/${coll}$`), async ctx => ({ [coll]: ctx.scope.filter(coll, (await ctx.snap())[coll]) }));
+
+    route('POST', new RegExp(`^/api/${coll}$`), async ctx => {
+      const snap = await ctx.snap();
+      const clean = validate(coll, ctx.body, snap);
+      if (!ctx.scope.canWrite(coll, clean)) {
+        throw outOfScope(coll === 'users' ? 'every groupId must belong to one of your sites' : `creating ${coll} here needs all-site scope`);
+      }
+      const item = { ...clean, id: policy.uid(coll.slice(0, 3)) }; // server owns ids
+      await ctx.t.unit().insert(coll, item).audit(`${coll}.create`, createDetail(coll, item), ctx.actor).commit();
+      return { item };
+    });
+
+    route('DELETE', new RegExp(`^/api/${coll}/([^/]+)$`), async (ctx, [id]) => {
+      const snap = await ctx.snap();
+      const item = snap[coll].find(x => x.id === id);
+      if (!item || (coll === 'users' && !ctx.scope.userVisible(item))) throw new HttpError(404, 'not found');
+      if (coll === 'users' ? !ctx.scope.userManageable(item) : !ctx.scope.canWrite(coll, item)) {
+        throw outOfScope(`${id} is (partly) outside your sites`);
+      }
+      const refs = referencedBy(coll, id, snap);
+      if (refs.length) throw new HttpError(409, 'still referenced', { referencedBy: refs.slice(0, 20) });
+      // Deleting the row IS the erasure: name/email exist nowhere else
+      // (audit entries reference the id only).
+      await ctx.t.unit().remove(coll, id)
+        .audit(`${coll}.delete`, PERSONAL.has(coll) ? `${id} (personal data erased)` : id, ctx.actor).commit();
+      let reconcile;
+      if (coll === 'users') reconcile = await reconcileAfter(ctx, { userId: id });
+      else if (['assignments', 'doorGroups', 'userGroups', 'schedules'].includes(coll)) reconcile = await reconcileAfter(ctx, {});
+      return { reconcile };
+    });
+  }
+
+  // --- credentials -----------------------------------------------------
+  route('POST', /^\/api\/passcode$/, async ctx => {
+    const snap = await ctx.snap();
+    const { lockId, name, userId, startAt, endAt, acknowledgeScheduleGap } = ctx.body;
+    if (lockId === undefined || lockId === null || lockId === '') throw new HttpError(400, 'lockId is required');
+    await ctx.requireLock(lockId);
+    if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
+    const user = snap.users.find(u => u.id === userId);
+    if (user && !ctx.scope.userVisible(user)) throw new HttpError(404, 'unknown user');
+    // ★ Policy check BEFORE the lock gets a code — same rule as remote unlock.
+    const plan = creds.planPasscode(snap, { userId, lockId, startAt, endAt, acknowledgeScheduleGap: acknowledgeScheduleGap === true });
+    if (!plan.ok) {
+      await ctx.t.unit().audit('passcode.denied', `lock ${lockId} user ${userId}: ${plan.error}`, ctx.actor).commit();
+      const { ok: _ok, status, error, ...rest } = plan;
+      throw new HttpError(status, error, rest);
+    }
+    const c = plan.credential;
+    const out = await ctx.vendor.createPasscode({ lockId: c.lockId, name: String(name || `AccessX ${userId}`).slice(0, 100), startAt: c.startAt, endAt: c.endAt });
+    const entry = creds.register({ credentials: [] }, c, { issuedBy: ctx.actor, vendorRef: out.keyboardPwdId, code: out.keyboardPwd });
+    entry.vendorRef = entry.vendorRef === null || entry.vendorRef === undefined ? null : String(entry.vendorRef);
+    await ctx.t.unit().insert('credentials', entry)
+      .audit('passcode.create', `${entry.id} lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt} enforcement=${c.enforcement}` +
+        (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), ctx.actor)
+      .commit();
+    // The full code is returned exactly once and never stored.
+    return { passcode: out, credential: entry, warnings: plan.warnings };
+  });
+
+  route('GET', /^\/api\/credentials$/, async ctx => {
+    const snap = await ctx.snap();
+    const visible = snap.credentials.filter(c => ctx.scope.lock(c.lockId));
+    const ids = new Set(visible.map(c => c.id));
+    return { credentials: visible, review: creds.reviewCredentials(snap).filter(f => ids.has(f.id)) };
+  });
+
+  route('DELETE', /^\/api\/credentials\/([^/]+)$/, async (ctx, [id]) => {
+    const snap = await ctx.snap();
+    const cred = snap.credentials.find(c => c.id === id);
+    if (!cred) throw new HttpError(404, 'not found');
+    if (!ctx.scope.lock(cred.lockId)) throw forbiddenSite(cred.lockId);
+    if (!['active', 'pending_removal'].includes(cred.status)) throw new HttpError(409, `credential is already ${cred.status}`);
+    const lock = (await ctx.vendor.listLocks()).find(l => Number(l.lockId) === Number(cred.lockId));
+    const reason = String((ctx.body && ctx.body.reason) || 'manual').slice(0, 200);
+    const at = new Date().toISOString();
+    const uow = ctx.t.unit();
+    let status;
+    if (lock && lock.hasGateway) {
+      if (cred.type === 'passcode' && cred.vendorRef) await ctx.vendor.deletePasscode(cred.lockId, cred.vendorRef);
+      status = 'revoked';
+      uow.audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId}`, ctx.actor);
+    } else {
+      // No gateway: the code stays on the lock until someone removes it there.
+      status = 'pending_removal';
+      uow.audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId}: no gateway, on-site removal required`, ctx.actor);
+    }
+    await uow.update('credentials', cred.id, { status, revokedAt: at, revokedBy: ctx.actor, revokeReason: reason }).commit();
+    return {
+      credential: { ...cred, status, revokedAt: at, revokedBy: ctx.actor, revokeReason: reason },
+      next: status === 'pending_removal' ? 'Remove the code at the lock, then POST /api/credentials/:id/confirm-removed' : undefined,
+    };
+  });
+
+  route('POST', /^\/api\/credentials\/([^/]+)\/confirm-removed$/, async (ctx, [id]) => {
+    const snap = await ctx.snap();
+    const cred = snap.credentials.find(c => c.id === id);
+    if (!cred) throw new HttpError(404, 'not found');
+    if (!ctx.scope.lock(cred.lockId)) throw forbiddenSite(cred.lockId);
+    if (cred.status !== 'pending_removal') throw new HttpError(409, `credential is ${cred.status}, not pending_removal`);
+    await ctx.t.unit().update('credentials', id, { status: 'revoked' })
+      .audit('credential.removed_on_site', `${id} lock ${cred.lockId} user ${cred.userId}`, ctx.actor).commit();
+    return { credential: { ...cred, status: 'revoked' } };
+  });
+
+  route('POST', /^\/api\/reconcile$/, async ctx => {
+    const out = await reconcileTenant(ctx.tenantId, {
+      dryRun: ctx.body.dryRun === true, lockFilter: id => ctx.scope.lock(id), actor: ctx.actor,
+    });
+    return out;
+  });
+
+  // --- policy compiler ---------------------------------------------------
+  route('GET', /^\/api\/compile$/, async ctx => {
+    const snap = await ctx.snap();
+    const fleet = await ctx.visibleLocks();
+    // cyclic support is model-dependent; unknown ⇒ false (conservative)
+    const locks = fleet.map(l => ({ lockId: l.lockId, name: l.lockAlias, hasGateway: Boolean(l.hasGateway), cyclic: l.cyclic === true }));
+    const scoped = { ...snap, assignments: snap.assignments.filter(a => ctx.scope.doorGroup(a.doorGroupId)) };
+    const visible = new Set(locks.map(l => Number(l.lockId)));
+    return {
+      ...compiler.compile(scoped, locks),
+      drift: creds.reviewCredentials(snap).filter(f => visible.has(Number(f.lockId))),
+      pendingRemoval: snap.credentials.filter(c => c.status === 'pending_removal' && visible.has(Number(c.lockId))),
+      notices: reconciler.dstNotices(snap, fleet, { now: Date.now(), days: 14, lockFilter: id => visible.has(Number(id)) }),
+    };
+  });
+
+  // --- records & audit -----------------------------------------------------
+  route('GET', /^\/api\/records\/(\d+)$/, async (ctx, [lockId]) => {
+    await ctx.snap();
+    await ctx.requireLock(lockId);
+    if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
+    return { records: await ctx.vendor.records(lockId) };
+  });
+
+  route('GET', /^\/api\/audit$/, async ctx => {
+    await ctx.snap();
+    const q = ctx.query;
+    // Site-scoped operators see their own actions only: the tenant-wide
+    // trail reveals activity at sites they do not manage.
+    const actor = ctx.scope.all ? (q.get('actor') || null) : ctx.operator.id;
+    const log = await ctx.t.auditRecent({ limit: Number(q.get('limit')) || 100, before: Number(q.get('before')) || null, action: q.get('action') || null, actor });
+    return { log, scopedToActor: !ctx.scope.all };
+  });
+  route('GET', /^\/api\/audit\/verify$/, async ctx => ({ verification: await ctx.t.auditVerify() }));
+
+  // --- operators (people who administer the system) --------------------------
+  route('GET', /^\/api\/operators$/, async ctx => {
+    await ctx.snap();
+    const list = (await ctx.t.operators()).filter(o => ctx.scope.all || (o.siteIds || []).every(s => ctx.scope.site(s)) && (o.siteIds || []).length);
+    return { operators: list, bootstrap: auth.envOperators(ctx.tenantId) };
+  });
+
+  route('POST', /^\/api\/operators$/, async ctx => {
+    const snap = await ctx.snap();
+    const b = ctx.body;
+    const name = typeof b.name === 'string' ? b.name.trim() : '';
+    if (!name || name.length > 100) throw new HttpError(400, 'name is required (max 100 characters)');
+    const role = rbac.roleFor(snap, b.role);
+    if (!role) throw new HttpError(400, 'role does not match an existing role');
+    let siteIds = Array.isArray(b.siteIds) ? [...new Set(b.siteIds.map(String))] : [];
+    if (siteIds.includes('*')) siteIds = [];
+    for (const s of siteIds) if (!snap.sites.some(x => x.id === s)) throw new HttpError(400, `siteIds: unknown site ${s}`);
+    // No privilege escalation: you can only hand out what you hold yourself.
+    const mine = rbac.permsFor(snap, ctx.operator);
+    const theirs = b.role === 'r_owner' ? ['*'] : role.perms || [];
+    if (!mine.includes('*') && theirs.some(p => !mine.includes(p))) throw new HttpError(403, 'forbidden', { detail: 'cannot grant a role with permissions you do not hold' });
+    if (!ctx.scope.all && (!siteIds.length || siteIds.some(s => !ctx.scope.site(s)))) throw outOfScope('new operator must be limited to your own sites');
+    const token = `ax_${randomToken()}`;
+    const op = { id: policy.uid('op'), name, role: b.role, siteIds, tokenSha256: sha256Hex(token), createdBy: ctx.actor };
+    await ctx.t.unit().raw(operatorStatement(ctx.tenantId, op).sql, operatorStatement(ctx.tenantId, op).params)
+      .audit('operator.create', `${op.id} role=${op.role} sites=${siteIds.join(',') || '*'}`, ctx.actor).commit();
+    // Shown once. Only the hash is stored.
+    return { operator: { id: op.id, name, role: op.role, siteIds }, token };
+  });
+
+  route('DELETE', /^\/api\/operators\/([^/]+)$/, async (ctx, [id]) => {
+    await ctx.snap();
+    if (id === ctx.operator.id) throw new HttpError(409, 'you cannot revoke your own access');
+    const target = (await ctx.t.operators()).find(o => o.id === id && !o.revokedAt);
+    if (!target) throw new HttpError(404, 'not found');
+    if (!ctx.scope.all && (!(target.siteIds || []).length || target.siteIds.some(s => !ctx.scope.site(s)))) throw outOfScope('operator is outside your sites');
+    await ctx.t.unit().raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [new Date().toISOString(), ctx.tenantId, id])
+      .audit('operator.revoke', id, ctx.actor).commit();
+    return { revoked: id };
+  });
+
+  // --- vendor / mirror / health ---------------------------------------------
+  route('GET', /^\/api\/vendor$/, async ctx => ctx.vendor.info());
+  const mirrorOf = ctx => {
+    if (!ctx.vendor.mirror) throw new HttpError(501, 'record mirror is not available for this tenant yet');
+    return ctx.vendor.mirror;
+  };
+  route('POST', /^\/api\/mirror\/sync$/, async ctx => mirrorOf(ctx).sync(ctx.body));
+  route('GET', /^\/api\/mirror\/coverage$/, async ctx => mirrorOf(ctx).coverage());
+  route('GET', /^\/api\/mirror\/records$/, async ctx => {
+    const q = ctx.query;
+    return {
+      records: await mirrorOf(ctx).query({
+        lockId: q.get('lockId') || null, from: q.get('from') ? Number(q.get('from')) : null,
+        to: q.get('to') ? Number(q.get('to')) : null, limit: q.get('limit') ? Number(q.get('limit')) : 500,
+      }),
+    };
+  });
+  route('GET', /^\/api\/health$/, async ctx => {
+    const doors = await ctx.visibleLocks();
+    const low = doors.filter(d => d.electricQuantity <= 25);
+    const offline = doors.filter(d => !d.hasGateway);
+    return { total: doors.length, lowBattery: low, offline, score: Math.round(100 - (low.length * 12 + offline.length * 8)) };
+  });
+
+  route('POST', /^\/api\/ai$/, async ctx => ({ answer: await copilot(ctx) }));
+
+  // --- platform: tenants ---------------------------------------------------
+  route('GET', /^\/api\/tenants$/, async () => ({ tenants: await store.listTenants() }));
+  route('POST', /^\/api\/tenants$/, async ctx => {
+    const name = typeof ctx.body.name === 'string' ? ctx.body.name.trim() : '';
+    if (!name || name.length > 100) throw new HttpError(400, 'name is required (max 100 characters)');
+    const ownerName = String(ctx.body.ownerName || 'Account owner').slice(0, 100);
+    const id = `t_${randomToken(6)}`;
+    const t = await store.createTenant(id, name);
+    await seedTenant(store, id, { data: {}, source: 'platform' });
+    const token = `ax_${randomToken()}`;
+    const op = { id: policy.uid('op'), name: ownerName, role: 'r_owner', tokenSha256: sha256Hex(token), createdBy: 'platform' };
+    const stmt = operatorStatement(id, op);
+    await t.unit().raw(stmt.sql, stmt.params).audit('operator.create', `${op.id} role=r_owner sites=*`, 'platform').commit();
+    return { tenant: { id, name }, owner: { id: op.id, name: ownerName, token } };
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* Copilot (deterministic router; the tools are what an LLM would call) */
+  /* ---------------------------------------------------------------- */
+  async function copilot(ctx) {
+    const q = String(ctx.body.q || '').toLowerCase();
+    const snap = await ctx.snap();
+    const doors = await ctx.visibleLocks();
+    const people = snap.users.filter(ctx.scope.userVisible);
+    if (/batter|service|visit|maintenance|replace/.test(q)) {
+      const low = doors.filter(x => x.electricQuantity <= 30).sort((a, b) => a.electricQuantity - b.electricQuantity);
+      const off = doors.filter(x => !x.hasGateway);
+      return '<b>Suggested service run</b><br>' +
+        (low.length ? low.map(d => `· <b>${h(d.lockAlias)}</b> — ${Number(d.electricQuantity)}% battery` +
+          (d.electricQuantity <= 15 ? ' <span class="tag r">urgent</span>' : '')).join('<br>') : 'No low batteries.') +
+        (off.length ? `<br>· <b>${off.map(d => h(d.lockAlias)).join(', ')}</b> — no gateway, cannot be opened remotely` : '') +
+        '<br><br>Batching these into one visit saves a second call-out. Shall I draft the job sheet?';
+    }
+    if (/unusual|anomal|risk|suspicious|odd|wrong/.test(q)) {
+      const denials = await ctx.t.auditCount('unlock.denied');
+      const suspended = people.filter(u => u.suspended);
+      const expiring = people.filter(u => u.validTo && new Date(u.validTo) < new Date(Date.now() + 30 * 864e5));
+      const pending = snap.credentials.filter(c => c.status === 'pending_removal' && ctx.scope.lock(c.lockId));
+      return '<b>Risk review</b><br>' +
+        `· ${denials} denied unlock attempt(s) recorded<br>` +
+        `· ${suspended.length} suspended user(s): ${suspended.map(u => h(u.name)).join(', ') || 'none'}<br>` +
+        `· ${expiring.length} credential(s) expiring within 30 days: ${expiring.map(u => h(u.name)).join(', ') || 'none'}<br>` +
+        `· ${pending.length} code(s) still on offline locks awaiting on-site removal<br><br>` +
+        'Recommendation: remove suspended users from all groups so they disappear from reports, and renew expiring contractors before they lock themselves out.';
+    }
+    if (/who can|who has|access to/.test(q)) {
+      const m = q.match(/(server room|main entrance|warehouse|cleaner|gym front|gym staff|storage)/);
+      const d = m ? doors.find(x => (x.lockAlias || '').toLowerCase().includes(m[1])) : null;
+      if (!d) return 'Name a door and I will list who can open it right now — e.g. "who can open the Server Room?"';
+      const names = people.filter(u => policy.evaluate(snap, u.id, d.lockId, new Date()).allowed).map(u => u.name);
+      return `<b>${h(d.lockAlias)}</b> — currently openable by: ${names.length ? names.map(h).join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`;
+    }
+    if (/denied|why|refus|reject/.test(q)) {
+      const m = q.match(/(sarah|dev|tom|cleanco|cleaner)/);
+      const u = m ? people.find(x => x.name.toLowerCase().includes(m[1])) : null;
+      if (!u) return 'Tell me who was denied — e.g. "why was Sarah denied at 9pm?"';
+      // "9pm" means 9pm at each door's own site, not 21:00 UTC.
+      const denied = doors.map(d => {
+        const tz = policy.siteTimeZone(snap, (policy.siteForLock(snap, d.lockId) || {}).id);
+        const today = policy.localParts(new Date(), tz).isoDate;
+        return { door: d.lockAlias, r: policy.evaluate(snap, u.id, d.lockId, policy.zonedTimeToDate(`${today}T21:00`, tz)) };
+      }).filter(x => !x.r.allowed).slice(0, 4);
+      return `<b>${h(u.name)}</b> at 21:00 (each site's local time):<br>` +
+        denied.map(x => `· ${h(x.door)}: ${h(x.r.reason)}`).join('<br>') +
+        '<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.';
+    }
+    if (/give|grant|add|allow|extend/.test(q)) {
+      return '<b>Proposed change</b> (not yet applied)<br>' +
+        'I would add a rule: <b>Cleaning Contractor</b> → <b>Operations</b> on <b>Friday 18:00–21:00</b>.<br><br>' +
+        'Impact: 1 user group, 2 doors. No existing rule is removed.<br>' +
+        '<i>Nothing is executed until you confirm — every AI action is proposal-then-approve, and lands in the audit log with "ai" as the actor.</i>';
+    }
+    return 'I can help with:<br>· <b>Diagnostics</b> — "which doors need a battery visit?"<br>' +
+      '· <b>Explaining decisions</b> — "why was Sarah denied at 9pm?"<br>' +
+      '· <b>Queries</b> — "who can open the Server Room?"<br>' +
+      '· <b>Risk review</b> — "anything unusual this week?"<br>' +
+      '· <b>Rule drafting</b> — "give the cleaners Friday evening access"<br><br>' +
+      '<i>Running on the deterministic router. Set OPENAI_API_KEY to enable full natural language.</i>';
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Dispatcher                                                        */
+  /* ---------------------------------------------------------------- */
+  async function handle(req) {
+    const method = String(req.method || 'GET').toUpperCase() === 'HEAD' ? 'GET' : String(req.method || 'GET').toUpperCase();
+    const path = (String(req.path || '/').replace(/\/+$/, '') || '/');
+    try {
+      if (path === '/api/auth' && method === 'GET') return { status: 200, body: { ok: true, ...auth.status() } };
+      await whenReady();
+
+      const found = routes.find(r => r.method === method && r.pattern.test(path));
+      const headers = req.headers || {};
+      const who = await auth.authenticate({ method, path, authorization: headers.authorization || '', ip: req.ip || 'unknown' });
+      if (who.error) return who.error;
+      if (!found) return { status: 404, body: { ok: false, error: 'not found' } };
+
+      const params = path.match(found.pattern).slice(1).map(decodeURIComponent);
+      const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+      const query = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
+
+      if (who.perm === rbac.PLATFORM) {
+        const out = await found.fn({ body, query, operator: who.operator }, params);
+        return { status: 200, body: { ok: true, ...out } };
+      }
+
+      const t = store.tenant(who.tenantId);
+      const vendor = vendorFor(who.tenantId);
+      let snapPromise = null;
+      let locksPromise = null;
+      const ctx = {
+        body, query, t, vendor,
+        tenantId: who.tenantId,
+        operator: who.operator,
+        actor: who.operator ? who.operator.id : 'system',
+        snap: () => (snapPromise ||= t.snapshot()),
+        scope: null,
+        /** The lock must belong to THIS tenant's fleet — site scope alone is
+         *  not enough (an all-site owner's scope is "everything"). */
+        requireLock: async lockId => {
+          locksPromise ||= vendor.listLocks();
+          const lock = (await locksPromise).find(l => Number(l.lockId) === Number(lockId));
+          if (!lock) throw new HttpError(404, 'unknown lock');
+          return lock;
+        },
+        visibleLocks: async () => {
+          const snap = await ctx.snap();
+          locksPromise ||= vendor.listLocks();
+          return (await locksPromise).filter(l => rbac.canAccessLock(snap, who.operator, l.lockId));
+        },
+      };
+      if (!(await t.info())) return { status: 403, body: { ok: false, error: 'tenant not found' } };
+      const snap = await ctx.snap();
+      // Roles live in the tenant's own table, so authorization happens here.
+      if (!rbac.hasPermission(snap, who.operator, who.perm)) {
+        return { status: 403, body: { ok: false, error: 'forbidden', required: who.perm } };
+      }
+      ctx.scope = scopeFor(snap, who.operator);
+      const out = await found.fn(ctx, params);
+      return { status: 200, body: { ok: true, demo: vendor.demo, ...out } };
+    } catch (error) {
+      if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
+      if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
+      if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' } };
+      if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
+      log('api error', error);
+      return { status: 500, body: { ok: false, error: String((error && error.message) || error) } };
+    }
+  }
+
+  return { handle, reconcileAll, reconcileTenant, whenReady };
+}
+
+module.exports = { createApi, scopeFor, createDetail, HttpError };

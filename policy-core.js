@@ -208,5 +208,5 @@ function audit(db, action, detail, actor = 'system') {
 
 module.exports = {
   BLANK, uid, scheduleAllows, evaluate, doorsForUser, audit,
-  DEFAULT_TZ, isValidTimeZone, localParts, zonedTimeToDate, siteTimeZone, siteForLock,
+  DEFAULT_TZ, isValidTimeZone, localParts, offsetMs, zonedTimeToDate, siteTimeZone, siteForLock,
 };
