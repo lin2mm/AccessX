@@ -69,6 +69,15 @@ check('credential registry and revoke', async () => {
   const r = await call('DELETE', `/api/credentials/${active.id}`, OWNER);
   assert.equal(r.body.credential.status, 'revoked');
 });
+check('audit chain verifies and records operators', async () => {
+  const v = await call('GET', '/api/audit/verify', OWNER);
+  assert.equal(v.body.verification.ok, true, JSON.stringify(v.body.verification));
+  assert.ok(v.body.verification.count > 5);
+  const log = await call('GET', '/api/audit?limit=5', OWNER);
+  assert.equal(log.body.log.length, 5);
+  assert.ok(log.body.log[0].seq > log.body.log[1].seq);
+  assert.ok(log.body.log.some(e => e.actor === 'owner'));
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });

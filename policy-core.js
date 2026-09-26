@@ -1,6 +1,7 @@
+const auditCore = require('./audit-core');
 const BLANK = {
   sites: [], doorGroups: [], userGroups: [], users: [], schedules: [],
-  holidays: [], assignments: [], roles: [], auditLog: [], credentials: [],
+  holidays: [], assignments: [], roles: [], credentials: [],
 };
 
 const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
@@ -192,9 +193,17 @@ function doorsForUser(db, userId, when = new Date()) {
   return result;
 }
 
+/**
+ * Queue an audit entry. Adapters (acl.save / worker saveAcl) seal the
+ * queue into the append-only hash chain BEFORE persisting state.
+ */
 function audit(db, action, detail, actor = 'system') {
-  db.auditLog.unshift({ id: uid('log'), ts: new Date().toISOString(), actor, action, detail });
-  db.auditLog = db.auditLog.slice(0, 2000);
+  if (!Array.isArray(db.auditPending)) {
+    Object.defineProperty(db, 'auditPending', { value: [], enumerable: false, writable: true, configurable: true });
+  }
+  const entry = auditCore.pending(action, detail, actor);
+  db.auditPending.push(entry);
+  return entry;
 }
 
 module.exports = {

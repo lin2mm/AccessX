@@ -43,7 +43,10 @@ const DEMO_LOCKS = [
 
 function seed() {
   const db = acl.load();
-  if (db.sites.length) return db;
+  if (db.sites.length) {
+    if (Array.isArray(db.auditLog)) acl.save(db); // migrate legacy log into the chain once
+    return db;
+  }
 
   db.sites = [
     { id: 'site_river', name: 'Riverside Office',  address: '12 Riverside Way, Bristol', timezone: 'Europe/London' },
@@ -291,7 +294,13 @@ app.get('/api/records/:lockId', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-app.get('/api/audit', (req, res) => ok(res, { log: acl.load().auditLog.slice(0, 100) }));
+app.get('/api/audit', (req, res) => {
+  const limit = Number(req.query.limit) || 100;
+  const before = Number(req.query.before) || null;
+  ok(res, { log: acl.auditStore.recent({ limit, before }) });
+});
+
+app.get('/api/audit/verify', (req, res) => ok(res, { verification: acl.auditStore.verify() }));
 
 // ---- Vendor abstraction ------------------------------------------
 // server 只跟 driver 接口对话，不直接依赖任何厂商。
@@ -370,7 +379,7 @@ function aiTools(db, doors) {
       return { low, off };
     },
     anomalies() {
-      const denials = db.auditLog.filter(x => x.action === 'unlock.denied');
+      const denials = acl.auditStore.recent({ limit: 1000, action: 'unlock.denied' });
       const suspended = db.users.filter(u => u.suspended);
       const expiring = db.users.filter(u => u.validTo &&
         new Date(u.validTo) < new Date(Date.now() + 30*864e5));

@@ -42,12 +42,12 @@ test('denies suspended, unknown, and unassigned users', () => {
   assert.equal(policy.evaluate(db, 'missing', 9001, at).reason, 'unknown user');
 });
 
-test('audit records are newest-first and bounded', () => {
+test('audit() queues unsealed entries without persisting them in state', () => {
   const db = fixture();
-  for (let i = 0; i < 2005; i++) policy.audit(db, 'test', String(i));
-  assert.equal(db.auditLog.length, 2000);
-  assert.equal(db.auditLog[0].detail, '2004');
-  assert.equal(db.auditLog.at(-1).detail, '5');
+  policy.audit(db, 'test', 'one', 'op_1');
+  policy.audit(db, 'test', 'two');
+  assert.deepEqual(db.auditPending.map(e => [e.detail, e.actor]), [['one', 'op_1'], ['two', 'system']]);
+  assert.equal(JSON.stringify(db).includes('auditPending'), false); // never serialised into state
 });
 
 /* ---------------- time zones ---------------- */

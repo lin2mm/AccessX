@@ -3,6 +3,7 @@ import mirrorDefaults from './data/mirror.json';
 import policy from './policy-core.js';
 import rbac from './rbac-core.js';
 import creds from './credentials-core.js';
+import auditCore from './audit-core.js';
 
 const DEMO_LOCKS = [
   { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
@@ -127,10 +128,48 @@ async function state(db, key, defaults) {
   return JSON.parse(seeded.value);
 }
 
-async function saveState(db, key, value) {
-  await db.prepare(
+function stateStatement(db, key, value) {
+  return db.prepare(
     'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-  ).bind(key, JSON.stringify(value)).run();
+  ).bind(key, JSON.stringify(value));
+}
+
+async function saveState(db, key, value) {
+  await stateStatement(db, key, value).run();
+}
+
+const rowToEntry = row => ({
+  seq: row.seq, id: row.id, ts: row.ts, actor: row.actor, action: row.action,
+  detail: row.detail, prevHash: row.prev_hash, hash: row.hash,
+});
+
+async function auditHead(db) {
+  const row = await db.prepare('SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1').first();
+  return row ? { seq: row.seq, hash: row.hash } : { seq: 0, hash: auditCore.GENESIS };
+}
+
+/**
+ * Seal queued audit entries into audit_log and persist ACL state in ONE
+ * D1 batch (a transaction): either both land or neither does. Two
+ * concurrent writers computing the same seq collide on the primary key,
+ * so the chain can never fork silently.
+ */
+async function saveAcl(db, acl) {
+  const head = await auditHead(db);
+  const queue = [];
+  if (Array.isArray(acl.auditLog)) {
+    if (head.seq === 0) queue.push(...auditCore.fromLegacy(acl.auditLog));
+    delete acl.auditLog;
+  }
+  if (acl.auditPending && acl.auditPending.length) queue.push(...acl.auditPending.splice(0));
+  const sealed = auditCore.seal(head, queue);
+  const insert = db.prepare(
+    'INSERT INTO audit_log (seq, id, ts, actor, action, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  );
+  await db.batch([
+    ...sealed.map(e => insert.bind(e.seq, e.id, e.ts, e.actor, e.action, e.detail, e.prevHash, e.hash)),
+    stateStatement(db, 'acl', acl),
+  ]);
 }
 
 async function readBody(request) {
@@ -207,7 +246,7 @@ function aiTools(db, doors) {
     },
     anomalies() {
       return {
-        denials: db.auditLog.filter(item => item.action === 'unlock.denied').length,
+        denials: db.recentDenials || 0,
         suspended: db.users.filter(user => user.suspended),
         expiring: db.users.filter(user => user.validTo
           && new Date(user.validTo) < new Date(Date.now() + 30 * 864e5)),
@@ -263,6 +302,7 @@ async function handleApi(request, env) {
       getAcl(),
       state(db, 'mirror', mirrorDefaults),
     ]);
+    if (Array.isArray(acl.auditLog)) await saveAcl(db, acl); // one-time legacy migration
     const canLock = lockId => rbac.canAccessLock(acl, operator, lockId);
     const visibleLocks = DEMO_LOCKS.filter(lock => canLock(lock.lockId));
 
@@ -304,12 +344,12 @@ async function handleApi(request, env) {
         const decision = policy.evaluate(acl, userId, lockId, new Date());
         if (!decision.allowed) {
           policy.audit(acl, 'unlock.denied', `lock ${lockId} user ${userId}: ${decision.reason}`, actor);
-          await saveState(db, 'acl', acl);
+          await saveAcl(db, acl);
           return json({ ok: false, denied: true, reason: decision.reason, path: decision.path }, 403);
         }
       }
       policy.audit(acl, 'unlock.granted', `lock ${lockId}${userId ? ` user ${userId}` : ' (operator override)'}`, actor);
-      await saveState(db, 'acl', acl);
+      await saveAcl(db, acl);
       return json(ok({ unlocked: lockId, simulated: true }));
     }
 
@@ -348,14 +388,14 @@ async function handleApi(request, env) {
         const item = { ...body, id: policy.uid(collection.slice(0, 3)) };
         acl[collection].push(item);
         policy.audit(acl, `${collection}.create`, JSON.stringify(item).slice(0, 200), actor);
-        await saveState(db, 'acl', acl);
+        await saveAcl(db, acl);
         return json(ok({ item }));
       }
       if (method === 'DELETE' && id) {
         const decodedId = decodeURIComponent(id);
         acl[collection] = acl[collection].filter(item => item.id !== decodedId);
         policy.audit(acl, `${collection}.delete`, decodedId, actor);
-        await saveState(db, 'acl', acl);
+        await saveAcl(db, acl);
         return json(ok());
       }
     }
@@ -370,7 +410,7 @@ async function handleApi(request, env) {
       });
       if (!plan.ok) {
         policy.audit(acl, 'passcode.denied', `lock ${body.lockId} user ${body.userId}: ${plan.error}`, actor);
-        await saveState(db, 'acl', acl);
+        await saveAcl(db, acl);
         const { ok: _ok, status, ...rest } = plan;
         return json({ ok: false, ...rest }, status);
       }
@@ -383,7 +423,7 @@ async function handleApi(request, env) {
       policy.audit(acl, 'passcode.create',
         `${entry.id} lock ${c.lockId} user ${body.userId} ${c.startAt}..${c.endAt} enforcement=${c.enforcement}`
         + (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), actor);
-      await saveState(db, 'acl', acl);
+      await saveAcl(db, acl);
       return json(ok({ passcode, credential: entry, warnings: plan.warnings }));
     }
 
@@ -401,7 +441,7 @@ async function handleApi(request, env) {
       if (!canLock(cred.lockId)) return forbiddenSite(cred.lockId);
       creds.revoke(acl, id, { revokedBy: actor, reason: 'manual' });
       policy.audit(acl, 'credential.revoke', `${id} lock ${cred.lockId} user ${cred.userId}`, actor);
-      await saveState(db, 'acl', acl);
+      await saveAcl(db, acl);
       return json(ok({ credential: cred }));
     }
 
@@ -412,7 +452,16 @@ async function handleApi(request, env) {
     }
 
     if (method === 'GET' && pathname === '/api/audit') {
-      return json(ok({ log: acl.auditLog.slice(0, 100) }));
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 1), 1000);
+      const before = Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
+      const { results } = await db.prepare('SELECT * FROM audit_log WHERE seq < ? ORDER BY seq DESC LIMIT ?')
+        .bind(before, limit).all();
+      return json(ok({ log: results.map(rowToEntry) }));
+    }
+
+    if (method === 'GET' && pathname === '/api/audit/verify') {
+      const { results } = await db.prepare('SELECT * FROM audit_log ORDER BY seq ASC').all();
+      return json(ok({ verification: auditCore.verify(results.map(rowToEntry)) }));
     }
 
     if (method === 'GET' && pathname === '/api/vendor') {
@@ -455,7 +504,8 @@ async function handleApi(request, env) {
       const body = await readBody(request);
       if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
       const query = String(body.q || '').toLowerCase().slice(0, 1000);
-      const tools = aiTools(acl, visibleLocks);
+      const denied = await db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'unlock.denied'").first();
+      const tools = aiTools({ ...acl, recentDenials: denied ? denied.n : 0 }, visibleLocks);
       let answer;
 
       if (/batter|service|visit|maintenance|replace/.test(query)) {
