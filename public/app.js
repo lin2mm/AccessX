@@ -135,6 +135,10 @@ $('#people').addEventListener('click',async e=>{
   const r=await post('/api/users/'+encodeURIComponent(b.dataset.suspend)+'/'+b.dataset.to,{});
   if(!r.ok){b.textContent=r._status===401?'Sign in':r._status===403?'Outside your sites':'Failed';return;}
   await loadPeople();
+  if(r._status===202){
+    $('#people-msg').textContent=`Sent for approval: reinstating reaches a sensitive door, so a second operator must approve (request ${r.approval.id}, expires ${new Date(r.approval.expiresAt).toLocaleString()}).`;
+    loadApprovals();loadAudit();return;
+  }
   const rc=r.reconcile;
   if(rc&&!rc.error)$('#people-msg').textContent=`Suspended. Credentials revoked remotely: ${Number(rc.revoked)} · awaiting on-site removal: ${Number(rc.pendingRemoval)}${rc.failed?' · failed (will retry): '+Number(rc.failed):''}`;
   loadCreds();loadAudit();loadCompile();loadRevocation();

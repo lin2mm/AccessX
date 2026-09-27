@@ -92,7 +92,10 @@ test('approval re-validates: a person suspended in the meantime gets nothing; ra
   assert.match(late.body.error, /approved, but the change could not be applied/);
   assert.equal((await api.call('GET', '/api/approvals?status=failed', OWNER)).body.approvals[0].id, id);
   assert.equal((await creds(api)).filter(c => c.lockId === 9002 && c.userId === 'u2').length, 0);
-  await api.call('POST', '/api/users/u2/unsuspend', OWNER);
+  // Reinstating u2 reaches the sensitive door again: that too needs a second person.
+  const back = await api.call('POST', '/api/users/u2/unsuspend', OWNER);
+  assert.equal(back.status, 202);
+  assert.equal((await api.call('POST', `/api/approvals/${back.body.approval.id}/approve`, { ...M2, body: {} })).status, 200);
 
   const id2 = (await api.call('POST', '/api/passcode', { ...M1, body: { lockId: 9002, userId: 'u2' } })).body.approval.id;
   // Force the interleaving: both deciders read "pending" before either commits.
@@ -171,4 +174,69 @@ test('an approved code nobody collects is thrown away after 72 h (audited)', asy
   const log = (await api.call('GET', '/api/audit?action=approval.code_discarded', OWNER)).body.log;
   assert.equal(log.length, 1);
   assert.match(log[0].detail, new RegExp(`^${id}: not collected`));
+});
+
+test('reinstating a suspended person who reaches a sensitive door needs a second person (closes the create-suspended-then-unsuspend bypass)', async t => {
+  const { api } = await setup(t);
+  const user = async id => (await api.call('GET', '/api/users', OWNER)).body.users.find(u => u.id === id);
+
+  // u2 (ug_it) reaches the sensitive server room (9002).
+  assert.equal((await api.call('POST', '/api/users/u2/suspend', M1)).status, 200, 'removing access never waits');
+  const req = await api.call('POST', '/api/users/u2/unsuspend', { ...M1, body: {} });
+  assert.equal(req.status, 202, JSON.stringify(req.body));
+  assert.deepEqual(req.body.approval.locks, [9002]);
+  assert.equal((await user('u2')).suspended, true, 'still suspended until approved');
+  assert.equal((await api.call('POST', `/api/approvals/${req.body.approval.id}/approve`, { ...M1, body: {} })).status, 403, 'not by the requester');
+  const ok = await api.call('POST', `/api/approvals/${req.body.approval.id}/approve`, { ...M2, body: {} });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal((await user('u2')).suspended, false);
+  const log = (await api.call('GET', '/api/audit?action=users.unsuspend', OWNER)).body.log;
+  assert.equal(log.length, 1);
+  assert.equal(log[0].actor, 'op_m1', 'recorded in the requester\'s name');
+  assert.equal((await api.call('POST', '/api/users/u2/unsuspend', { ...M1, body: {} })).status, 200, 'already active: nothing to approve');
+
+  // The bypass: create in a sensitive group as suspended (no approval), then unsuspend.
+  const created = await api.call('POST', '/api/users', { ...M1, body: { name: 'Side Door', groupIds: ['ug_it'], suspended: true } });
+  assert.equal(created.status, 200, 'a suspended person grants nothing yet');
+  const sneak = await api.call('POST', `/api/users/${created.body.item.id}/unsuspend`, { ...M1, body: {} });
+  assert.equal(sneak.status, 202, 'the unsuspend is where the access starts, so it is gated');
+
+  // No sensitive door in reach → no approval; already active → nothing to approve.
+  assert.equal((await api.call('POST', '/api/users/u5/unsuspend', { ...M1, body: {} })).status, 200, 'u5 (ug_staff) reaches no sensitive door');
+  assert.equal((await api.call('POST', '/api/users/u1/unsuspend', { ...M1, body: {} })).status, 200);
+});
+
+test('deleting a future holiday that closes a sensitive door needs a second person; past or other-site holidays do not', async t => {
+  const api = await boot({
+    ADMIN_TOKEN: 'owner-token', RECONCILE_INTERVAL_MIN: '0', SECRETS_KEY,
+    OPERATORS: JSON.stringify([{ id: 'op_o2', name: 'Owner Two', role: 'r_owner', tokenSha256: sha256Hex('o2-token') }]),
+  });
+  t.after(api.close);
+  const O2 = { token: 'o2-token' };
+  // 9003 is reached by ug_staff on sch_office, which is closed on holidays.
+  assert.equal((await api.call('POST', '/api/doorGroups', { ...OWNER, body: { name: 'Pharmacy store', siteId: 'site_river', lockIds: [9003], sensitive: true } })).status, 200);
+  // 9002 is sensitive too, but only reached on sch_24, which ignores holidays: not re-opened.
+  assert.equal((await api.call('POST', '/api/doorGroups', { ...OWNER, body: { name: 'Server room', siteId: 'site_river', lockIds: [9002], sensitive: true } })).status, 200);
+  const next = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+  const add = async body => (await api.call('POST', '/api/holidays', { ...OWNER, body })).body.item;
+  const riverXmas = await add({ date: next, name: 'Site shutdown', siteId: 'site_river' });
+  const everywhere = await add({ date: next, name: 'Public holiday' });
+  const gymOnly = await add({ date: next, name: 'Gym refit', siteId: 'site_gym' });
+  const past = (await api.call('GET', '/api/holidays', OWNER)).body.holidays.find(h => h.date === '2026-08-23');
+  assert.ok(past, 'seeded past holiday');
+
+  // Adding a closure never waits; removing one that re-opens a sensitive door does.
+  const req = await api.call('DELETE', `/api/holidays/${riverXmas.id}`, OWNER);
+  assert.equal(req.status, 202, JSON.stringify(req.body));
+  assert.deepEqual(req.body.approval.locks, [9003]);
+  assert.match(req.body.approval.summary, /delete holiday .*re-opens/);
+  assert.ok((await api.call('GET', '/api/holidays', OWNER)).body.holidays.some(h => h.id === riverXmas.id), 'still there until approved');
+  assert.equal((await api.call('DELETE', `/api/holidays/${everywhere.id}`, OWNER)).status, 202, 'a site-less holiday applies everywhere');
+
+  assert.equal((await api.call('DELETE', `/api/holidays/${gymOnly.id}`, OWNER)).status, 200, 'the gym holiday closes no sensitive door');
+  assert.equal((await api.call('DELETE', `/api/holidays/${past.id}`, OWNER)).status, 200, 'a past holiday re-opens nothing');
+
+  const ok = await api.call('POST', `/api/approvals/${req.body.approval.id}/approve`, { ...O2, body: {} });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.ok(!(await api.call('GET', '/api/holidays', OWNER)).body.holidays.some(h => h.id === riverXmas.id));
 });

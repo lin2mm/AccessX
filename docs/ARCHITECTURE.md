@@ -189,9 +189,13 @@ of the head hash held by someone else.
   (creating one needs approval itself).
 - Requests that would grant new access to a sensitive lock return **202**
   with an approval record instead of running: passcodes, assignments, new
-  users in groups that reach it, directory-group mapping, unflagged door
-  groups containing it, and deleting a sensitive group. Removing access
-  never waits.
+  users in groups that reach it, **reinstating a suspended person** whose
+  groups reach it (otherwise "create suspended, then unsuspend" would skip
+  the new-user approval), directory-group mapping, unflagged door groups
+  containing it, deleting a sensitive group, and **deleting a future
+  holiday** that closes it (schedules with `denyOnHolidays`, same site or a
+  site-less holiday — the only way to widen a schedule, since schedules are
+  create/delete only). Removing access never waits.
 - `POST /api/approvals/:id/approve` — a different operator holding the
   original route's permission (and scope). The decision is taken inside
   `tenant.transact` (audit-head CAS): racing approvers → one wins. The
@@ -209,8 +213,10 @@ of the head hash held by someone else.
 - `reject` (with note), `cancel` (requester only), 72 h expiry
   (`approval.expire`). All steps are audit entries; the action's own entry
   carries `approval=<id> approvedBy=<op>`.
-- Not covered yet: unsuspending a person, and changes to schedules that widen
-  a sensitive assignment's hours.
+- Directory-driven changes are not gated one by one: a SCIM group reaches a
+  sensitive door only through a mapping that was itself approved, and SCIM
+  reactivation never clears a local suspension (`directoryStatus` and
+  `suspended` are separate).
 
 ## Time, SLAs and the RBAC gate
 

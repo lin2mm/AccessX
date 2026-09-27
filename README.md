@@ -175,7 +175,8 @@ Operators (people who administer the system) are separate from door users.
   check the trail offline, including a full rewrite of the chain. Retention
   (≥ 365 days) purges only below a delivered anchor, via a checkpoint.
 - **Four-eyes approvals** — mark a door group *sensitive* and every new way
-  into its doors (code, rule, group membership, directory mapping) waits for
+  into its doors (code, rule, group membership, reinstating a suspended
+  person, directory mapping, removing a holiday closure) waits for
   a second operator; approved requests are re-checked before they run. The
   approver never sees an approved passcode — only the requester can collect
   it, once.

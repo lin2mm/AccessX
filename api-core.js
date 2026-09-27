@@ -303,6 +303,12 @@ function createApi({
       if (!suspended && user.directoryStatus === 'inactive') {
         throw new HttpError(409, 'this person is deactivated in your directory; reactivate them there', { managedBy: 'directory' });
       }
+      if (!suspended && user.suspended) {
+        // Reinstating restores every door the person's groups reach. Without this,
+        // "create suspended, then unsuspend" would bypass the new-user approval.
+        const gate = await fourEyes(ctx, locksOfUserGroups(snap, user.groupIds || []), `reinstate suspended user ${userId} (groups ${(user.groupIds || []).join(',') || '-'})`);
+        if (gate) return gate;
+      }
       await ctx.t.unit().update('users', userId, { suspended }).audit(`users.${verb}`, userId, ctx.actor).commit();
       const reconcile = suspended ? await reconcileAfter(ctx, { userId }) : undefined;
       return { user: { ...user, suspended }, reconcile };
@@ -344,6 +350,23 @@ function createApi({
   const locksOfUserGroups = (snap, ugIds) => {
     const dgs = new Set(snap.assignments.filter(a => ugIds.includes(a.userGroupId)).map(a => a.doorGroupId));
     return snap.doorGroups.filter(g => dgs.has(g.id)).flatMap(g => g.lockIds || []);
+  };
+  /**
+   * Locks whose schedules would open on `holiday.date` once the holiday is
+   * gone: assignments with a denyOnHolidays schedule, restricted to the
+   * holiday's site (a holiday without a site applies everywhere). Past
+   * holidays re-open nothing. One day of slack covers every time zone.
+   */
+  const locksReopenedBy = (snap, holiday) => {
+    if (!holiday.date || holiday.date < new Date(Date.now() - 864e5).toISOString().slice(0, 10)) return [];
+    const closing = new Set(snap.schedules.filter(s => s.denyOnHolidays).map(s => s.id));
+    const dgIds = new Set(snap.assignments.filter(a => a.scheduleId && closing.has(a.scheduleId)).map(a => a.doorGroupId));
+    const locks = snap.doorGroups.filter(g => dgIds.has(g.id)).flatMap(g => g.lockIds || []).map(Number);
+    return [...new Set(locks)].filter(l => {
+      if (!holiday.siteId) return true;
+      const site = policy.siteForLock(snap, l);
+      return site && site.id === holiday.siteId;
+    });
   };
   const rowToApproval = r => {
     const payload = JSON.parse(r.payload);
@@ -538,6 +561,12 @@ function createApi({
       if (coll === 'doorGroups' && item.sensitive) {
         // Removing the protection itself needs a second person.
         const gate = await fourEyes(ctx, item.lockIds, `delete sensitive door group ${id}`);
+        if (gate) return gate;
+      }
+      if (coll === 'holidays') {
+        // A holiday closes doors on schedules with denyOnHolidays: deleting a
+        // future one widens those schedules' hours.
+        const gate = await fourEyes(ctx, locksReopenedBy(snap, item), `delete holiday ${item.date}${item.name ? ` "${item.name}"` : ''} (re-opens doors closed on that day)`);
         if (gate) return gate;
       }
       // Deleting the row IS the erasure: name/email exist nowhere else
