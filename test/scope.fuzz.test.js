@@ -25,11 +25,13 @@ const OWNER = 'owner-scope-secret';
 const A = 't_default';
 const SITE = 'site_gym';
 
-function materialize(pattern, { ids, locks }) {
+function materialize(pattern, { ids, locks, pairs = [] }) {
   let src = pattern.source.replace(/^\^/, '').replace(/\$$/, '').replace(/\\\//g, '/');
   const alt = src.match(/\(([a-z-]+(?:\|[a-z-]+)+)\)/);
-  if (alt) return alt[1].split('|').flatMap(word => materialize(new RegExp(`^${src.replace(alt[0], word)}$`), { ids, locks }));
+  if (alt) return alt[1].split('|').flatMap(word => materialize(new RegExp(`^${src.replace(alt[0], word)}$`), { ids, locks, pairs }));
   const variants = [];
+  // Two ids in one path (a review and one of its lines): real pairs as well as the same id twice.
+  if (src.split('([^/]+)').length === 3) for (const [a, b] of pairs) variants.push({ path: src.replace('([^/]+)', encodeURIComponent(a)).replace('([^/]+)', encodeURIComponent(b)), id: b });
   if (src.includes('([^/]+)')) for (const id of ids) variants.push({ path: src.split('([^/]+)').join(encodeURIComponent(id)), id });
   else if (src.includes('(\\d+)')) for (const l of locks) variants.push({ path: src.split('(\\d+)').join(String(l)), id: String(l) });
   else variants.push({ path: src, id: null });
@@ -59,6 +61,10 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
     const endLocal = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(Date.now() + 6 * 36e5)).replace(' ', 'T');
     const visit = (await call('POST', '/api/visits', { ...owner, body: { visitorName: 'Office Visitor', visitorEmail: 'v@guest.example', hostUserId: 'u1', lockIds: [9001], endLocal } })).body.visit;
     assert.ok(visit && visit.id);
+    // An open access review: its office lines and administrator lines are not the gym operator's to decide.
+    const rev = (await call('POST', '/api/access-reviews', { ...owner, body: { dueDays: 3 } })).body.review;
+    assert.ok(rev && rev.id, 'access review started');
+    const reviewItems = await store.sql.all('SELECT id, kind, site_id FROM access_review_items WHERE tenant_id = ? AND review_id = ?', [A, rev.id]);
     const role = (await call('POST', '/api/roles', { ...owner, body: { name: 'Everything, gym only', perms: Object.keys(rbac.PERMS) } })).body.item;
     assert.ok(role && role.id, 'custom role with every permission');
     const created = await call('POST', '/api/operators', { ...owner, body: { name: 'Gym superuser', role: role.id, siteIds: [SITE] } });
@@ -73,6 +79,9 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
     const allLocks = [...new Set([9001, 9002, 9003, 9004, 9101, ...snap0.doorGroups.flatMap(g => g.lockIds || [])].map(Number))];
     for (const l of allLocks) if (scope0.lock(l)) inScopeLocks.add(l);
     const foreignLocks = allLocks.filter(l => !inScopeLocks.has(l));
+    const foreignCreds = snap0.credentials.filter(c => !inScopeLocks.has(Number(c.lockId))).map(c => c.id);
+    const pairs = reviewItems.map(i => [rev.id, i.id]);
+    const reviewItems0 = JSON.stringify(await store.sql.all('SELECT * FROM access_review_items WHERE tenant_id = ? AND (kind = ? OR site_id != ?) ORDER BY id', [A, 'admin', SITE]));
     assert.ok(inScopeLocks.size >= 1 && foreignLocks.length >= 3, `gym doors ${[...inScopeLocks]}, others ${foreignLocks}`);
     const writable = (coll, item) => (coll === 'users' ? scope0.userManageable(item) : scope0.canWrite(coll, item));
     const COLLS = ['sites', 'doorGroups', 'userGroups', 'users', 'assignments', 'holidays', 'schedules', 'roles'];
@@ -99,7 +108,8 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
       { userId: fUsers[0], hostUserId: fUsers[0], lockId: foreignLocks[0], lockIds: foreignLocks.slice(0, 2), userGroupId: fUg[0], groupIds: fUg.slice(0, 2),
         doorGroupId: fDg[0], siteId: 'site_river', siteIds: ['*'], role: 'r_owner', perms: ['*'], name: 'scope-fuzz', reason: 'scope-fuzz', sensitive: false,
         date: '2026-12-25', acknowledgeScheduleGap: true, visitorName: 'Fuzz', visitorEmail: 'fuzz@guest.example', endLocal, userIds: fUsers.slice(0, 2),
-        scheduleId: snap0.schedules[0] && snap0.schedules[0].id, windows: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59' }], suspended: false, id },
+        scheduleId: snap0.schedules[0] && snap0.schedules[0].id, windows: [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59' }], suspended: false, id,
+        refs: ['scope-fuzz-ref'], credentialIds: foreignCreds.slice(0, 2), rows: [{ email: 'fuzz-bulk@guest.example' }], decision: 'remove', removeUndecided: true },
       // own containers, foreign contents
       { userId: oUsers[0] || fUsers[0], hostUserId: oUsers[0] || fUsers[0], lockId: foreignLocks[0], lockIds: [...inScopeLocks, ...foreignLocks.slice(0, 2)],
         userGroupId: oUg[0], groupIds: [oUg[0], fUg[0]].filter(Boolean), doorGroupId: oDg[0], siteId: SITE, siteIds: [SITE, 'site_river'], role: role.id,
@@ -109,6 +119,9 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
 
     const failures = [];
     let requests = 0;
+    // Lock operations leave no trace in the database unless audited: watch the (demo) vendor itself.
+    const { demoCalls } = require('../vendor-demo');
+    const callsBefore = demoCalls.length;
     // Collection writes allow-list their fields (anything else is a 400
     // before scope is even checked), so they get bodies cut to their schema.
     const fieldsFor = (method, path) => {
@@ -118,7 +131,7 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
     };
     const cut = (body, keys) => Object.fromEntries(Object.entries(body).filter(([k]) => keys.includes(k)));
     for (const r of ctx.server.api.routes) {
-      for (const v of materialize(r.pattern, { ids, locks: allLocks })) {
+      for (const v of materialize(r.pattern, { ids: [...ids, rev.id], locks: allLocks, pairs })) {
         // Platform routes answer 401 to tenant tokens, and 401s trip the
         // failed-login brake, which would hide every route after them.
         if (/^\/api\/(tenants|platform)(\/|$)/.test(v.path)) continue;
@@ -136,15 +149,21 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
 
     // ---- nothing outside the site changed
     const snap1 = await store.tenant(A).snapshot();
+    // The one change allowed to a person outside the operator's full scope: leaving
+    // this site's groups (an access review "remove"); nothing else about them changes.
+    const leftOwnGroupsOnly = (coll, was, x) => coll === 'users' && was && x
+      && JSON.stringify({ ...was, groupIds: null }) === JSON.stringify({ ...x, groupIds: null })
+      && x.groupIds.every(g => was.groupIds.includes(g)) && was.groupIds.filter(g => !x.groupIds.includes(g)).every(g => scope0.group(g));
     for (const coll of COLLS) {
       const after = new Map(snap1[coll].map(x => [x.id, x]));
       const before = new Map(snap0[coll].map(x => [x.id, x]));
       for (const id of foreign(coll)) {
+        if (leftOwnGroupsOnly(coll, before.get(id), after.get(id))) continue;
         try { assert.deepEqual(after.get(id), before.get(id)); } catch { failures.push(`${coll} ${id} (outside the site) changed: ${JSON.stringify(after.get(id) || 'deleted').slice(0, 160)}`); }
       }
       for (const [id, x] of after) {
         const changed = !before.has(id) || JSON.stringify(before.get(id)) !== JSON.stringify(x);
-        if (!changed) continue;
+        if (!changed || leftOwnGroupsOnly(coll, before.get(id), x)) continue;
         if (!writable(coll, x)) failures.push(`${coll} ${id} was written but reaches outside the site: ${JSON.stringify(x).slice(0, 160)}`);
         if (coll === 'doorGroups' && (x.lockIds || []).some(l => !inScopeLocks.has(Number(l)))) failures.push(`door group ${id} now holds other sites' doors: ${x.lockIds}`);
       }
@@ -167,11 +186,17 @@ test('site-scope gate: an all-permission operator scoped to one site cannot chan
       if (o.role === 'r_owner') failures.push(`new operator ${o.id} is an owner`);
     }
     try { assert.deepEqual(await store.tenantSettings(A), settings0); } catch { failures.push('tenant settings changed'); }
+    if (JSON.stringify(await store.sql.all('SELECT * FROM access_review_items WHERE tenant_id = ? AND (kind = ? OR site_id != ?) ORDER BY id', [A, 'admin', SITE])) !== reviewItems0) failures.push('another site\'s (or an administrator) access review line was decided');
+    if ((await store.sql.first('SELECT status FROM access_reviews WHERE tenant_id = ? AND id = ?', [A, rev.id])).status !== 'open') failures.push('the access review was closed');
     const ap1 = await approvals();
     for (const a of approvals0) if (JSON.stringify(ap1.find(x => x.id === a.id)) !== JSON.stringify(a)) failures.push(`approval ${a.id} (other site) was decided: ${JSON.stringify(ap1.find(x => x.id === a.id))}`);
+    for (const c of demoCalls.slice(callsBefore)) if (!inScopeLocks.has(c.lockId)) failures.push(`vendor ${c.op} on door ${c.lockId} (other site)`);
     const log = (await call('GET', '/api/audit?limit=5000', owner)).body.log;
-    for (const e of log.filter(x => x.actor === gymOp.id && /^unlock\.granted/.test(x.action))) {
-      if (foreignLocks.some(l => new RegExp(`\\b${l}\\b`).test(e.detail))) failures.push(`remote unlock of another site's door: ${e.detail}`);
+    for (const e of log.filter(x => x.actor === gymOp.id)) {
+      if (/^unlock\.granted/.test(e.action) && foreignLocks.some(l => new RegExp(`\\b${l}\\b`).test(e.detail))) failures.push(`remote unlock of another site's door: ${e.detail}`);
+      // Any action this operator took that names another site's door ("lock 9003 …").
+      const named = [...String(e.detail).matchAll(/\block (\d+)/g)].map(m => Number(m[1])).filter(l => !inScopeLocks.has(l));
+      if (named.length) failures.push(`${e.action} names another site's door ${named.join(',')}: ${e.detail.slice(0, 120)}`);
     }
 
     assert.deepEqual(failures, [], `${failures.length} scope failures:\n${failures.slice(0, 25).join('\n')}`);

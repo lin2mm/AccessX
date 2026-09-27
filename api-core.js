@@ -22,11 +22,12 @@ const doctorCore = require('./doctor-core');
 const signupCore = require('./signup-core');
 const kioskCore = require('./kiosk-core');
 const calendarCore = require('./calendar-core');
+const reviewCore = require('./review-core');
 const { ipKey } = require('./rate-limit-core');
 // The newest migration this code needs. GET /api/healthz answers 503 until the
 // database has it ("always migrate before deploying"). A test keeps it equal
 // to the last file in migrations/.
-const SCHEMA_VERSION = '0024_calendar';
+const SCHEMA_VERSION = '0025_access_review';
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -1074,6 +1075,39 @@ function createApi({
   });
 
   route('POST', /^\/api\/visit-invites$/, ctx => issueInvite(ctx, ctx.body || {}));
+  /**
+   * Many invitations with the same doors and times (an event, a training day).
+   * The first row is sent on its own: if the shared settings are wrong, the
+   * request fails and nobody is invited. Links are not returned (they were emailed).
+   */
+  const BULK_INVITES = 100;
+  route('POST', /^\/api\/visit-invites\/bulk$/, async ctx => {
+    const b = ctx.body || {};
+    const rows = Array.isArray(b.rows) ? b.rows : [];
+    if (!rows.length) throw new HttpError(400, 'rows: [{ email }] (one per visitor)');
+    if (rows.length > BULK_INVITES) throw new HttpError(400, `at most ${BULK_INVITES} visitors at a time`);
+    const { rows: _rows, visitorEmail: _e, visitorPhone: _p, ...common } = b;
+    const results = [];
+    const seen = new Set();
+    let stopped = null;
+    for (const r of rows) {
+      const email = String((r && (r.email || r.visitorEmail)) || '').trim().toLowerCase();
+      if (stopped) { results.push({ email, ok: false, error: stopped }); continue; }
+      const c = visitors.inviteContact({ visitorEmail: email });
+      if (!c.ok) { results.push({ email, ok: false, error: c.error }); continue; }
+      if (seen.has(email)) { results.push({ email, ok: false, error: 'twice in the list' }); continue; }
+      seen.add(email);
+      try {
+        const out = await issueInvite(ctx, { ...common, visitorEmail: email });
+        results.push({ email, ok: true, id: out.invite.id, delivery: out.delivery });
+      } catch (error) {
+        if (!results.some(x => x.ok)) throw error; // shared settings are wrong: nothing was sent
+        if (error.status === 429) stopped = error.message;
+        results.push({ email, ok: false, error: String(error.message || error).slice(0, 200) });
+      }
+    }
+    return { sent: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results };
+  });
   /** An invitation, as an operator (or the calendar, on its configuring operator's standing approval). */
   async function issueInvite(ctx, body, { createdBy = ctx.actor, auditActor = ctx.actor } = {}) {
     if (!publicUrl) throw new HttpError(400, 'invitations need PUBLIC_URL (the link the visitor opens)');
@@ -2008,27 +2042,37 @@ function createApi({
     return { credentials: visible, review: creds.reviewCredentials(snap).filter(f => ids.has(f.id)) };
   });
 
+  /**
+   * Revoke one code into `uow` (committed by the caller). With a gateway the
+   * code is deleted on the lock first; without one it waits for on-site removal.
+   */
+  async function revokeCredential(vendor, uow, cred, fleet, { actor, reason }) {
+    const lock = fleet.find(l => Number(l.lockId) === Number(cred.lockId));
+    const at = new Date().toISOString();
+    let status;
+    if (lock && lock.hasGateway) {
+      if (cred.type === 'passcode' && cred.vendorRef) await vendor.deletePasscode(cred.lockId, cred.vendorRef);
+      status = 'revoked';
+      uow.audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId}`, actor);
+    } else {
+      // No gateway: the code stays on the lock until someone removes it there.
+      status = 'pending_removal';
+      uow.audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId}: no gateway, on-site removal required`, actor);
+    }
+    uow.update('credentials', cred.id, { status, revokedAt: at, revokedBy: actor, revokeReason: reason });
+    return { status, at };
+  }
+
   route('DELETE', /^\/api\/credentials\/([^/]+)$/, async (ctx, [id]) => {
     const snap = await ctx.snap();
     const cred = snap.credentials.find(c => c.id === id);
     if (!cred) throw new HttpError(404, 'not found');
     if (!ctx.scope.lock(cred.lockId)) throw forbiddenSite(cred.lockId);
     if (!['active', 'pending_removal'].includes(cred.status)) throw new HttpError(409, `credential is already ${cred.status}`);
-    const lock = (await ctx.vendor.listLocks()).find(l => Number(l.lockId) === Number(cred.lockId));
     const reason = String((ctx.body && ctx.body.reason) || 'manual').slice(0, 200);
-    const at = new Date().toISOString();
     const uow = ctx.t.unit();
-    let status;
-    if (lock && lock.hasGateway) {
-      if (cred.type === 'passcode' && cred.vendorRef) await ctx.vendor.deletePasscode(cred.lockId, cred.vendorRef);
-      status = 'revoked';
-      uow.audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId}`, ctx.actor);
-    } else {
-      // No gateway: the code stays on the lock until someone removes it there.
-      status = 'pending_removal';
-      uow.audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId}: no gateway, on-site removal required`, ctx.actor);
-    }
-    await uow.update('credentials', cred.id, { status, revokedAt: at, revokedBy: ctx.actor, revokeReason: reason }).commit();
+    const { status, at } = await revokeCredential(ctx.vendor, uow, cred, await ctx.vendor.listLocks(), { actor: ctx.actor, reason });
+    await uow.commit();
     return {
       credential: { ...cred, status, revokedAt: at, revokedBy: ctx.actor, revokeReason: reason },
       next: status === 'pending_removal' ? 'Remove the code at the lock, then POST /api/credentials/:id/confirm-removed' : undefined,
@@ -2052,6 +2096,367 @@ function createApi({
     });
     return out;
   });
+
+  // --- passcode sweep (R18): the codes on each lock vs the registry ----------------
+  // Finds codes someone set outside AccessX (the TTLock app, an installer, an old
+  // system), codes AccessX revoked that are still on a lock, and — after restoring
+  // a backup — the difference between the restored registry and the locks.
+  // Compares with the vendor's CLOUD list: a code typed into the keypad as admin,
+  // or one deleted over Bluetooth only, is not visible here (docs/24-ACCESS-REVIEW.md).
+  const SWEEP = { maxLocks: 50, maxRefs: 50 };
+  async function sweepLock(vendor, snap, lock, now = Date.now()) {
+    const creds = snap.credentials.filter(c => Number(c.lockId) === Number(lock.lockId) && c.vendorRef);
+    const byRef = new Map(creds.map(c => [String(c.vendorRef), c]));
+    const expected = creds.filter(c => c.status === 'active').map(c => ({ ref: c.vendorRef, startAt: c.startAt, endAt: c.endAt, issuedAt: c.issuedAt }));
+    const onLock = await vendor.listPasscodes(lock.lockId, { expected });
+    const seen = new Set();
+    const userName = id => ((snap.users.find(u => u.id === id) || {}).name) || id;
+    const codes = onLock.map(code => {
+      seen.add(code.ref);
+      const cred = byRef.get(code.ref);
+      const ended = code.type !== 'permanent' && code.endAt && Date.parse(code.endAt) <= now;
+      const cls = cred && cred.status === 'active' ? 'registered' : cred ? 'should_be_gone' : ended ? 'expired_unknown' : 'unknown';
+      return { ...code, class: cls, credentialId: cred ? cred.id : null, credentialStatus: cred ? cred.status : null,
+        holder: cred ? (cred.visitId ? `visitor of ${userName(cred.userId)}` : userName(cred.userId)) : null };
+    });
+    const missing = creds.filter(c => c.status === 'active' && !seen.has(String(c.vendorRef)) && Date.parse(c.endAt) > now)
+      .map(c => ({ credentialId: c.id, holder: c.visitId ? `visitor of ${userName(c.userId)}` : userName(c.userId), startAt: c.startAt, endAt: c.endAt }));
+    return { codes, missing };
+  }
+  const SWEEP_CLASSES = ['registered', 'should_be_gone', 'unknown', 'expired_unknown'];
+
+  route('POST', /^\/api\/passcode-sweep$/, async ctx => {
+    const snap = await ctx.snap();
+    if (typeof ctx.vendor.listPasscodes !== 'function') throw new HttpError(501, 'this lock vendor cannot list the codes on a lock');
+    const siteId = ctx.body.siteId ? String(ctx.body.siteId) : null;
+    if (siteId && !snap.sites.some(x => x.id === siteId)) throw new HttpError(404, 'unknown site');
+    if (siteId && !ctx.scope.site(siteId)) throw outOfScope('site is outside your scope');
+    const inSite = siteId ? reviewCore.siteLocks(snap, siteId) : null;
+    const fleet = (await ctx.visibleLocks()).filter(l => !inSite || inSite.has(Number(l.lockId)));
+    const locks = fleet.slice(0, SWEEP.maxLocks);
+    const out = [];
+    const summary = { registered: 0, should_be_gone: 0, unknown: 0, expired_unknown: 0, missing: 0, unreadable: 0 };
+    for (const lock of locks) {
+      const row = { lockId: lock.lockId, name: lock.lockAlias || String(lock.lockId), hasGateway: Boolean(lock.hasGateway) };
+      try {
+        Object.assign(row, await sweepLock(ctx.vendor, snap, lock));
+        for (const c of row.codes) summary[c.class] += 1;
+        summary.missing += row.missing.length;
+      } catch (error) {
+        row.error = String(error.message || error).slice(0, 200);
+        summary.unreadable += 1;
+      }
+      out.push(row);
+    }
+    const id = policy.uid('swp');
+    await ctx.t.unit().raw('INSERT INTO passcode_sweeps (tenant_id, id, created_at, created_by, lock_count, summary) VALUES (?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, new Date().toISOString(), ctx.actor, locks.length, JSON.stringify({ ...summary, siteId })])
+      .audit('passcodes.sweep', `${id} locks ${locks.length}${siteId ? ` site ${siteId}` : ''}: ${Object.entries(summary).map(([k, v]) => `${k}=${v}`).join(' ')}`, ctx.actor).commit();
+    return { sweepId: id, locks: out, summary, truncated: fleet.length > locks.length ? `${fleet.length - locks.length} more door(s): sweep one site at a time` : null };
+  });
+
+  /** Delete codes that are on a lock but not live in AccessX. Never a live registered code. */
+  route('POST', /^\/api\/passcode-sweep\/remove$/, async ctx => {
+    const snap = await ctx.snap();
+    const lockId = Number(ctx.body.lockId);
+    await ctx.requireLock(lockId); // this tenant's fleet: another tenant's lock is unknown (404)…
+    if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId); // …and another site's lock is forbidden
+    const refs = Array.isArray(ctx.body.refs) ? [...new Set(ctx.body.refs.map(String))].slice(0, SWEEP.maxRefs) : [];
+    if (!refs.length) throw new HttpError(400, 'refs: the codes to remove (from the sweep)');
+    const lock = (await ctx.vendor.listLocks()).find(l => Number(l.lockId) === lockId);
+    if (!lock || !lock.hasGateway) throw new HttpError(409, 'this door has no gateway: remove the codes at the lock (TTLock app over Bluetooth)');
+    const results = [];
+    const uow = ctx.t.unit();
+    const counts = { unknown: 0, should_be_gone: 0 };
+    for (const ref of refs) {
+      const cred = snap.credentials.find(c => Number(c.lockId) === lockId && String(c.vendorRef) === ref);
+      if (cred && cred.status === 'active') { results.push({ ref, ok: false, error: 'a live AccessX code: revoke it under Codes instead' }); continue; }
+      try {
+        await ctx.vendor.deletePasscode(lockId, ref);
+        if (cred && cred.status === 'pending_removal') {
+          uow.update('credentials', cred.id, { status: 'revoked' }).audit('credential.removed_on_site', `${cred.id} lock ${lockId} user ${cred.userId} (removed by the passcode sweep)`, ctx.actor);
+        }
+        counts[cred ? 'should_be_gone' : 'unknown'] += 1;
+        results.push({ ref, ok: true });
+      } catch (error) {
+        results.push({ ref, ok: false, error: String(error.message || error).slice(0, 200) });
+      }
+    }
+    const done = results.filter(r => r.ok).map(r => r.ref);
+    // Refs only: code names may hold people's names and stay out of the audit chain.
+    if (done.length) await uow.audit('passcodes.sweep_remove', `lock ${lockId} refs ${done.join(',')} (not in AccessX ${counts.unknown}, revoked in AccessX ${counts.should_be_gone})`, ctx.actor).commit();
+    return { lockId, results };
+  });
+
+  /** A live registered code the lock no longer has: record it as gone (after re-checking the lock). */
+  route('POST', /^\/api\/passcode-sweep\/forget$/, async ctx => {
+    const ids = Array.isArray(ctx.body.credentialIds) ? [...new Set(ctx.body.credentialIds.map(String))].slice(0, SWEEP.maxRefs) : [];
+    if (!ids.length) throw new HttpError(400, 'credentialIds: the codes the sweep reported missing');
+    const snap = await ctx.snap();
+    const creds = ids.map(id => snap.credentials.find(c => c.id === id));
+    for (const [i, c] of creds.entries()) {
+      if (!c) throw new HttpError(404, `${ids[i]}: not found`);
+      if (!ctx.scope.lock(c.lockId)) throw forbiddenSite(c.lockId);
+      if (c.status !== 'active') throw new HttpError(409, `${c.id} is already ${c.status}`);
+    }
+    const uow = ctx.t.unit();
+    const results = [];
+    for (const lockId of [...new Set(creds.map(c => Number(c.lockId)))]) {
+      const onLock = new Set((await ctx.vendor.listPasscodes(lockId, { expected: [] })).map(p => p.ref));
+      for (const c of creds.filter(x => Number(x.lockId) === lockId)) {
+        if (onLock.has(String(c.vendorRef))) { results.push({ credentialId: c.id, ok: false, error: 'the code is on the lock after all: nothing changed' }); continue; }
+        uow.update('credentials', c.id, { status: 'revoked', revokedAt: new Date().toISOString(), revokedBy: ctx.actor, revokeReason: 'not on the lock (passcode sweep)' })
+          .audit('credential.not_on_lock', `${c.id} lock ${lockId} user ${c.userId}`, ctx.actor);
+        results.push({ credentialId: c.id, ok: true });
+      }
+    }
+    if (results.some(r => r.ok)) await uow.commit();
+    return { results };
+  });
+
+  route('GET', /^\/api\/passcode-sweep$/, async ctx => {
+    const rows = await store.sql.all('SELECT id, created_at, created_by, lock_count, summary FROM passcode_sweeps WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 10', [ctx.tenantId]);
+    const sweeps = rows.map(r => ({ id: r.id, createdAt: r.created_at, createdBy: r.created_by, locks: Number(r.lock_count), summary: parseJson(r.summary, {}) }))
+      .filter(x => ctx.scope.all || (x.summary.siteId && ctx.scope.site(x.summary.siteId)));
+    return { sweeps };
+  });
+
+  // --- access review (R18) ------------------------------------------------------
+  const reviewSettings = async tenantId => reviewCore.settingsOf((await store.tenantSettings(tenantId)) || {});
+  const itemRow = r => ({ id: r.id, reviewId: r.review_id, kind: r.kind, siteId: r.site_id, subjectId: r.subject_id, detail: parseJson(r.detail, {}),
+    decision: r.decision || null, decidedBy: r.decided_by || null, decidedAt: r.decided_at || null, note: r.note || null, outcome: r.outcome || null });
+  const reviewRow = r => r && ({ id: r.id, status: r.status, startedAt: r.started_at, startedBy: r.started_by, dueAt: r.due_at, closedAt: r.closed_at || null, closedBy: r.closed_by || null, closeNote: r.close_note || null });
+  const reviewItems = async (tenantId, reviewId) => (await store.sql.all('SELECT * FROM access_review_items WHERE tenant_id = ? AND review_id = ? ORDER BY kind DESC, site_id, subject_id', [tenantId, reviewId])).map(itemRow);
+
+  async function startReview(tenantId, { actor, dueDays }) {
+    const t = store.tenant(tenantId);
+    if (await store.sql.first("SELECT id FROM access_reviews WHERE tenant_id = ? AND status = 'open'", [tenantId])) throw new HttpError(409, 'a review is already open: finish or close it first');
+    const [snap, operators] = await Promise.all([t.snapshot(), t.operators()]);
+    const items = reviewCore.buildItems(snap, operators);
+    if (items.length > reviewCore.LIMITS.maxItems) throw new HttpError(400, `${items.length} lines is more than ${reviewCore.LIMITS.maxItems} in one review`);
+    const id = policy.uid('rev');
+    const now = new Date();
+    const dueAt = new Date(now.getTime() + dueDays * 864e5).toISOString();
+    const unit = t.unit().raw('INSERT INTO access_reviews (tenant_id, id, status, started_at, started_by, due_at) VALUES (?, ?, ?, ?, ?, ?)', [tenantId, id, 'open', now.toISOString(), actor, dueAt]);
+    for (const it of items) {
+      unit.raw('INSERT INTO access_review_items (tenant_id, review_id, id, kind, site_id, subject_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [tenantId, id, policy.uid('ri'), it.kind, it.siteId, it.subjectId, JSON.stringify(it.detail)]);
+    }
+    const s = reviewCore.summarise(items);
+    await unit.audit('review.start', `${id} lines ${s.total} (door ${s.door}, admin ${s.admin}) due ${dueAt.slice(0, 10)}`, actor).commit();
+    return { id, dueAt, summary: s };
+  }
+
+  /** Who may decide a line: door lines by user managers of that site, admin lines by all-site owners; never your own. */
+  function canDecide(snap, operator, item) {
+    if (!operator || operator.anonymous) return false;
+    if (item.kind === 'admin') return rbac.allSites(operator) && rbac.hasPermission(snap, operator, 'role.manage') && item.subjectId !== operator.id;
+    if (!rbac.hasPermission(snap, operator, 'user.manage') || !rbac.canAccessSite(operator, item.siteId)) return false;
+    const user = snap.users.find(u => u.id === item.subjectId);
+    return !(user && user.email && operator.email && user.email.toLowerCase() === String(operator.email).toLowerCase());
+  }
+
+  /** Remove a person's doors at one site now: leave the site's user groups, revoke their codes there. */
+  async function removeSiteAccess({ t, vendor }, item, actor, reason) {
+    const snap = await t.snapshot();
+    const plan = reviewCore.planRemoval(snap, item.subjectId, item.siteId);
+    if (!plan.ok) return plan.outcome;
+    const fleet = await vendor.listLocks().catch(() => []);
+    const uow = t.unit();
+    if (plan.leave.length) uow.update('users', item.subjectId, { groupIds: plan.keepGroups });
+    let revoked = 0; let onSite = 0; const failed = [];
+    for (const c of plan.codes) {
+      try {
+        const r = await revokeCredential(vendor, uow, c, fleet, { actor, reason });
+        if (r.status === 'revoked') revoked += 1; else onSite += 1;
+      } catch (error) {
+        failed.push(c.id); // stays active: leaving the groups flags it, and the next reconcile removes it
+        log(`review removal: code ${c.id} not removed now`, error && error.message);
+      }
+    }
+    uow.audit('review.remove', `${item.id} user ${item.subjectId} site ${item.siteId}: left groups ${plan.leave.join(',') || 'none'}, codes revoked ${revoked}, on-site ${onSite}, retry ${failed.length}`, actor);
+    await uow.commit();
+    const groupName = id => ((snap.userGroups.find(g => g.id === id)) || {}).name || id;
+    const parts = [plan.leave.length ? `left ${plan.leave.map(groupName).join(', ')}` : 'was in no group of this site'];
+    if (revoked) parts.push(`${revoked} code(s) deleted from the locks`);
+    if (onSite) parts.push(`${onSite} code(s) must be removed at the lock (no gateway)`);
+    if (failed.length) parts.push(`${failed.length} code(s) could not be deleted now: the next reconcile removes them`);
+    if (plan.stillLockIds.length) parts.push(`STILL opens ${plan.stillLockIds.length} door(s) here through ${plan.stillGroups.join(', ')} (not a group of this site): change it under People`);
+    if (plan.directory.length) parts.push(`membership came from directory group ${plan.directory.map(n => `"${n}"`).join(', ')}: remove them there too, or the next sync adds them back`);
+    return parts.join('; ');
+  }
+
+  route('GET', /^\/api\/access-reviews$/, async ctx => {
+    const snap = await ctx.snap();
+    const [settings, current, history, locks, operators] = await Promise.all([
+      reviewSettings(ctx.tenantId),
+      store.sql.first("SELECT * FROM access_reviews WHERE tenant_id = ? AND status = 'open'", [ctx.tenantId]),
+      store.sql.all("SELECT * FROM access_reviews WHERE tenant_id = ? AND status = 'closed' ORDER BY started_at DESC LIMIT 8", [ctx.tenantId]),
+      ctx.vendor.listLocks().catch(() => []), ctx.t.operators(),
+    ]);
+    const visible = i => (i.kind === 'admin' ? ctx.scope.all : ctx.scope.site(i.siteId));
+    const siteName = id => ((snap.sites.find(x => x.id === id)) || {}).name || id;
+    const groupName = id => ((snap.userGroups.find(g => g.id === id)) || {}).name || id;
+    const roleName = id => (rbac.roleFor(snap, id) || {}).name || id;
+    const show = i => {
+      const base = { ...i, siteName: i.siteId ? siteName(i.siteId) : null, canDecide: !i.decision || i.decision === 'keep' ? canDecide(snap, ctx.operator, i) : false };
+      if (i.kind === 'door') {
+        const u = snap.users.find(x => x.id === i.subjectId);
+        return { ...base, name: u ? u.name : `(deleted) ${i.subjectId}`, email: u ? u.email || null : null,
+          doors: (i.detail.lockIds || []).map(id => doorName(locks, id)), groups: (i.detail.groupIds || []).map(groupName), codes: i.detail.codes || 0, directory: i.detail.source === 'scim' };
+      }
+      const o = operators.find(x => x.id === i.subjectId);
+      return { ...base, name: o ? o.name : `(deleted) ${i.subjectId}`, email: o ? o.email || null : null, role: roleName(i.detail.role),
+        sites: (i.detail.siteIds || []).length ? i.detail.siteIds.map(siteName) : ['all'], lastLoginAt: i.detail.lastLoginAt, breakGlass: i.detail.breakGlass, revoked: Boolean(o && o.revokedAt) };
+    };
+    let open = null;
+    if (current) {
+      const all = await reviewItems(ctx.tenantId, current.id);
+      const mine = all.filter(visible);
+      open = { ...reviewRow(current), overdue: Date.parse(current.due_at) < Date.now(), summary: reviewCore.summarise(mine), items: mine.map(show) };
+    }
+    const past = [];
+    for (const r of history) past.push({ ...reviewRow(r), summary: reviewCore.summarise((await reviewItems(ctx.tenantId, r.id)).filter(visible)) });
+    return { settings, open, history: past, canManage: rbac.hasPermission(snap, ctx.operator, 'role.manage') && ctx.scope.all };
+  });
+
+  route('POST', /^\/api\/access-reviews$/, async ctx => {
+    await ctx.snap();
+    if (!ctx.scope.all) throw outOfScope('starting a review needs all-site scope');
+    const settings = await reviewSettings(ctx.tenantId);
+    const dueDays = ctx.body.dueDays === undefined ? settings.dueDays : Number(ctx.body.dueDays);
+    if (!Number.isInteger(dueDays) || dueDays < reviewCore.LIMITS.dueDays[0] || dueDays > reviewCore.LIMITS.dueDays[1]) throw new HttpError(400, `dueDays must be ${reviewCore.LIMITS.dueDays.join('–')}`);
+    const out = await startReview(ctx.tenantId, { actor: ctx.actor, dueDays });
+    const notified = await notifyReview(ctx.tenantId, out.id, 'start').catch(error => { log('review notice failed', error); return 0; });
+    return { review: out, notified };
+  });
+
+  route('PUT', /^\/api\/access-reviews\/settings$/, async ctx => {
+    await ctx.snap();
+    if (!ctx.scope.all) throw outOfScope('review settings need all-site scope');
+    const v = reviewCore.validateSettings(ctx.body || {});
+    if (!v.ok) throw new HttpError(400, v.error);
+    const next = { ...(await reviewSettings(ctx.tenantId)), ...v.value };
+    await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.accessReview', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
+      .audit('review.settings', `everyDays=${next.everyDays} dueDays=${next.dueDays}`, ctx.actor).commit();
+    return { settings: next };
+  });
+
+  route('POST', /^\/api\/access-reviews\/([^/]+)\/items\/([^/]+)$/, async (ctx, [reviewId, itemId]) => {
+    const snap = await ctx.snap();
+    const review = await store.sql.first("SELECT * FROM access_reviews WHERE tenant_id = ? AND id = ? AND status = 'open'", [ctx.tenantId, reviewId]);
+    const row = review && await store.sql.first('SELECT * FROM access_review_items WHERE tenant_id = ? AND review_id = ? AND id = ?', [ctx.tenantId, reviewId, itemId]);
+    if (!row) throw new HttpError(404, 'not found (or the review is closed)');
+    const item = itemRow(row);
+    if (item.kind === 'admin' ? !ctx.scope.all : !ctx.scope.site(item.siteId)) throw new HttpError(404, 'not found (or the review is closed)');
+    const decision = String(ctx.body.decision || '');
+    if (!['keep', 'remove'].includes(decision)) throw new HttpError(400, 'decision must be keep or remove');
+    if (!canDecide(snap, ctx.operator, item)) throw new HttpError(403, item.kind === 'admin' ? 'administrator lines are decided by an all-site owner, and never by the person themselves' : 'you cannot decide this line (your own access, or a site outside your scope)');
+    if (item.decision === 'remove') throw new HttpError(409, 'already removed');
+    const note = ctx.body.note ? String(ctx.body.note).slice(0, 300) : null;
+    const claim = `${new Date().toISOString()}#${randomB64url(6)}`;
+    await store.sql.batch([{ sql: "UPDATE access_review_items SET decision = ?, decided_by = ?, decided_at = ?, note = ? WHERE tenant_id = ? AND id = ? AND (decision IS NULL OR decision = 'keep')",
+      params: [decision, ctx.actor, claim, note, ctx.tenantId, itemId] }]);
+    const mine = await store.sql.first('SELECT decided_at FROM access_review_items WHERE tenant_id = ? AND id = ?', [ctx.tenantId, itemId]);
+    if (!mine || mine.decided_at !== claim) throw new HttpError(409, 'someone else decided this line just now: reload');
+    const at = claim.split('#')[0];
+    let outcome = null;
+    try {
+      if (decision === 'keep') {
+        await ctx.t.unit().raw('UPDATE access_review_items SET decided_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, itemId])
+          .audit('review.keep', `${itemId} ${item.kind} ${item.subjectId}${item.siteId ? ` site ${item.siteId}` : ''}`, ctx.actor).commit();
+      } else if (item.kind === 'door') {
+        outcome = await removeSiteAccess({ t: ctx.t, vendor: ctx.vendor }, item, ctx.actor, `access review ${reviewId}`);
+      } else {
+        const op = (await ctx.t.operators()).find(o => o.id === item.subjectId);
+        if (!op || op.revokedAt) outcome = 'already revoked';
+        else { await revokeOperator(ctx, item.subjectId, ctx.t.unit().audit('review.remove', `${itemId} operator ${item.subjectId}`, ctx.actor)); outcome = 'administrator access revoked, sessions ended'; }
+      }
+    } catch (error) {
+      // Nothing was removed: give the line back so it can be decided again.
+      await store.sql.batch([{ sql: 'UPDATE access_review_items SET decision = ?, decided_by = ?, decided_at = ?, note = ? WHERE tenant_id = ? AND id = ?',
+        params: [item.decision, item.decidedBy, item.decidedAt, item.note, ctx.tenantId, itemId] }]);
+      throw error;
+    }
+    if (decision === 'remove') await store.sql.batch([{ sql: 'UPDATE access_review_items SET decided_at = ?, outcome = ? WHERE tenant_id = ? AND id = ?', params: [at, String(outcome || '').slice(0, 600), ctx.tenantId, itemId] }]);
+    return { item: { ...item, decision, decidedBy: ctx.actor, decidedAt: at, note, outcome } };
+  });
+
+  route('POST', /^\/api\/access-reviews\/([^/]+)\/close$/, async (ctx, [reviewId]) => {
+    await ctx.snap();
+    if (!ctx.scope.all) throw outOfScope('closing a review needs all-site scope');
+    const review = await store.sql.first("SELECT * FROM access_reviews WHERE tenant_id = ? AND id = ? AND status = 'open'", [ctx.tenantId, reviewId]);
+    if (!review) throw new HttpError(404, 'not found (or already closed)');
+    const removeUndecided = ctx.body.removeUndecided === true;
+    let removed = 0;
+    if (removeUndecided) {
+      if (Date.parse(review.due_at) > Date.now()) throw new HttpError(409, `lines can be removed in one go only after the due date (${review.due_at.slice(0, 10)}): until then, decide each line`);
+      const todo = (await reviewItems(ctx.tenantId, reviewId)).filter(i => i.kind === 'door' && !i.decision);
+      for (const item of todo.slice(0, reviewCore.LIMITS.removePerRequest)) {
+        const at = new Date().toISOString();
+        await store.sql.batch([{ sql: "UPDATE access_review_items SET decision = 'remove', decided_by = ?, decided_at = ?, note = ? WHERE tenant_id = ? AND id = ? AND decision IS NULL",
+          params: [ctx.actor, at, 'not confirmed by the due date', ctx.tenantId, item.id] }]);
+        const outcome = await removeSiteAccess({ t: ctx.t, vendor: ctx.vendor }, item, ctx.actor, `access review ${reviewId}: not confirmed`);
+        await store.sql.batch([{ sql: 'UPDATE access_review_items SET outcome = ? WHERE tenant_id = ? AND id = ?', params: [String(outcome).slice(0, 600), ctx.tenantId, item.id] }]);
+        removed += 1;
+      }
+      if (todo.length > removed) return { closed: false, removed, remaining: todo.length - removed, next: 'call again to continue' };
+    }
+    const items = await reviewItems(ctx.tenantId, reviewId);
+    const s = reviewCore.summarise(items);
+    const note = ctx.body.note ? String(ctx.body.note).slice(0, 300) : null;
+    await ctx.t.unit().raw("UPDATE access_reviews SET status = 'closed', closed_at = ?, closed_by = ?, close_note = ? WHERE tenant_id = ? AND id = ? AND status = 'open'", [new Date().toISOString(), ctx.actor, note, ctx.tenantId, reviewId])
+      .audit('review.close', `${reviewId} kept ${s.kept} removed ${s.removed} undecided ${s.undecided}${removeUndecided ? ` (removed ${removed} not confirmed)` : ''}`, ctx.actor).commit();
+    return { closed: true, removed, summary: s };
+  });
+
+  /** Email the people who have lines to decide (start, reminder) or the owners (overdue). Returns how many were emailed. */
+  async function notifyReview(tenantId, reviewId, kind) {
+    if (!alerts || !alerts.emailAvailable) return 0;
+    const t = store.tenant(tenantId);
+    const review = await store.sql.first('SELECT * FROM access_reviews WHERE tenant_id = ? AND id = ?', [tenantId, reviewId]);
+    if (!review || review.status !== 'open') return 0;
+    const [snap, operators, items] = await Promise.all([t.snapshot(), t.operators(), reviewItems(tenantId, reviewId)]);
+    const waiting = items.filter(i => !i.decision);
+    if (!waiting.length && kind !== 'start') return 0;
+    const due = review.due_at.slice(0, 10);
+    const link = publicUrl ? `${publicUrl.replace(/\/+$/, '')}/` : 'AccessX';
+    let sent = 0;
+    for (const o of operators.filter(x => !x.revokedAt && x.email)) {
+      const owner = rbac.allSites(o) && rbac.hasPermission(snap, o, 'role.manage');
+      const theirs = waiting.filter(i => canDecide(snap, o, i)).length;
+      if (kind === 'overdue' ? !owner : !theirs) continue;
+      const msg = kind === 'overdue'
+        ? { subject: `Access review overdue: ${waiting.length} line(s) not confirmed`, text: `The access review started ${review.started_at.slice(0, 10)} was due ${due}. ${waiting.length} line(s) are still not confirmed.\n\nOpen ${link} → People → Access review. You can remind the reviewers, decide lines yourself, or remove the access that nobody confirmed.\n\nAccessX` }
+        : { subject: kind === 'start' ? `Access review: please confirm who still needs access (due ${due})` : `Reminder: access review due ${due}`,
+          text: `${kind === 'start' ? 'An access review has started.' : 'The access review is due soon.'} ${theirs} line(s) are waiting for you: for each person (or administrator), keep the access or remove it. Removing takes effect at once.\n\nOpen ${link} → People → Access review. Due ${due}.\n\nAccessX` };
+      const r = await alerts.emailTo(o.email, msg, `review-${reviewId}-${kind}-${o.id}`).catch(error => String(error.message || error));
+      if (r === 'delivered' || r === true || (r && r.ok)) sent += 1;
+    }
+    const col = { start: 'notified_at', reminder: 'reminded_at', overdue: 'overdue_notified_at' }[kind];
+    await store.sql.batch([{ sql: `UPDATE access_reviews SET ${col} = ? WHERE tenant_id = ? AND id = ?`, params: [new Date().toISOString(), tenantId, reviewId] }]);
+    return sent;
+  }
+
+  /** Scheduled: start due reviews, remind before the due date, tell owners when overdue. */
+  async function reviewMaintenance(tenantId) {
+    const settings = await reviewSettings(tenantId);
+    const open = await store.sql.first("SELECT * FROM access_reviews WHERE tenant_id = ? AND status = 'open'", [tenantId]);
+    const now = Date.now();
+    if (!open) {
+      if (!settings.everyDays) return null;
+      const last = await store.sql.first('SELECT MAX(started_at) AS at FROM access_reviews WHERE tenant_id = ?', [tenantId]);
+      if (last && last.at && now - Date.parse(last.at) < settings.everyDays * 864e5) return null;
+      const out = await startReview(tenantId, { actor: 'system', dueDays: settings.dueDays });
+      await notifyReview(tenantId, out.id, 'start');
+      return { started: out.id };
+    }
+    const due = Date.parse(open.due_at);
+    if (!open.notified_at) return { notified: await notifyReview(tenantId, open.id, 'start') };
+    if (due > now && due - now <= reviewCore.LIMITS.remindDaysBefore * 864e5 && !open.reminded_at) return { reminded: await notifyReview(tenantId, open.id, 'reminder') };
+    if (due <= now && !open.overdue_notified_at) return { overdue: await notifyReview(tenantId, open.id, 'overdue') };
+    return null;
+  }
 
   // --- policy compiler ---------------------------------------------------
   route('GET', /^\/api\/compile$/, async ctx => {
@@ -2151,6 +2556,11 @@ function createApi({
   });
 
   route('DELETE', /^\/api\/operators\/([^/]+)$/, async (ctx, [id]) => {
+    await revokeOperator(ctx, id, ctx.t.unit());
+    return { revoked: id };
+  });
+  /** Same checks for DELETE /api/operators/:id and an access review's "remove". Commits `unit`. */
+  async function revokeOperator(ctx, id, unit) {
     await ctx.snap();
     if (id === ctx.operator.id) throw new HttpError(409, 'you cannot revoke your own access');
     const target = (await ctx.t.operators()).find(o => o.id === id && !o.revokedAt);
@@ -2160,11 +2570,10 @@ function createApi({
       throw new HttpError(409, 'this is the last break-glass owner while single sign-on is enforced — create another one (or turn enforcement off) first');
     }
     const at = new Date().toISOString();
-    await ctx.t.unit().raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+    await unit.raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .raw('UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND operator_id = ? AND revoked_at IS NULL', [at, ctx.tenantId, id])
       .audit('operator.revoke', id, ctx.actor).commit();
-    return { revoked: id };
-  });
+  }
 
   // --- single sign-on configuration (owner only) ----------------------------
   const SSO_PURPOSE = 'sso.clientSecret';
@@ -2350,6 +2759,29 @@ function createApi({
   route('PUT', /^\/api\/audit\/settings$/, async ctx => ({ settings: publicAuditSettings(await ops().saveSettings(ctx.tenantId, ctx.body, ctx.actor)) }));
   route('POST', /^\/api\/audit\/purge$/, async ctx => ops().purge(ctx.tenantId, { actor: ctx.actor, acknowledgeExport: ctx.body.acknowledgeExport === true }));
 
+  /** What AccessX keeps, for how long, and where to change it (Audit → Data retention). */
+  route('GET', /^\/api\/retention$/, async ctx => {
+    const snap = await ctx.snap();
+    const settings = (await store.tenantSettings(ctx.tenantId)) || {};
+    const audit = auditOps ? await auditOps.auditSettings(ctx.tenantId) : {};
+    const v = visitors.settingsOf(settings);
+    return {
+      items: [
+        { id: 'audit', what: 'Audit trail (who did what, when)', days: audit.retentionDays || null, keep: audit.retentionDays ? `${audit.retentionDays} days` : 'everything', change: auditOps ? 'here (owner)' : null,
+          note: 'At least 365 days. Entries are purged only up to an anchor delivered outside AccessX, so a purge cannot hide a rewrite. The trail holds ids, not visitor names.' },
+        { id: 'visitors', what: 'Visitor details: name, email, phone, company (visits, invitations, walk-ins, calendar guests)', days: v.retentionDays, keep: `${v.retentionDays} days after the visit`, change: 'Visitors → Visitor settings',
+          note: 'Afterwards only ids and times remain. Reception can erase one visit at once.' },
+        { id: 'battery', what: 'Door battery history', days: health.KEEP_DAYS, keep: `${health.KEEP_DAYS} days`, change: null },
+        { id: 'signups', what: 'Signup requests (email, name)', days: signupCore.DEFAULTS.keepDays, keep: `${signupCore.DEFAULTS.keepDays} days, used or not`, change: null },
+        { id: 'reviews', what: 'Access reviews and passcode sweeps', days: null, keep: 'kept as evidence', change: null,
+          note: 'Ids and counts only. Names are shown from the live directory, so a person who is erased disappears here too.' },
+        { id: 'people', what: 'People, groups and their codes', days: null, keep: 'until removed', change: 'People (or your directory, through SCIM)',
+          note: 'Leavers lose their codes when they are suspended or removed; the access review finds the ones nobody removed.' },
+      ],
+      canChangeAudit: Boolean(auditOps) && rbac.hasPermission(snap, ctx.operator, rbac.OWNER),
+    };
+  });
+
   /**
    * Evidence pack for ISO 27001 / SOC 2 audits: one document per period
    * with access removal times, who administers what, identity setup and
@@ -2386,6 +2818,15 @@ function createApi({
     const sso = (settings || {}).sso;
     const auditSettings = auditOps ? await auditOps.auditSettings(ctx.tenantId) : {};
     const apprRows = await store.sql.all('SELECT status, COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND requested_at >= ? GROUP BY status', [ctx.tenantId, since]);
+    // Access reviews that started in the period or are still open, and the latest passcode sweeps.
+    const reviewRows = await store.sql.all("SELECT * FROM access_reviews WHERE tenant_id = ? AND (started_at >= ? OR status = 'open') ORDER BY started_at DESC", [ctx.tenantId, since]);
+    const reviews = [];
+    for (const r of reviewRows) {
+      const s = reviewCore.summarise(await reviewItems(ctx.tenantId, r.id));
+      reviews.push({ ...reviewRow(r), summary: s, onTime: r.status === 'closed' ? r.closed_at <= r.due_at : Date.parse(r.due_at) >= now ? null : false });
+    }
+    const lastClosed = await store.sql.first("SELECT MAX(closed_at) AS at FROM access_reviews WHERE tenant_id = ? AND status = 'closed'", [ctx.tenantId]);
+    const sweepRows = await store.sql.all('SELECT id, created_at, created_by, lock_count, summary FROM passcode_sweeps WHERE tenant_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 20', [ctx.tenantId, since]);
     const fourEyesStats = Object.fromEntries(apprRows.map(r => [r.status, Number(r.n)]));
     const evidence = {
       period: { days, from: since, to: new Date(now).toISOString() },
@@ -2406,6 +2847,10 @@ function createApi({
       },
       doors: { total: fleet.length, withoutGateway: fleet.filter(l => !l.hasGateway).length, vendorAccount: vendorAccount && vendorAccount.connected ? { status: vendorAccount.status, lockCount: vendorAccount.lockCount } : null,
         clockChanges: reconciler.dstNotices(snap, fleet, { now, days: 30, lockFilter: () => true }) },
+      accessReview: { schedule: await reviewSettings(ctx.tenantId), lastCompletedAt: (lastClosed && lastClosed.at) || null, reviews,
+        note: 'Each line is a person\'s doors at one site, or an administrator; removing acts at once (user groups left, codes revoked) and is in the audit trail (review.*).' },
+      passcodeSweep: { sweeps: sweepRows.map(r => ({ id: r.id, at: r.created_at, by: r.created_by, locks: Number(r.lock_count), ...parseJson(r.summary, {}) })),
+        note: 'Codes on each lock (vendor cloud list) compared with the AccessX registry; counts only.' },
       fourEyes: {
         sensitiveDoorGroups: snap.doorGroups.filter(g => g.sensitive).map(g => ({ id: g.id, name: g.name, doors: (g.lockIds || []).length })),
         requestsInPeriod: fourEyesStats,
@@ -2416,16 +2861,16 @@ function createApi({
         publicKey: auditOps ? await auditOps.publicKey() : null,
       },
       controls: [
-        { framework: 'ISO/IEC 27001:2022', control: 'A.7.2', title: 'Physical entry', evidence: ['doors', 'accessRemoval'] },
-        { framework: 'ISO/IEC 27001:2022', control: 'A.5.18', title: 'Access rights (provision, review, removal)', evidence: ['accessRemoval', 'identity.directorySync', 'administrators'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.7.2', title: 'Physical entry', evidence: ['doors', 'accessRemoval', 'passcodeSweep'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.5.18', title: 'Access rights (provision, review, removal)', evidence: ['accessReview', 'accessRemoval', 'identity.directorySync', 'administrators'] },
         { framework: 'ISO/IEC 27001:2022', control: 'A.5.16', title: 'Identity management', evidence: ['identity'] },
-        { framework: 'ISO/IEC 27001:2022', control: 'A.8.2', title: 'Privileged access rights', evidence: ['administrators'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.8.2', title: 'Privileged access rights', evidence: ['administrators', 'accessReview'] },
         { framework: 'ISO/IEC 27001:2022', control: 'A.5.3', title: 'Segregation of duties', evidence: ['fourEyes'] },
         { framework: 'ISO/IEC 27001:2022', control: 'A.8.15', title: 'Logging', evidence: ['auditTrail'] },
         { framework: 'ISO/IEC 27001:2022', control: 'A.8.17', title: 'Clock synchronisation', evidence: ['doors.clockChanges'] },
-        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.4', title: 'Restricts physical access to facilities', evidence: ['doors', 'accessRemoval'] },
-        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.2', title: 'Registration and removal of users', evidence: ['identity.directorySync', 'accessRemoval'] },
-        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.3', title: 'Role-based access, removal on change', evidence: ['administrators', 'accessRemoval'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.4', title: 'Restricts physical access to facilities', evidence: ['doors', 'accessRemoval', 'passcodeSweep'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.2', title: 'Registration and removal of users', evidence: ['identity.directorySync', 'accessRemoval', 'accessReview'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.3', title: 'Role-based access, removal on change', evidence: ['administrators', 'accessRemoval', 'accessReview'] },
         { framework: 'SOC 2 (TSC 2017)', control: 'CC7.2', title: 'Monitoring of system components (logs)', evidence: ['auditTrail'] },
       ],
       disclaimer: 'Supports evidence for the listed controls; it is not a certification or a compliance claim.',
@@ -3471,6 +3916,12 @@ function createApi({
       if (n) out.arrivals = n;
     } catch (error) {
       log(`maintenance ${tenantId} arrival polling failed`, error);
+    }
+    try {
+      const r = await reviewMaintenance(tenantId);
+      if (r) out.accessReview = r;
+    } catch (error) {
+      log(`maintenance ${tenantId} access review failed`, error);
     }
     try {
       // Visitors: personal details are kept only `retentionDays` after the visit ends.

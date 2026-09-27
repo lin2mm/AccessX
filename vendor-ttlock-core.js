@@ -62,6 +62,27 @@ async function deletePasscodeIdempotent(tt, lockId, ref) {
   }
 }
 
+/** TTLock keyboardPwdType → a plain word (1 one-time, 2 permanent, 3 period, 4 delete code, 5–14 cyclic). */
+const PWD_TYPES = { 1: 'one-time', 2: 'permanent', 3: 'period', 4: 'erase-all' };
+const msIso = ms => (Number(ms) > 0 ? new Date(Number(ms)).toISOString() : null);
+/** One code on a lock, as the vendor's cloud lists it. Never the digits. */
+const mapPasscode = p => ({
+  ref: String(p.keyboardPwdId), name: String(p.keyboardPwdName || '').slice(0, 100),
+  type: PWD_TYPES[p.keyboardPwdType] || (Number(p.keyboardPwdType) >= 5 && Number(p.keyboardPwdType) <= 14 ? 'cyclic' : `type ${p.keyboardPwdType}`),
+  startAt: msIso(p.startDate), endAt: msIso(p.endDate), createdBy: p.senderUsername || null, createdAt: msIso(p.sendDate),
+});
+/** Every code the cloud knows for a lock; refuses to return a partial list. */
+async function listAllPasscodes(tt, lockId, { maxPages = 20 } = {}) {
+  const out = [];
+  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+    const r = await tt.listPasscodes(Number(lockId), pageNo, 100);
+    const list = r.list || [];
+    out.push(...list.map(mapPasscode));
+    if (list.length < 100 || pageNo >= (r.pages || Infinity)) return out;
+  }
+  throw new Error(`passcode list for lock ${lockId} exceeds ${maxPages * 100} codes`);
+}
+
 const mapLock = l => ({
   lockId: l.lockId, lockAlias: l.lockAlias || l.lockName, electricQuantity: l.electricQuantity,
   hasGateway: l.hasGateway ? 1 : 0, groupId: l.groupId, groupName: l.groupName, cyclic: false,
@@ -108,6 +129,7 @@ function createCloudVendor(tt, { label = 'TTLock cloud', region = 'eu', cacheMs 
       }));
     },
     deletePasscode: (lockId, ref) => guard(() => deletePasscodeIdempotent(tt, lockId, ref)),
+    listPasscodes: lockId => guard(() => listAllPasscodes(tt, lockId)),
     async records(lockId) {
       const r = await guard(() => tt.records(Number(lockId), { pageSize: 100 }));
       return (r.list || []).map(x => ({ ...x, typeLabel: RECORD_TYPES[x.recordType] || `type ${x.recordType}` }));
@@ -123,4 +145,4 @@ function createCloudVendor(tt, { label = 'TTLock cloud', region = 'eu', cacheMs 
   };
 }
 
-module.exports = { createCloudVendor, deletePasscodeIdempotent, NoGatewayError, VendorUnavailableError, mapLock, isTransient };
+module.exports = { createCloudVendor, deletePasscodeIdempotent, listAllPasscodes, mapPasscode, NoGatewayError, VendorUnavailableError, mapLock, isTransient };

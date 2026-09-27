@@ -107,6 +107,16 @@ const ROUTES = [
   ['GET', /^\/api\/kiosks$/, 'visitor.manage'],
   ['POST', /^\/api\/kiosks$/, 'visitor.manage'],
   ['POST', /^\/api\/kiosks\/[^/]+\/revoke$/, 'visitor.manage'],
+  // R18: bulk invitations, passcode sweep, access review, retention overview.
+  ['POST', /^\/api\/visit-invites\/bulk$/, 'visitor.manage'],
+  ['GET', /^\/api\/passcode-sweep$/, 'credential.issue'],
+  ['POST', /^\/api\/passcode-sweep(\/remove|\/forget)?$/, 'credential.issue'],
+  ['GET', /^\/api\/access-reviews$/, 'audit.read'],
+  ['POST', /^\/api\/access-reviews$/, 'role.manage'],
+  ['PUT', /^\/api\/access-reviews\/settings$/, 'role.manage'],
+  ['POST', /^\/api\/access-reviews\/[^/]+\/close$/, 'role.manage'],
+  ['POST', /^\/api\/access-reviews\/[^/]+\/items\/[^/]+$/, 'user.manage'],
+  ['GET', /^\/api\/retention$/, 'audit.read'],
   ['GET', /^\/api\/walkins$/, 'visitor.manage'],
   ['POST', /^\/api\/walkins\/[^/]+\/(dismiss|erase)$/, 'visitor.manage'],
   // Calendar invitations (R17): anyone managing visitors sees the drafts; only an owner sets the doors

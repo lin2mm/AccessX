@@ -22,17 +22,43 @@ const RECORD_TYPES = {
   '-5': 'Face unlock', '-4': 'QR code unlock', 123: 'Network exception',
 };
 
+/**
+ * Codes someone left on the demo locks outside AccessX (the passcode sweep
+ * finds them): an old permanent code, a contractor's live code, an expired one.
+ */
+const DEMO_ORPHANS = [
+  { lockId: 9001, ref: 'demo-501', name: 'Old cleaner code', type: 'permanent', startAt: '2025-03-03T08:00:00.000Z', endAt: null, createdBy: 'facilities@acme.co.uk', createdAt: '2025-03-03T07:55:00.000Z' },
+  { lockId: 9003, ref: 'demo-502', name: 'Contractor', type: 'period', startDays: -10, endDays: 20, createdBy: 'facilities@acme.co.uk' },
+  { lockId: 9002, ref: 'demo-503', name: 'Temp access', type: 'period', startAt: '2026-01-05T09:00:00.000Z', endAt: '2026-01-30T18:00:00.000Z', createdBy: 'facilities@acme.co.uk', createdAt: '2026-01-05T08:58:00.000Z' },
+];
+const demoDeleted = new Set(); // `${lockId}:${ref}` removed in this process
+/** Every call that would change a lock (unlock, add or delete a code), for the scope gate (test/scope.fuzz.test.js). */
+const demoCalls = [];
+const noteCall = (op, lockId) => { if (demoCalls.length < 20000) demoCalls.push({ op, lockId: Number(lockId) }); };
+
 function createDemoVendor({ mirror = null, locks = DEMO_LOCKS } = {}) {
   return {
     kind: 'demo',
     demo: true,
     status: () => ({ mode: 'DEMO (simulated locks; no physical lock operations)', region: 'demo' }),
     async listLocks() { return locks.map(lock => ({ ...lock })); },
-    async unlock() { return { simulated: true }; },
-    async createPasscode() {
+    async unlock(lockId) { noteCall('unlock', lockId); return { simulated: true }; },
+    async createPasscode({ lockId } = {}) {
+      noteCall('createPasscode', lockId);
       return { keyboardPwd: String(Math.floor(100000 + Math.random() * 899999)), keyboardPwdId: Date.now() };
     },
-    async deletePasscode() { return { simulated: true }; },
+    async deletePasscode(lockId, ref) { noteCall('deletePasscode', lockId); demoDeleted.add(`${Number(lockId)}:${ref}`); return { simulated: true }; },
+    /**
+     * Simulated: the lock holds the codes the registry expects (`expected`,
+     * passed by the sweep) plus DEMO_ORPHANS, minus what was deleted here.
+     */
+    async listPasscodes(lockId, { expected = [] } = {}) {
+      const day = 864e5; const midnight = Math.floor(Date.now() / day) * day;
+      const orphans = DEMO_ORPHANS.filter(o => o.lockId === Number(lockId)).map(({ lockId: _l, startDays, endDays, ...o }) => (startDays === undefined ? o
+        : { ...o, startAt: new Date(midnight + startDays * day).toISOString(), endAt: new Date(midnight + endDays * day).toISOString(), createdAt: new Date(midnight + startDays * day).toISOString() }));
+      const known = expected.map(e => ({ ref: String(e.ref), name: e.name || 'AccessX', type: 'period', startAt: e.startAt || null, endAt: e.endAt || null, createdBy: 'accessx', createdAt: e.issuedAt || null }));
+      return [...known, ...orphans].filter(c => !demoDeleted.has(`${Number(lockId)}:${c.ref}`));
+    },
     async records(lockId) {
       const types = [1, 4, 7, 8, 12, 55];
       const people = ['Sarah Kelly', 'Dev Patel', 'CleanCo Ltd', 'Tom Nguyen'];
@@ -85,4 +111,4 @@ function staticMirror(doc) {
   };
 }
 
-module.exports = { createDemoVendor, staticMirror, DEMO_LOCKS, RECORD_TYPES };
+module.exports = { createDemoVendor, staticMirror, DEMO_LOCKS, DEMO_ORPHANS, RECORD_TYPES, demoCalls };

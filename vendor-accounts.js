@@ -248,7 +248,7 @@ function brokenVendor(error, r) {
   return {
     kind: 'ttlock', demo: false, broken: true,
     status: () => ({ mode: `TTLock account ${r.account} — reconnect required`, region: r.region, reason: error.reason }),
-    listLocks: fail, unlock: fail, createPasscode: fail, deletePasscode: fail, records: fail,
+    listLocks: fail, unlock: fail, createPasscode: fail, deletePasscode: fail, listPasscodes: fail, records: fail,
     async info() { return { active: 'ttlock', available: ['ttlock', 'demo'], capabilities: {}, health: { vendor: 'ttlock', ok: false, mode: 'reconnect required', note: error.message } }; },
     mirror: null,
   };
