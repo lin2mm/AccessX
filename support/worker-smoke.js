@@ -378,6 +378,38 @@ check('calendar invitation on D1: email() handler → draft → organiser confir
   assert.ok(invites.body.invites.some(x => x.status === 'open' && x.createdBy === 'owner'), JSON.stringify(invites.body.invites.slice(0, 2)));
   console.log(`     (delivered via ${via})`);
 });
+check('access review, passcode sweep and retention on D1 (R18)', async () => {
+  const ret = await call('GET', '/api/retention', OWNER);
+  assert.equal(ret.status, 200, JSON.stringify(ret.body));
+  assert.deepEqual(ret.body.items.map(i => i.id), ['audit', 'visitors', 'battery', 'signups', 'reviews', 'people']);
+  const start = await call('POST', '/api/access-reviews', OWNER, { dueDays: 3 });
+  assert.equal(start.status, 200, JSON.stringify(start.body));
+  const rid = start.body.review.id;
+  assert.equal((await call('POST', '/api/access-reviews', OWNER, {})).status, 409, 'one open review at a time');
+  assert.equal((await call('POST', '/api/access-reviews', GYM, {})).status, 403, 'a site manager cannot start one');
+  const gym = (await call('GET', '/api/access-reviews', GYM)).body.open;
+  assert.ok(gym.items.length >= 1 && gym.items.every(i => i.kind === 'door' && i.siteId === 'site_gym'), 'the gym manager sees only gym lines');
+  const tom = gym.items.find(i => i.canDecide);
+  const kept = await call('POST', `/api/access-reviews/${rid}/items/${tom.id}`, GYM, { decision: 'keep' });
+  assert.equal(kept.status, 200, JSON.stringify(kept.body));
+  const office = (await call('GET', '/api/access-reviews', OWNER)).body.open.items.find(i => i.siteId === 'site_river');
+  assert.equal((await call('POST', `/api/access-reviews/${rid}/items/${office.id}`, GYM, { decision: 'remove' })).status, 404, 'another site\'s line is not found');
+  assert.equal((await call('POST', `/api/access-reviews/${rid}/close`, OWNER, { removeUndecided: true })).status, 409, 'no bulk removal before the due date');
+  const closed = await call('POST', `/api/access-reviews/${rid}/close`, OWNER, {});
+  assert.equal(closed.body.closed, true, JSON.stringify(closed.body));
+  assert.equal(closed.body.summary.kept, 1);
+  assert.equal((await call('PUT', '/api/access-reviews/settings', OWNER, { everyDays: 90, dueDays: 14 })).status, 200);
+  const sweep = await call('POST', '/api/passcode-sweep', OWNER, {});
+  assert.equal(sweep.status, 200, JSON.stringify(sweep.body));
+  assert.ok(sweep.body.summary.unknown >= 2, JSON.stringify(sweep.body.summary));
+  assert.ok(!JSON.stringify(sweep.body).match(/"(keyboardPwd|code|digits)"/), 'no code digits in the sweep');
+  assert.equal((await call('POST', '/api/passcode-sweep/remove', GYM, { lockId: 9001, refs: ['demo-501'] })).status, 403, 'not another site\'s door');
+  const removed = await call('POST', '/api/passcode-sweep/remove', OWNER, { lockId: 9001, refs: ['demo-501'] });
+  assert.equal(removed.body.results[0].ok, true, JSON.stringify(removed.body));
+  const ev = (await call('GET', '/api/reports/evidence', OWNER)).body.evidence;
+  assert.ok(ev.accessReview.reviews.some(r => r.id === rid), 'the review is in the evidence pack');
+  assert.ok(ev.passcodeSweep.sweeps.length >= 1);
+});
 check('demo reset through the tenant Durable Object restores the seed and keeps the audit chain', async () => {
   const before = (await call('GET', '/api/audit/verify', OWNER)).body.verification;
   assert.equal((await call('POST', '/api/platform/tenants/t_default/demo-reset', PLATFORM, {})).status, 400);
