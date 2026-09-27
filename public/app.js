@@ -75,7 +75,7 @@ async function init(){
     return;
   }
   await loadMode();
-  await loadDoors();refreshTzNotes(true);await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();
+  await loadDoors();refreshTzNotes(true);await loadHealth();await loadSetup();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 /* ---- door-local time: every time the operator types or reads is in the door's time zone ---- */
@@ -128,6 +128,43 @@ async function loadForecasts(){
   return h;
 }
 $('#doors').addEventListener('click',e=>{const b=e.target.closest('[data-unlock]');if(b)unlock(b.dataset.unlock,b);});
+// Owner's "Get started": checklist + the office setup pack (onboarding-core).
+async function loadSetup(){
+  const r=await api('/api/onboarding/office');
+  $('#setup-card').hidden=!r.ok||r.checklist.every(c=>c.done);
+  if(!r.ok)return;
+  $('#setup-list').innerHTML=`<ol style="margin:0;padding-left:20px">${r.checklist.map(c=>`<li style="margin:3px 0">${c.done?'<span class="tag g">done</span>':'<span class="tag">to do</span>'} <b>${esc(c.label)}</b>${c.done?'':` <span class="meta">— ${esc(c.hint)}</span>`}</li>`).join('')}</ol>`;
+  const doors=r.checklist.find(c=>c.id==='doors');
+  $('#setup-office').hidden=!(doors&&!doors.done)&&!$('#so-res').innerHTML; // keep a just-applied result visible
+  if(!$('#so-tz').value)$('#so-tz').value=BROWSER_TZ;
+}
+const soBody=()=>{const w=(f,t)=>({days:[1,2,3,4,5],from:$(f).value,to:$(t).value});return {timeZone:$('#so-tz').value.trim(),officeHours:w('#so-of','#so-ot'),cleaningHours:w('#so-cf','#so-ct')};};
+function renderPlan(p,created){
+  const site=k=>(p.sites.find(s=>s.key===k)||{}).name||'';
+  const dg=k=>(p.doorGroups.find(d=>d.key===k)||{}).name||k;
+  const ug=k=>(p.userGroups.find(u=>u.key===k)||{}).name||k;
+  const sch=k=>(p.schedules.find(s=>s.key===k)||{});
+  return `${created?`<div class="res y">Created: ${esc(Object.entries(created).filter(([,n])=>n).map(([k,n])=>{const w={sites:'site',doorGroups:'door group',schedules:'schedule',userGroups:'people group',assignments:'rule'}[k]||k;return `${n} ${w}${n===1?'':'s'}`;}).join(', ')||'nothing')}. Next: add people to the Staff and Cleaners groups (or connect SCIM) and their codes are issued.</div>`:''}
+    <table><tr><th>Site</th><th>Door group</th><th>Doors</th></tr>${p.doorGroups.map(d=>`<tr><td>${esc(site(d.siteKey))}</td><td>${esc(d.name)} ${d.sensitive?'<span class="tag r">sensitive</span>':''}</td><td>${esc(d.doors.join(', '))}</td></tr>`).join('')||'<tr><td colspan="3" class="meta">No ungrouped doors.</td></tr>'}</table>
+    <table style="margin-top:8px"><tr><th>People group</th><th>Opens</th><th>When</th></tr>${p.assignments.map(a=>{const s=sch(a.scheduleKey);const w=(s.windows||[])[0]||{};return `<tr><td>${esc(ug(a.userGroupKey))}</td><td>${esc(dg(a.doorGroupKey))}</td><td>${esc(s.name||'')} <span class="meta">Mon–Fri ${esc(w.from||'')}–${esc(w.to||'')}</span></td></tr>`;}).join('')}</table>
+    ${(p.notes||[]).map(n=>`<div class="meta" style="margin-top:4px">• ${esc(n)}</div>`).join('')}`;
+}
+$('#so-preview').addEventListener('click',async()=>{
+  const b=soBody();
+  const r=await api('/api/onboarding/office?timeZone='+encodeURIComponent(b.timeZone));
+  if(!r.ok||!r.plan){$('#so-res').innerHTML=`<div class="res n">${esc(r.ok?'Enter a valid time zone, e.g. Europe/London':errText(r))}</div>`;$('#so-apply').disabled=true;return;}
+  // The preview uses default hours; the server applies the hours entered here.
+  $('#so-res').innerHTML=renderPlan({...r.plan,schedules:r.plan.schedules.map(s=>({...s,windows:[s.key==='office'?b.officeHours:b.cleaningHours]}))});
+  $('#so-apply').disabled=!r.plan.doorGroups.length;
+});
+$('#so-apply').addEventListener('click',async()=>{
+  if(!confirm('Create these sites, door groups, schedules and rules? Every change is audited.'))return;
+  $('#so-apply').disabled=true;
+  const r=await post('/api/onboarding/office',soBody());
+  if(!r.ok){$('#so-res').innerHTML=`<div class="res n">${esc(errText(r))}</div>`;$('#so-apply').disabled=false;return;}
+  $('#so-res').innerHTML=r.message?`<div class="res y">${esc(r.message)}</div>`:renderPlan(r.plan,r.created);
+  loadDoors();loadRules();loadAudit();loadSetup();
+});
 async function loadHealth(){
   const [h,f]=await Promise.all([api('/api/health'),loadForecasts()]);
   const low=(h.lowBattery||[]).length, off=(h.offline||[]).length;

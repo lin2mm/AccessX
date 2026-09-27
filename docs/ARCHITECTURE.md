@@ -480,6 +480,21 @@ and a fake TTLock that rotates refresh tokens.
 - Recorded once (CAS on `arrived_at IS NULL`); cancelled/checked-out visits
   and unlocks outside the window are ignored.
 
+### Office setup pack
+
+- `onboarding-core.js` is pure: `plan(locks, snapshot, {timeZone, hours})`.
+  Sites come from TTLock `groupName` (from `/v3/lock/list`), door groups
+  from door-name patterns (secure checked first), schedules and people
+  groups are reused by name. Locks already in any door group are skipped,
+  which makes re-running a no-op.
+- `POST /api/onboarding/office` recomputes the plan server-side (the client
+  sends only time zone and hours), validates every item with
+  `validate-core` against a working copy of the snapshot, and commits one
+  unit of work: one `<collection>.create` audit entry per item plus an
+  `onboarding.office` summary. It refuses (409) if a non-sensitive group
+  would contain an already sensitive door, and never assigns anyone to the
+  sensitive group, so no four-eyes gate is bypassed.
+
 ### Lock health (battery trend, silent callback)
 
 - `lock-health-core.js` is pure; `checkLockHealth` runs in the tenant's

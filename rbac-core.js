@@ -68,6 +68,8 @@ const ROUTES = [
   ['GET', /^\/api\/(status|doors|vendor)$/, 'door.read'],
   ['GET', /^\/api\/health$/, 'door.read'],
   ['GET', /^\/api\/doors\/health$/, 'door.read'],
+  ['GET', /^\/api\/onboarding\/office$/, OWNER],
+  ['POST', /^\/api\/onboarding\/office$/, OWNER],
   ['GET', /^\/api\/tenants$/, PLATFORM],
   ['POST', /^\/api\/tenants$/, PLATFORM],
   ['GET', /^\/api\/platform\/secrets$/, PLATFORM],

@@ -16,6 +16,7 @@ const creds = require('./credentials-core');
 const visitors = require('./visitors-core');
 const lockEvents = require('./lock-events-core');
 const health = require('./lock-health-core');
+const onboarding = require('./onboarding-core');
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -1935,6 +1936,85 @@ function createApi({
     const lost = out.changed.filter(c => c.lost.length).length;
     const reconcile = lost ? await reconcileAfter(ctx, {}) : undefined;
     return { mapped: { id, userGroupId: target }, usersChanged: out.changed.length, usersLostAccess: lost, reconcile };
+  });
+
+  // --- office setup pack (onboarding-core.js) ------------------------------------------
+  /** Where an office stands on the way to "doors run themselves". */
+  async function officeChecklist(ctx, snap, locks) {
+    const s = (await store.tenantSettings(ctx.tenantId)) || {};
+    const account = vendorAccounts ? await vendorAccounts.status(ctx.tenantId).catch(() => null) : null;
+    const grouped = new Set(snap.doorGroups.flatMap(g => g.lockIds.map(Number)));
+    const alertCfg = alerts ? await alerts.settings(ctx.tenantId).catch(() => null) : null;
+    const item = (id, label, done, hint, link) => ({ id, label, done: Boolean(done), hint, link });
+    return [
+      item('ttlock', 'Connect your TTLock account', account && account.connected && account.status !== 'needs_reconnect', account && account.status === 'needs_reconnect' ? 'TTLock refused the saved login: reconnect it.' : 'People → Operators & sign-in → TTLock account. Until then you see the demo doors.', '#admin'),
+      item('doors', 'Put every door in a door group', locks.length && locks.every(l => grouped.has(Number(l.lockId))), `${locks.filter(l => !grouped.has(Number(l.lockId))).length} of ${locks.length} door(s) not grouped yet — the office setup below does it.`, '#setup'),
+      item('rules', 'Rules: who may open which doors when', snap.assignments.length > 0, 'The office setup creates Staff and Cleaners rules.', '#rules'),
+      item('sensitive', 'Mark sensitive doors (changes need two people)', snap.doorGroups.some(g => g.sensitive), 'Server room, comms, safe…: the office setup marks them.', '#rules'),
+      item('people', 'Add people', snap.users.length > 0, 'Best from your directory (SCIM, next step); or by hand under People.', '#people'),
+      item('scim', 'Sync people from your directory (SCIM)', snap.users.some(u => u.source === 'scim'), 'Leavers then lose their codes when HR disables them in Entra ID / Okta / Google.', '#admin'),
+      item('sso', 'Sign in with your company account (SSO)', s.sso && s.sso.issuer, 'People → Operators & sign-in → Single sign-on; then require it so shared tokens stop working.', '#admin'),
+      item('alerts', 'Send alerts to Slack, Teams or email', alertCfg && alertCfg.configured, 'Tamper alarms, low batteries, failed revocations.', '#admin'),
+      item('callback', 'TTLock callback URL (instant alarms and arrivals)', s.ttlockCallbackAt, ttlockNotifySecret ? 'Set the callback URL in the TTLock developer console; this ticks once TTLock calls.' : 'Set TTLOCK_NOTIFY_SECRET on the server, then the callback URL in the TTLock console.', '#visitors'),
+      item('visitors', 'Visitor codes by email or text', emailAvailable() || smsAvailable(), 'Needs EMAIL_PROVIDER or SMS_PROVIDER on the server.', '#visitors'),
+    ];
+  }
+  const officeOptions = (body, snap) => {
+    const timeZone = body.timeZone || (snap.settings && snap.settings.defaultTimezone);
+    if (!policy.isValidTimeZone(timeZone) || timeZone === 'UTC' && !body.timeZone) throw new HttpError(400, 'timeZone is required (the offices\' IANA time zone, e.g. "Europe/London")');
+    const hours = (w, name) => {
+      if (w === undefined) return undefined;
+      try { return validate('schedules', { name, windows: [w] }, snap).windows[0]; } catch (error) { throw new HttpError(400, `${name}: ${error.message}`); }
+    };
+    return { timeZone, officeHours: hours(body.officeHours, 'officeHours'), cleaningHours: hours(body.cleaningHours, 'cleaningHours') };
+  };
+
+  route('GET', /^\/api\/onboarding\/office$/, async ctx => {
+    const snap = await ctx.snap();
+    const locks = await ctx.vendor.listLocks();
+    const q = ctx.query;
+    const tz = q.get('timeZone');
+    const plan = tz && policy.isValidTimeZone(tz) ? onboarding.plan(locks, snap, officeOptions({ timeZone: tz }, snap)) : null;
+    return { plan, checklist: await officeChecklist(ctx, snap, locks), defaults: onboarding.DEFAULTS };
+  });
+
+  route('POST', /^\/api\/onboarding\/office$/, async ctx => {
+    const snap = await ctx.snap();
+    const locks = await ctx.vendor.listLocks();
+    // The plan is recomputed here: the client only chooses the time zone and hours.
+    const plan = onboarding.plan(locks, snap, officeOptions(ctx.body || {}, snap));
+    const sensitiveLocks = sensitiveLockSet(snap);
+    const work = { ...snap, sites: [...snap.sites], doorGroups: [...snap.doorGroups], schedules: [...snap.schedules], userGroups: [...snap.userGroups], assignments: [...snap.assignments] };
+    const ids = new Map();
+    const created = { sites: 0, doorGroups: 0, schedules: 0, userGroups: 0, assignments: 0 };
+    const uow = ctx.t.unit();
+    const add = (coll, body, key) => {
+      const clean = validate(coll, body, work);
+      const item = { ...clean, id: policy.uid(coll.slice(0, 3)) };
+      work[coll].push(item);
+      uow.insert(coll, item).audit(`${coll}.create`, `${createDetail(coll, item)} (office setup)`, ctx.actor);
+      ids.set(key, item.id);
+      created[coll]++;
+      return item;
+    };
+    for (const x of plan.sites) x.existingId ? ids.set(x.key, x.existingId) : add('sites', { name: x.name, timezone: x.timezone }, x.key);
+    for (const x of plan.schedules) x.existingId ? ids.set(x.key, x.existingId) : add('schedules', { name: x.name, windows: x.windows, denyOnHolidays: x.denyOnHolidays }, x.key);
+    for (const x of plan.doorGroups) {
+      // Never widen access to a door that is already sensitive without the four-eyes path.
+      if (!x.sensitive && x.lockIds.some(id => sensitiveLocks.has(id))) throw new HttpError(409, `${x.name} would contain a sensitive door: move it by hand (needs approval)`);
+      add('doorGroups', { name: x.name, siteId: ids.get(x.siteKey), lockIds: x.lockIds, sensitive: x.sensitive }, x.key);
+    }
+    for (const x of plan.userGroups) x.existingId ? ids.set(x.key, x.existingId) : add('userGroups', { name: x.name, siteId: ids.get(x.siteKey) }, x.key);
+    for (const a of plan.assignments) {
+      const body = { userGroupId: ids.get(a.userGroupKey), doorGroupId: ids.get(a.doorGroupKey), scheduleId: ids.get(a.scheduleKey) };
+      if (!work.assignments.some(x => x.userGroupId === body.userGroupId && x.doorGroupId === body.doorGroupId && x.scheduleId === body.scheduleId)) add('assignments', body, `${a.userGroupKey}>${a.doorGroupKey}`);
+    }
+    const total = Object.values(created).reduce((a, b) => a + b, 0);
+    if (!total) return { created, plan, checklist: await officeChecklist(ctx, snap, locks), message: 'Nothing to do: every door is already in a door group.' };
+    uow.audit('onboarding.office', `office setup: ${Object.entries(created).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ')} (tz ${plan.timeZone})`, ctx.actor);
+    await uow.commit();
+    const after = await ctx.t.snapshot();
+    return { created, plan, checklist: await officeChecklist(ctx, after, locks) };
   });
 
   // --- vendor / mirror / health ---------------------------------------------

@@ -6,7 +6,8 @@ same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). Both
 use demo data and do not control physical locks. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
 [docs/PILOT.md](docs/PILOT.md) for trying it with real locks, and
-[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the proposed visitor pre-registration.
+[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the visitor pre-registration design, and
+[docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md) for setting up an office (about 45 minutes).
 
 ## Run locally
 
@@ -199,6 +200,15 @@ Operators (people who administer the system) are separate from door users.
   requests, overdue removals and arrivals can wait for one message a day at
   a local hour; break-glass, failed revocations and TTLock disconnections are
   always sent at once. Erasing a visitor also deletes their waiting alerts.
+- **Office setup pack** — the owner's *Get started* card lists what is left
+  (TTLock, door groups, rules, sensitive doors, people, SCIM, SSO, alerts,
+  callback, visitors) and builds an office from the connected fleet in one
+  reviewed step: sites from TTLock groups, door groups from door names
+  (entrances, offices, facilities; server/comms/IT rooms **sensitive**, no
+  access), Office hours and Cleaning schedules, Staff and Cleaners rules.
+  Preview first (`GET /api/onboarding/office?timeZone=`), apply
+  (`POST /api/onboarding/office`, owner only); everything audited, doors
+  already grouped are never touched. See [docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md).
 - **Lock health** — one battery reading per lock per day (lock list and
   callback records); a trend line since the last battery change warns about
   three weeks before a lock reaches 10%, and at 20% / 10%. Alerts only

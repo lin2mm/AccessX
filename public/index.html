@@ -165,6 +165,21 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
 <main>
   <!-- DOORS -->
   <section id="v-doors" class="view on">
+    <div class="card" id="setup-card" hidden>
+      <h2>Get started</h2>
+      <div id="setup-list" class="meta"></div>
+      <div id="setup-office" hidden style="margin-top:12px">
+        <h3 style="font-size:15px;margin:0 0 4px">Office setup</h3>
+        <div class="hint">Builds sites from your TTLock groups, door groups from the door names (entrances, offices, facilities; server/comms/IT rooms become <b>sensitive</b>), and Staff / Cleaners rules. You review it first; nothing changes until you apply. Doors already in a group are left alone.</div>
+        <div class="grid c3" style="align-items:end">
+          <div><label for="so-tz">Offices' time zone</label><input id="so-tz" maxlength="60" placeholder="Europe/London"></div>
+          <div class="grid c2" style="gap:8px"><div><label for="so-of">Office hours from</label><input id="so-of" type="time" value="07:00" step="3600"></div><div><label for="so-ot">to</label><input id="so-ot" type="time" value="19:00" step="3600"></div></div>
+          <div class="grid c2" style="gap:8px"><div><label for="so-cf">Cleaning from</label><input id="so-cf" type="time" value="18:00" step="3600"></div><div><label for="so-ct">to</label><input id="so-ct" type="time" value="22:00" step="3600"></div></div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px"><button class="btn2" type="button" id="so-preview">Preview</button><button class="btn" type="button" id="so-apply" disabled>Apply</button></div>
+        <div id="so-res" style="margin-top:10px"></div>
+      </div>
+    </div>
     <div class="card"><h2>Fleet status</h2><div class="grid c3" id="kpis"></div></div>
     <div class="card"><h2>Doors</h2>
       <div class="hint">A remote unlock without a person bypasses every rule, so it needs a reason. It is recorded in the audit trail.</div>
@@ -352,7 +367,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       </div>
       <div id="alerts-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
         <h3 style="margin:0">Alerts to Slack / Teams / email</h3>
-        <div class="hint">Approval requests, codes still on offline locks past the removal target, failed revocations, break-glass sign-ins and a TTLock account that must be reconnected. Undelivered alerts are retried for about a day. The webhook URL is stored encrypted and never shown again. Teams: channel ••• → Workflows → “Post to a channel when a webhook request is received”.</div>
+        <div class="hint">Approval requests, codes still on offline locks past the removal target, failed revocations, break-glass sign-ins, a TTLock account that must be reconnected, lock alarms, batteries running low and a TTLock callback that went silent. Undelivered alerts are retried for about a day. The webhook URL is stored encrypted and never shown again. Teams: channel ••• → Workflows → “Post to a channel when a webhook request is received”.</div>
         <div id="alerts-state" class="meta" style="margin:4px 0 8px"></div>
         <form id="alerts-form" class="grid c3" style="align-items:end">
           <label>Webhook URL<input id="al-url" type="password" placeholder="leave empty to keep" autocomplete="off"></label>

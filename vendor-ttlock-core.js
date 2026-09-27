@@ -64,7 +64,7 @@ async function deletePasscodeIdempotent(tt, lockId, ref) {
 
 const mapLock = l => ({
   lockId: l.lockId, lockAlias: l.lockAlias || l.lockName, electricQuantity: l.electricQuantity,
-  hasGateway: l.hasGateway ? 1 : 0, groupName: l.groupName, cyclic: false,
+  hasGateway: l.hasGateway ? 1 : 0, groupId: l.groupId, groupName: l.groupName, cyclic: false,
 });
 
 /**
