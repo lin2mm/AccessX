@@ -512,6 +512,25 @@ and a fake TTLock that rotates refresh tokens.
   cancel and erasure. The write runs in the tenant's queue (Node
   `serialize`, Worker DO `/__tenant/job`), audited with actor `visitor`.
 
+### Visitor invitations (pre-registration)
+
+- `visit_invites` (migration 0018) holds the envelope (host, site, doors,
+  local window), the fixed contact and `sha256("visit-invite|" + token)`.
+  Created with the same `planVisit` checks as a visit; the link
+  `PUBLIC_URL/invite#<token>` is sent to the contact and shown once to the
+  operator.
+- `POST /api/visit-invite` (public, outside `api.routes`, registered before
+  the JSON parser on Node; `handlePublicJson` on the Worker): `status`
+  returns site, doors, window and the *masked* contact; `submit` runs in the
+  tenant queue (`invite_submit` job). Without approval it calls the shared
+  `createVisit` with a ctx built for the inviting operator (current role and
+  scope), actor `invite:<id>`; delivery goes only to the invite's channel,
+  and an undelivered visit is cancelled immediately. With approval
+  (default on sites with sensitive doors) it stores the details; approve
+  runs `createVisit` with the approver's own ctx.
+- Erasing the visit nulls the invite's contact and submitted details;
+  maintenance expires stale invites and erases them after `retentionDays`.
+
 ### TTLock validity rules (all passcodes)
 
 TTLock's keyboardPwd/get documents two rules the lock enforces regardless of

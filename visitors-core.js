@@ -189,4 +189,49 @@ function arrivalCandidates(records) {
   })).filter(r => r.recordType === PASSCODE_UNLOCK && r.success === 1 && /^\d{4,12}$/.test(r.code) && Number.isFinite(r.lockId) && Number.isFinite(r.at));
 }
 
-module.exports = { LIMITS, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail, invitationSms, arrivalEmail, arrivalCandidates };
+// ---- pre-registration invites (docs/PREREGISTRATION.md) -------------------------------
+const INVITE = { maxOpen: 200, maxAttempts: 5 };
+
+/** The operator fixes where the link AND the code go: an email address or a mobile number. */
+function inviteContact(body) {
+  const email = clean(body.visitorEmail, 200).toLowerCase();
+  const phone = clean(body.visitorPhone, 30);
+  if (email && phone) return fail(400, 'give either visitorEmail or visitorPhone: the code goes to that one address');
+  if (email) return EMAIL_RE.test(email) ? { ok: true, channel: 'email', contact: email } : fail(400, 'visitorEmail is not a valid address');
+  if (phone) { const n = normalizePhone(phone); return n ? { ok: true, channel: 'sms', contact: n } : fail(400, 'visitorPhone must be an international number, e.g. +44 7700 900123'); }
+  return fail(400, 'visitorEmail or visitorPhone is required: the invite and the code are sent there');
+}
+
+/** What the visitor sees about where the code will go (a leaked link does not reveal the address). */
+function maskContact(channel, contact) {
+  if (!contact) return null;
+  if (channel === 'email') { const [u, d] = contact.split('@'); return `${u.slice(0, 1)}${'•'.repeat(Math.max(1, Math.min(u.length - 1, 5)))}@${d}`; }
+  return `${contact.slice(0, 3)} •••• ${contact.slice(-3)}`;
+}
+
+function rowToInvite(r) {
+  return {
+    id: r.id, hostUserId: r.host_user_id, siteId: r.site_id, lockIds: JSON.parse(r.lock_ids || '[]').map(Number),
+    startLocal: r.start_local, endLocal: r.end_local, startAt: r.start_at, endAt: r.end_at,
+    channel: r.channel, contact: r.contact, requireApproval: Boolean(r.require_approval), status: r.status,
+    attempts: r.attempts, submittedName: r.submitted_name, submittedCompany: r.submitted_company, submittedStart: r.submitted_start,
+    submittedAt: r.submitted_at, createdBy: r.created_by, createdAt: r.created_at, expiresAt: r.expires_at,
+    decidedBy: r.decided_by, visitId: r.visit_id, erased: Boolean(r.erased_at),
+  };
+}
+
+function inviteMessage({ channel, hostName, siteName, url, from, until, tenantName }) {
+  if (channel === 'sms') return `${hostName} invited you to ${siteName || 'visit'} (${from} to ${until}). Register for your door code: ${url}`;
+  return {
+    subject: `${hostName} invited you to ${siteName || 'visit'}`.slice(0, 200),
+    text: [
+      'Hello,', '',
+      `${hostName} has invited you to ${siteName || 'visit us'}, ${from} to ${until} (local time).`, '',
+      'Please register here; your door code will be sent to this address:', url, '',
+      'If you did not expect this invitation, ignore this message.', '',
+      '—', `${tenantName || 'AccessX'} · sent by AccessX`,
+    ].join('\n'),
+  };
+}
+
+module.exports = { LIMITS, INVITE, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail, invitationSms, arrivalEmail, arrivalCandidates, inviteContact, maskContact, rowToInvite, inviteMessage };

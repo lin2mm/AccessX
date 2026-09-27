@@ -233,10 +233,17 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <label>Doors</label>
         <div id="vi-doors" class="checks"></div>
         <div class="meta tz-note" id="vi-tz"></div>
-        <div class="checks"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label><label id="vi-sms-l"><input type="checkbox" id="vi-sms"> Text the code (SMS)</label></div>
+        <div class="checks"><label id="vi-invite-l" title="The visitor enters their own name and arrival time; the code is sent only to the email or mobile above"><input type="checkbox" id="vi-invite"> Send an invitation instead — the visitor registers themselves</label></div>
+        <div class="checks" id="vi-direct"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label><label id="vi-sms-l"><input type="checkbox" id="vi-sms"> Text the code (SMS)</label></div>
+        <div class="meta" id="vi-invite-note" hidden>Give one address — email <i>or</i> mobile. The link can be forwarded, but the code is only ever sent to that address. At a site with sensitive doors, registrations wait for your approval below.</div>
         <div style="margin-top:10px"><button class="btn" type="submit" id="vi-submit">Register &amp; create code</button></div>
       </form>
       <div id="vi-res"></div>
+    </div>
+    <div class="card" id="inv-card" hidden>
+      <h2>Invitations</h2>
+      <div class="hint">Links expire at the end of the invited window. Each link works once; approving sends the code to the invited address — nobody sees it here.</div>
+      <div id="inv-list" style="overflow-x:auto"></div>
     </div>
     <div class="card">
       <h2>Visitors</h2>

@@ -169,19 +169,19 @@ function jobDispatcher(env) {
   } : null;
 }
 
-/** Visitor self check-out (no login; the token in the body is the credential). */
-async function handleVisitCheckout(request, env) {
+/** Visitor self check-out / pre-registration (no login; the token in the body is the credential). */
+async function handlePublicJson(request, env, fn, what) {
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
   const text = await request.text();
   if (text.length > 4096) return json(413, { ok: false, error: 'too large' });
   let body;
   try { body = JSON.parse(text || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON' }); }
   try {
-    const out = await apiFor(env).visitCheckoutPublic(body, { dispatch: jobDispatcher(env) });
+    const out = await apiFor(env)[fn](body, { dispatch: jobDispatcher(env) });
     return json(out.status, out.body);
   } catch (error) {
-    console.error('visit checkout failed', error);
-    return json(502, { ok: false, error: 'Check-out failed. Please try again, or see reception.' });
+    console.error(`${fn} failed`, error);
+    return json(502, { ok: false, error: `${what} failed. Please try again, or contact your host.` });
   }
 }
 
@@ -202,7 +202,7 @@ export class TenantWriter {
     // Worker reaches a DO, and it forwards nothing but /api/* and /scim/*,
     // so this path cannot be called from outside.
     if (new URL(request.url).pathname === '/__tenant/job') {
-      // Arrival, lock alarm or visitor check-out for this tenant (see jobDispatcher).
+      // Arrival, lock alarm, visitor check-out or invite registration for this tenant (see jobDispatcher).
       const tenantId = request.headers.get('x-accessx-tenant');
       const job = await request.json();
       const out = await this.queue.run('tenant', () => apiFor(this.env).runTenantJob(tenantId, job));
@@ -233,7 +233,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
-    if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handleVisitCheckout(request, env);
+    if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handlePublicJson(request, env, 'visitCheckoutPublic', 'Check-out');
+    if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
     return env.ASSETS.fetch(request);
   },

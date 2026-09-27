@@ -77,7 +77,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
-| `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts and visitors' self check-out links; without it those links are left out and the redirect URI follows the request host. |
+| `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts, visitors' self check-out links and visitor invitations; without it those links are left out and the redirect URI follows the request host. |
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
@@ -216,6 +216,14 @@ Operators (people who administer the system) are separate from door users.
   **Arrival**: the first unlock with the visitor's code (TTLock callback, or
   lock records every scheduled run) marks them arrived and emails the host;
   a Slack/Teams `visitor_arrived` alert is available opt-in.
+  **Invitations** (`PUBLIC_URL` needed): instead of typing the visitor's
+  details, reception enters only an email *or* mobile number; the visitor
+  opens the link, gives their name and arrival time, and the code is sent to
+  that address only — a forwarded link cannot redirect it, and the page never
+  shows a code. One use, expires with the window, revocable; the visit is
+  re-checked against the inviter's current rights at registration. Sites with
+  sensitive doors wait for reception's approval by default. See
+  [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md).
   **Self check-out**: with `PUBLIC_URL`, the email/text carries a link;
   one tap ends the visit and removes the codes (no login, one use, shows no
   names or codes; the token sits in the URL fragment, so it is never in

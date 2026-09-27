@@ -88,6 +88,9 @@ const ROUTES = [
   ['POST', /^\/api\/visits$/, 'visitor.manage'],
   ['POST', /^\/api\/visits\/[^/]+\/(checkout|cancel|erase)$/, 'visitor.manage'],
   ['PUT', /^\/api\/visits\/settings$/, OWNER],
+  ['GET', /^\/api\/visit-invites$/, 'visitor.manage'],
+  ['POST', /^\/api\/visit-invites$/, 'visitor.manage'],
+  ['POST', /^\/api\/visit-invites\/[^/]+\/(revoke|approve|reject)$/, 'visitor.manage'],
   ['POST', /^\/api\/visits\/sms-test$/, OWNER],
   // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
   // the RBAC coverage gate fails for any route that falls through to the default.

@@ -136,15 +136,18 @@ app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, lim
   }
 });
 // Visitor self check-out: no login; the token (in the body) is the only credential.
-app.post('/api/visit-checkout', express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
-  try {
-    const out = await api.visitCheckoutPublic(req.body || {});
-    res.status(out.status).json(out.body);
-  } catch (error) {
-    console.error('visit checkout failed', error);
-    res.status(502).json({ ok: false, error: 'Check-out failed. Please try again, or see reception.' });
-  }
-});
+// Visitor pre-registration: no login; the invite token (in the body) is the only credential.
+for (const [path, fn, what] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out'], ['/api/visit-invite', 'visitInvitePublic', 'Registration']]) {
+  app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
+    try {
+      const out = await api[fn](req.body || {});
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error(`${path} failed`, error);
+      res.status(502).json({ ok: false, error: `${what} failed. Please try again, or contact your host.` });
+    }
+  });
+}
 app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));
 // Okta/Entra may PUT a group with its full member list: allow larger bodies here only.
 app.use('/scim', express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] }));

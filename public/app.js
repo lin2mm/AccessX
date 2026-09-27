@@ -654,6 +654,7 @@ async function loadVisitors(){
     $('#vs-arrivals').textContent+=s.checkoutLinks?' Visitors get a self check-out link with their code.':' Set PUBLIC_URL to send visitors a self check-out link.';
     $('#vs-sms').hidden=!s.smsAvailable;
     if(s.smsUsage)$('#vs-sms-usage').textContent=`Text messages this month (${s.smsUsage.period}): ${s.smsUsage.sent}${s.smsUsage.cap?` of ${s.smsUsage.cap}`:''} · ${s.smsUsage.segments} billed segment${s.smsUsage.segments===1?'':'s'}`;}
+  loadInvites();
   const DELIVERY={emailed:'code emailed',email_failed:'email failed',texted:'code texted',sms_failed:'text failed'};
   const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
@@ -668,6 +669,39 @@ async function loadVisitors(){
   }).join('');
   $('#vis-list').innerHTML=rows?`<table><tr><th>Visitor</th><th>Host</th><th>Doors</th><th>When (door time)</th><th>State</th><th></th></tr>${rows}</table>`:'<div class="meta">No visitors in this period.</div>';
 }
+const INV_TAG={open:'<span class="tag">waiting for visitor</span>',submitted:'<span class="tag o">needs approval</span>',used:'<span class="tag g">registered</span>',revoked:'<span class="tag">revoked</span>',expired:'<span class="tag">expired</span>',rejected:'<span class="tag">rejected</span>'};
+async function loadInvites(){
+  const r=await api('/api/visit-invites');
+  $('#inv-card').hidden=!(r.ok&&r.invites.length);
+  $('#vi-invite-l').hidden=!(r.ok&&r.available&&r.available.links);
+  if(!r.ok)return;
+  $('#inv-list').innerHTML=`<table><tr><th>Visitor</th><th>Sends to</th><th>Host</th><th>Doors</th><th>Window (door time)</th><th>State</th><th></th></tr>${r.invites.map(i=>{
+    const lock=i.lockIds[0];
+    const who=i.erased?'<span class="meta">details erased</span>':i.submittedName?`<b>${esc(i.submittedName)}</b><div class="meta">${esc(i.submittedCompany||'')}</div>`:'<span class="meta">—</span>';
+    const doors=i.lockIds.map(l=>{const d=DOORS.find(x=>Number(x.lockId)===Number(l));return esc(d?d.lockAlias:l);}).join(', ');
+    const acts=(i.status==='submitted'?`<button class="btn sm" data-iact="approve" data-iid="${esc(i.id)}">Approve</button> <button class="btn2 sm" data-iact="reject" data-iid="${esc(i.id)}">Reject</button> `:'')
+      +(['open','submitted'].includes(i.status)?`<button class="btn2 sm" data-iact="revoke" data-iid="${esc(i.id)}">Revoke</button>`:'');
+    return `<tr><td>${who}</td><td>${esc(i.contact||'')}</td><td>${esc(i.hostName||i.hostUserId)}</td><td>${doors}</td><td>${esc(atDoor(i.startAt,lock))}<div class="meta">→ ${esc(atDoor(i.endAt,lock))}${i.submittedStart?' · arriving '+esc(i.submittedStart.slice(11)):''}</div></td><td>${INV_TAG[i.status]||esc(i.status)}${i.requireApproval&&i.status==='open'?'<div class="meta">approval required</div>':''}</td><td style="white-space:nowrap">${acts}</td></tr>`;
+  }).join('')}</table>`;
+}
+$('#inv-list').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-iact]');if(!b)return;
+  const act=b.dataset.iact;
+  const q={approve:'Approve this registration? The code is sent to the invited address.',reject:'Reject this registration? The visitor gets no code.',revoke:'Revoke this invitation? The link stops working.'}[act];
+  if(!confirm(q))return;
+  b.disabled=true;
+  const r=await post(`/api/visit-invites/${encodeURIComponent(b.dataset.iid)}/${act}`,{});
+  if(!r.ok)alert(errText(r));
+  loadVisitors();loadAudit();
+});
+function renderInviteMode(){
+  const on=$('#vi-invite').checked;
+  $('#vi-name').required=!on;
+  $('#vi-name').closest('div').hidden=on;$('#vi-company').closest('div').hidden=on;
+  $('#vi-direct').hidden=on;$('#vi-invite-note').hidden=!on;
+  $('#vi-submit').textContent=on?'Send invitation':'Register & create code';
+}
+$('#vi-invite').addEventListener('change',renderInviteMode);
 $('#vi-doors').addEventListener('change',()=>{renderVisDoors();renderVisTimes();});
 $('#vi-date').addEventListener('change',renderVisTimes);
 $('#vi-from').addEventListener('change',renderVisTimes);
@@ -681,6 +715,20 @@ $('#vi-form').addEventListener('submit',async e=>{
   const body={visitorName:$('#vi-name').value,visitorEmail:$('#vi-email').value,visitorPhone:$('#vi-phone').value,sendSms:$('#vi-sms').checked&&!$('#vi-sms').disabled,company:$('#vi-company').value,hostUserId:$('#vi-host').value,lockIds,
     endLocal:until==='24:00'?nextDay(date)+'T00:00':`${date}T${until}`,sendCode:$('#vi-send').checked&&!$('#vi-send').disabled};
   if(from)body.startLocal=`${date}T${from}`;
+  if($('#vi-invite').checked){
+    const ib={visitorEmail:$('#vi-email').value||undefined,visitorPhone:$('#vi-phone').value||undefined,hostUserId:body.hostUserId,lockIds,endLocal:body.endLocal,
+      startLocal:body.startLocal||`${date}T${tzParts(new Date(),visTz()).time.slice(0,2)}:00`};
+    $('#vi-submit').disabled=true;
+    const r=await post('/api/visit-invites',ib);
+    $('#vi-submit').disabled=false;
+    if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
+    const i=r.invite;
+    out.innerHTML=`<div class="res y"><b>Invitation ${r.delivery==='delivered'?'sent to '+esc(i.contact):'created'}</b>${i.requireApproval?' — you approve the registration before the code goes out':''}
+      <div class="meta" style="margin-top:6px">Link (works once${r.delivery==='delivered'?', already sent':' — send it yourself'}): <span style="word-break:break-all">${esc(r.inviteUrl)}</span></div>
+      ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
+    $('#vi-email').value='';$('#vi-phone').value='';
+    loadVisitors();loadAudit();return;
+  }
   $('#vi-submit').disabled=true;
   const r=await post('/api/visits',body);
   $('#vi-submit').disabled=false;

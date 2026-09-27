@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Register your visit</title>
+<style>
+  :root{--fg:#1d2433;--muted:#667085;--line:#e4e7ec;--ok:#067647;--bad:#b42318;--btn:#1d4ed8}
+  *{box-sizing:border-box}
+  body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--fg);background:#f6f7f9;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px;max-width:420px;width:100%}
+  h1{font-size:20px;margin:0 0 8px}
+  .meta{color:var(--muted);font-size:14px}
+  button{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:var(--btn);color:#fff;font-size:17px;font-weight:600}
+  button:disabled{opacity:.6}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  ul{padding-left:20px;margin:6px 0}
+  label{display:block;font-size:14px;font-weight:600;margin-top:14px}
+  input,select{width:100%;margin-top:4px;padding:11px;border:1px solid var(--line);border-radius:8px;font-size:16px}
+</style>
+</head>
+<body>
+<main class="card" id="box" aria-live="polite">
+  <h1>Checking your link…</h1>
+</main>
+<script src="invite.js"></script>
+</body>
+</html>

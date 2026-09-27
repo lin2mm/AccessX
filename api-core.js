@@ -734,7 +734,9 @@ function createApi({
     return { ...next, ...(await deliveryInfo(ctx.tenantId)) };
   });
 
-  route('POST', /^\/api\/visits$/, async ctx => {
+  // Shared by reception (POST /api/visits), invite submissions (as the inviting
+  // operator, re-checked now) and invite approvals.
+  const createVisit = async ctx => {
     const snap = await ctx.snap();
     const body = ctx.body || {};
     // Tenant fleet first (a lock id from another tenant is "unknown", never "forbidden").
@@ -842,7 +844,8 @@ function createApi({
     const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null };
     // The codes are returned exactly once and never stored.
     return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings, checkoutUrl };
-  });
+  };
+  route('POST', /^\/api\/visits$/, createVisit);
 
   /**
    * End a visit: delete its codes where the door has a gateway, mark the rest
@@ -944,6 +947,199 @@ function createApi({
     } };
   }
 
+  // --- visitor pre-registration invites (docs/PREREGISTRATION.md) --------------------
+  const inviteHash = token => sha256Hex(`visit-invite|${token}`);
+  const inviteGone = { status: 404, body: { ok: false, error: 'This invitation is no longer valid. Please contact your host.' } };
+  const inviteState = (inv, now = Date.now()) => (['open', 'submitted'].includes(inv.status) && Date.parse(inv.expiresAt) <= now ? 'expired' : inv.status);
+  const siteIsSensitive = (snap, siteId) => snap.doorGroups.some(g => g.sensitive && g.siteId === siteId);
+  const inviteView = (snap, inv) => {
+    const host = snap.users.find(u => u.id === inv.hostUserId);
+    const site = snap.sites.find(x => x.id === inv.siteId);
+    return { ...inv, status: inviteState(inv), hostName: host ? host.name : null, siteName: site ? site.name : null };
+  };
+  async function loadInvite(ctx, id) {
+    const row = await store.sql.first('SELECT * FROM visit_invites WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    const inv = row ? visitors.rowToInvite(row) : null;
+    if (!inv || !visitVisible(ctx, inv)) throw new HttpError(404, 'not found');
+    return inv;
+  }
+  /** The body POST /api/visits would get for this invite. */
+  const inviteVisitBody = (inv, { name, company, startLocal }) => ({
+    visitorName: name, company, hostUserId: inv.hostUserId, lockIds: inv.lockIds,
+    ...(inv.channel === 'email' ? { visitorEmail: inv.contact, sendCode: true } : { visitorPhone: inv.contact, sendSms: true }),
+    startLocal: startLocal || inv.startLocal, endLocal: inv.endLocal, checkoutLink: true,
+  });
+  /**
+   * Create the visit and deliver the code to the invite's fixed address. The
+   * code is never shown to whoever holds the link: if delivery fails, the visit
+   * is cancelled again at once (its codes removed) and the caller gets an error.
+   */
+  async function visitFromInvite(ctx, inv, details) {
+    const saved = ctx.body;
+    ctx.body = inviteVisitBody(inv, details);
+    let out;
+    try { out = await createVisit(ctx); } finally { ctx.body = saved; }
+    if (/emailed|texted/.test(out.delivery)) return { ok: true, out };
+    await endVisit({ t: ctx.t, vendor: ctx.vendor, tenantId: ctx.tenantId, actor: ctx.actor }, { id: out.visit.id }, 'cancel').catch(error => log('cancel undelivered invite visit', error));
+    return { ok: false, reason: (out.warnings || []).find(w => /could not be sent|used up|not configured/.test(w)) || out.delivery };
+  }
+  async function finishInvite(tenantId, inv, visitId, actor, details, action) {
+    await store.tenant(tenantId).unit()
+      .raw("UPDATE visit_invites SET status = 'used', visit_id = ?, token_hash = NULL, submitted_name = ?, submitted_company = ?, submitted_start = ?, submitted_at = COALESCE(submitted_at, ?), decided_by = ? WHERE tenant_id = ? AND id = ?",
+        [visitId, details.name, details.company || null, details.startLocal || null, new Date().toISOString(), action === 'invite.approved' ? actor : null, tenantId, inv.id])
+      .audit(action, `${inv.id} visit ${visitId}`, actor).commit();
+  }
+
+  route('GET', /^\/api\/visit-invites$/, async ctx => {
+    const snap = await ctx.snap();
+    const rows = await store.sql.all('SELECT * FROM visit_invites WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 200', [ctx.tenantId]);
+    return { invites: rows.map(visitors.rowToInvite).filter(v => visitVisible(ctx, v)).map(v => inviteView(snap, v)), available: { links: Boolean(publicUrl), email: emailAvailable(), sms: smsAvailable() } };
+  });
+
+  route('POST', /^\/api\/visit-invites$/, async ctx => {
+    if (!publicUrl) throw new HttpError(400, 'invitations need PUBLIC_URL (the link the visitor opens)');
+    const body = ctx.body || {};
+    const c = visitors.inviteContact(body);
+    if (!c.ok) throw new HttpError(c.status, c.error);
+    if (c.channel === 'email' && !emailAvailable()) throw new HttpError(400, 'email is not configured on this server: invite by mobile number');
+    if (c.channel === 'sms' && !smsAvailable()) throw new HttpError(400, 'SMS is not configured on this server: invite by email');
+    const snap = await ctx.snap();
+    const lockIds = Array.isArray(body.lockIds) ? [...new Set(body.lockIds.map(Number))] : [];
+    for (const id of lockIds.slice(0, visitors.LIMITS.maxDoors)) if (Number.isFinite(id)) await ctx.requireLock(id);
+    if (!body.startLocal) throw new HttpError(400, 'startLocal is required for an invitation (time at the door)');
+    // Same checks as a visit, now (and again when the visitor registers).
+    const plan = visitors.planVisit(snap, { ...body, visitorName: 'invited visitor', visitorEmail: undefined, visitorPhone: undefined },
+      { sensitive: sensitiveLockSet(snap), canSeeLock: id => ctx.scope.lock(id), canSeeUser: u => ctx.scope.userVisible(u) });
+    if (!plan.ok) { const { ok: _ok, status, error, ...rest } = plan; throw new HttpError(status, error, rest); }
+    const v = plan.visit;
+    const sensitiveSite = siteIsSensitive(snap, v.siteId);
+    let requireApproval = body.requireApproval === undefined ? sensitiveSite : body.requireApproval === true;
+    if (!requireApproval && sensitiveSite && !(ctx.operator && ctx.operator.role === 'r_owner')) {
+      throw new HttpError(403, 'this site has sensitive doors: registrations wait for reception to approve them (only an owner can switch that off)');
+    }
+    const open = await store.sql.first("SELECT COUNT(*) AS n FROM visit_invites WHERE tenant_id = ? AND status IN ('open', 'submitted') AND expires_at > ?", [ctx.tenantId, new Date().toISOString()]);
+    if (Number(open.n) >= visitors.INVITE.maxOpen) throw new HttpError(429, `at most ${visitors.INVITE.maxOpen} open invitations: revoke unused ones first`);
+    const id = policy.uid('inv');
+    const token = randomB64url(18);
+    const now = new Date().toISOString();
+    await ctx.t.unit().raw(
+      'INSERT INTO visit_invites (tenant_id, id, token_hash, host_user_id, site_id, lock_ids, start_local, end_local, start_at, end_at, channel, contact, require_approval, status, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, inviteHash(token), v.hostUserId, v.siteId, JSON.stringify(v.lockIds), String(body.startLocal), String(body.endLocal), v.startAt, v.endAt, c.channel, c.contact, requireApproval ? 1 : 0, 'open', ctx.actor, now, v.endAt])
+      // No personal data in the audit chain (the address stays in the invite row, erasable).
+      .audit('invite.create', `${id} host ${v.hostUserId} locks ${v.lockIds.join(',')} ${v.startAt}..${v.endAt} via ${c.channel} approval=${requireApproval ? 'yes' : 'no'}`, ctx.actor).commit();
+    const inviteUrl = `${publicUrl.replace(/\/+$/, '')}/invite#${token}`;
+    const tz = plan.timeZone;
+    const label = iso => policy.localParts(new Date(iso), tz).label.replace(/ \S+$/, '');
+    const site = snap.sites.find(x => x.id === v.siteId);
+    const msg = visitors.inviteMessage({ channel: c.channel, hostName: plan.host.name || 'Your host', siteName: site ? site.name : null, url: inviteUrl, from: label(v.startAt), until: label(v.endAt), tenantName: snap.tenant && snap.tenant.name });
+    const delivery = c.channel === 'email' ? await alerts.emailTo(c.contact, msg, `invite-${id}`) : await sendSms(ctx.tenantId, c.contact, msg);
+    const warnings = [...plan.warnings];
+    if (delivery !== 'delivered') warnings.push(`the invitation could not be sent (${delivery}): send the link yourself`);
+    const row = await store.sql.first('SELECT * FROM visit_invites WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    // The link is shown once, to the operator who made it (the code still goes only to the fixed address).
+    return { invite: inviteView(snap, visitors.rowToInvite(row)), inviteUrl, delivery, warnings };
+  });
+
+  route('POST', /^\/api\/visit-invites\/([^/]+)\/(revoke|approve|reject)$/, async (ctx, [id, verb]) => {
+    const inv = await loadInvite(ctx, id);
+    const state = inviteState(inv);
+    if (verb === 'revoke') {
+      if (!['open', 'submitted'].includes(state)) throw new HttpError(409, `invitation is ${state}`);
+      await ctx.t.unit().raw("UPDATE visit_invites SET status = 'revoked', token_hash = NULL, decided_by = ? WHERE tenant_id = ? AND id = ?", [ctx.actor, ctx.tenantId, id])
+        .audit('invite.revoke', id, ctx.actor).commit();
+      return { invite: inviteView(await ctx.snap(), { ...inv, status: 'revoked', decidedBy: ctx.actor }) };
+    }
+    if (state !== 'submitted') throw new HttpError(409, `invitation is ${state}, not waiting for approval`);
+    if (verb === 'reject') {
+      await ctx.t.unit().raw("UPDATE visit_invites SET status = 'rejected', token_hash = NULL, decided_by = ? WHERE tenant_id = ? AND id = ?", [ctx.actor, ctx.tenantId, id])
+        .audit('invite.rejected', id, ctx.actor).commit();
+      return { invite: inviteView(await ctx.snap(), { ...inv, status: 'rejected', decidedBy: ctx.actor }) };
+    }
+    const details = { name: inv.submittedName, company: inv.submittedCompany, startLocal: inv.submittedStart };
+    const r = await visitFromInvite(ctx, inv, details);
+    if (!r.ok) throw new HttpError(502, `the code could not be delivered (${r.reason}); the visit was cancelled again`);
+    await finishInvite(ctx.tenantId, inv, r.out.visit.id, ctx.actor, details, 'invite.approved');
+    return { invite: inviteView(await ctx.snap(), { ...inv, status: 'used', visitId: r.out.visit.id, decidedBy: ctx.actor }), visit: r.out.visit, delivery: r.out.delivery };
+  });
+
+  async function inviteByToken(token) {
+    if (!validToken(token)) return null;
+    const row = await store.sql.first("SELECT * FROM visit_invites WHERE token_hash = ? AND status = 'open' AND expires_at > ?", [inviteHash(token), new Date().toISOString()]);
+    if (!row || row.attempts >= visitors.INVITE.maxAttempts) return null;
+    return row;
+  }
+
+  /** Inside the tenant's queue: the visitor's registration. */
+  async function inviteSubmit(tenantId, job) {
+    const row = await inviteByToken(job.token);
+    if (!row || row.tenant_id !== tenantId) return { ok: false, gone: true };
+    const inv = visitors.rowToInvite(row);
+    await store.sql.batch([{ sql: 'UPDATE visit_invites SET attempts = attempts + 1 WHERE tenant_id = ? AND id = ?', params: [tenantId, inv.id] }]);
+    const details = { name: String(job.name || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 100), company: String(job.company || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 100) || null, startLocal: null };
+    if (!details.name) return { ok: false, error: 'Please enter your name.' };
+    if (job.startLocal) {
+      const s = String(job.startLocal);
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s) || s < inv.startLocal || s >= inv.endLocal) return { ok: false, error: 'Please choose an arrival time inside the invitation.' };
+      details.startLocal = s;
+    }
+    const t = store.tenant(tenantId);
+    if (inv.requireApproval) {
+      await t.unit().raw("UPDATE visit_invites SET status = 'submitted', submitted_name = ?, submitted_company = ?, submitted_start = ?, submitted_at = ? WHERE tenant_id = ? AND id = ? AND status = 'open'",
+        [details.name, details.company, details.startLocal, new Date().toISOString(), tenantId, inv.id])
+        .audit('invite.submitted', inv.id, 'visitor').commit();
+      if (alerts) {
+        await alerts.send(tenantId, 'approval_requested', {
+          title: 'Visitor registration waiting', text: 'A visitor registered through an invitation to a site with sensitive doors. Approve or reject it under Visitors → Invitations.',
+          facts: [['Invitation', inv.id]], path: '/#visitors',
+        });
+      }
+      return { ok: true, pending: true, sentTo: visitors.maskContact(inv.channel, inv.contact) };
+    }
+    // Act as the operator who invited, with their CURRENT rights (they may have lost them since).
+    const operator = await auth.operatorFor(tenantId, inv.createdBy);
+    const snap = await t.snapshot();
+    const refuse = async reason => {
+      await t.unit().audit('invite.failed', `${inv.id}: ${String(reason).slice(0, 160)}`, 'visitor').commit();
+      return { ok: false, error: 'This invitation can no longer be used. Please contact your host.' };
+    };
+    if (!operator || !rbac.hasPermission(snap, operator, 'visitor.manage')) return refuse('the inviting operator no longer manages visitors');
+    const ctx = buildCtx({ t, vendor: await resolveVendor(tenantId), tenantId, operator, body: {}, query: new URLSearchParams(), method: 'POST', path: '/api/visits' });
+    ctx.scope = scopeFor(snap, operator);
+    ctx.actor = `invite:${inv.id}`;
+    let r;
+    try { r = await visitFromInvite(ctx, inv, details); } catch (error) { return refuse(error.message || error); }
+    if (!r.ok) {
+      await t.unit().audit('invite.failed', `${inv.id}: code not delivered (${String(r.reason).slice(0, 120)}), visit cancelled`, 'visitor').commit();
+      return { ok: false, error: 'We could not send your code. Please try again later or contact your host.' };
+    }
+    await finishInvite(tenantId, inv, r.out.visit.id, ctx.actor, details, 'invite.used');
+    return { ok: true, sentTo: visitors.maskContact(inv.channel, inv.contact) };
+  }
+
+  /** POST /api/visit-invite {token, action: 'status' | 'submit', name, company, startLocal} — no login. */
+  async function visitInvitePublic(body, { dispatch = null } = {}) {
+    await whenReady();
+    const row = await inviteByToken(body && body.token);
+    if (!row) return inviteGone;
+    const tenantId = row.tenant_id;
+    const inv = visitors.rowToInvite(row);
+    if (body.action === 'submit') {
+      const job = { type: 'invite_submit', token: body.token, name: body.name, company: body.company, startLocal: body.startLocal };
+      const r = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+      if (r && r.gone) return inviteGone;
+      return { status: r && r.ok ? 200 : 400, body: r && r.ok ? { ok: true, pending: Boolean(r.pending), sentTo: r.sentTo } : { ok: false, error: (r && r.error) || 'Registration failed.' } };
+    }
+    const snap = await store.tenant(tenantId).snapshot();
+    const site = snap.sites.find(x => x.id === inv.siteId);
+    const host = snap.users.find(u => u.id === inv.hostUserId);
+    const locks = await (await resolveVendor(tenantId)).listLocks().catch(() => []);
+    return { status: 200, body: {
+      ok: true, site: site ? site.name : null, host: host ? String(host.name || '').split(' ')[0] : null,
+      doors: inv.lockIds.map(l => doorName(locks, l)), timeZone: policy.siteTimeZone(snap, inv.siteId),
+      startLocal: inv.startLocal, endLocal: inv.endLocal, sendTo: visitors.maskContact(inv.channel, inv.contact), requireApproval: inv.requireApproval,
+    } };
+  }
+
   // Right to erasure: the visit (who/when/which doors, by id) stays; the person's details go.
   route('POST', /^\/api\/visits\/([^/]+)\/erase$/, async (ctx, [id]) => {
     const v = await loadVisit(ctx, id);
@@ -952,6 +1148,7 @@ function createApi({
     await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, checkout_token_hash = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
     if (alerts) await alerts.forget(ctx.tenantId, id);
+    await store.sql.batch([{ sql: 'UPDATE visit_invites SET contact = NULL, submitted_name = NULL, submitted_company = NULL, erased_at = ? WHERE tenant_id = ? AND visit_id = ?', params: [at, ctx.tenantId, id] }]);
     return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, visitorPhone: null, company: null, erased: true, erasedAt: at }) };
   });
 
@@ -1066,6 +1263,7 @@ function createApi({
     await whenReady();
     if (job && job.type === 'alarm') return recordAlarm(tenantId, job);
     if (job && job.type === 'checkout') return visitorCheckout(tenantId, job);
+    if (job && job.type === 'invite_submit') return inviteSubmit(tenantId, job);
     return recordArrival(tenantId, job);
   }
 
@@ -2074,6 +2272,11 @@ function createApi({
           .audit('visits.erased', `${Number(due.n)} visit(s) ended more than ${retentionDays} days ago`, 'system').commit();
         out.visitsErased = Number(due.n);
       }
+      // Invitations: the address and what the visitor typed go after the same period.
+      await store.sql.batch([
+        { sql: "UPDATE visit_invites SET status = 'expired', token_hash = NULL WHERE tenant_id = ? AND status IN ('open', 'submitted') AND expires_at <= ?", params: [tenantId, new Date().toISOString()] },
+        { sql: 'UPDATE visit_invites SET contact = NULL, submitted_name = NULL, submitted_company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND expires_at < ?', params: [new Date().toISOString(), tenantId, cutoff] },
+      ]);
     } catch (error) {
       log(`maintenance ${tenantId} visitor retention failed`, error);
     }
@@ -2105,7 +2308,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };
