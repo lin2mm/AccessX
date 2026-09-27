@@ -59,6 +59,7 @@ const COLLECTION_PERMS = {
 
 // [method, pattern, permission]. First match wins.
 const ROUTES = [
+  ['GET', /^\/api\/healthz$/, PUBLIC], // liveness for uptime monitors (R14)
   ['GET', /^\/api\/auth$/, PUBLIC],
   ['GET', /^\/api\/auth\/session$/, PUBLIC],
   ['POST', /^\/api\/auth\/(login|logout)$/, PUBLIC],
@@ -78,6 +79,7 @@ const ROUTES = [
   ['GET', /^\/api\/platform\/secrets$/, PLATFORM],
   ['POST', /^\/api\/platform\/secrets\/reseal$/, PLATFORM],
   ['GET', /^\/api\/platform\/usage$/, PLATFORM],
+  ['GET', /^\/api\/platform\/doctor$/, PLATFORM],
   ['GET', /^\/api\/platform\/billing$/, PLATFORM],
   ['POST', /^\/api\/platform\/billing\/problems\/[^/]+\/resolve$/, PLATFORM],
   ['PUT', /^\/api\/platform\/tenants\/[^/]+\/limits$/, PLATFORM],

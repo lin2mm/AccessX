@@ -10,6 +10,7 @@ import { createStore } from './store/repo.js';
 import { seedTenant } from './store/bootstrap.js';
 import { createAuthenticator, DEFAULT_TENANT } from './auth-core.js';
 import { createApi } from './api-core.js';
+import { checkConfig, resolveOpenReads } from './doctor-core.js';
 import { createDemoVendor, staticMirror } from './vendor-demo.js';
 import { createVendorAccounts } from './vendor-accounts.js';
 import { createAuditOps } from './audit-ops.js';
@@ -65,12 +66,16 @@ function apiFor(env) {
   const emptyVendor = createDemoVendor({ locks: [] });
   const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? demoVendor : emptyVendor);
 
+  const openReads = resolveOpenReads(env);
+  if (openReads.refused) console.error('AUTH_OPEN_READS=1 ignored: TTLOCK_CLIENT_ID is set, anonymous reads stay off');
   const auth = createAuthenticator({
     store,
     adminToken: env.ADMIN_TOKEN || '',
     operatorsJson: env.OPERATORS || '',
     platformToken: env.PLATFORM_TOKEN || '',
-    openReads: env.AUTH_OPEN_READS !== '0',
+    // Explicit opt-in (wrangler.jsonc vars sets it for the public demo), and
+    // refused once real-lock credentials exist. `npm run doctor` flags it.
+    openReads: openReads.open,
   });
 
   // First request after migration 0003: move the old JSON blob into rows.
@@ -99,7 +104,7 @@ function apiFor(env) {
   const billingConfig = billingConfigFromEnv(env);
   if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
   const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }

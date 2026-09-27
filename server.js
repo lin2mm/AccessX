@@ -77,12 +77,17 @@ const vendorAccounts = createVendorAccounts({
   onNeedsReconnect: (tenantId, info) => alerts.send(tenantId, 'vendor_needs_reconnect', needsReconnectMessage(info)),
 });
 
+const { checkConfig, resolveOpenReads } = require('./doctor-core');
+const startupEnv = { ...process.env };
+// Anonymous read-only (the public demo) is refused once real locks are configured.
+const openReads = resolveOpenReads(process.env, { demoDefault: tt.demo });
+if (openReads.refused) console.error('AUTH_OPEN_READS=1 ignored: TTLOCK_CLIENT_ID is set, anonymous reads stay off');
 const auth = createAuthenticator({
   store,
   adminToken: process.env.ADMIN_TOKEN || '',
   operatorsJson: process.env.OPERATORS || '',
   platformToken: process.env.PLATFORM_TOKEN || '',
-  openReads: process.env.AUTH_OPEN_READS === undefined ? tt.demo : process.env.AUTH_OPEN_READS === '1',
+  openReads: openReads.open,
 });
 // Signed audit anchors (AUDIT_SIGNING_KEY, Ed25519 JWK) + retention.
 const alerts = createAlerts({ store, secretsKey: process.env.SECRETS_KEY || '', allowHttp: process.env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: process.env.PUBLIC_URL || '', email: emailConfigFromEnv(process.env), log: (...a) => console.error(...a) });
@@ -101,6 +106,7 @@ if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABL
 const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
 const api = createApi({
   store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing,
+  doctor: () => checkConfig(startupEnv, { runtime: 'node' }), // the settings this process started with
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',

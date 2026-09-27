@@ -18,6 +18,11 @@ const lockEvents = require('./lock-events-core');
 const health = require('./lock-health-core');
 const onboarding = require('./onboarding-core');
 const billingCore = require('./billing-core');
+const doctorCore = require('./doctor-core');
+// The newest migration this code needs. GET /api/healthz answers 503 until the
+// database has it ("always migrate before deploying"). A test keeps it equal
+// to the last file in migrations/.
+const SCHEMA_VERSION = '0021_billing_ops';
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -116,7 +121,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null,
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -2419,6 +2424,42 @@ function createApi({
     return Object.keys(out).length ? out : null;
   }
 
+  /**
+   * Liveness for uptime monitors: the database answers and has the schema this
+   * code expects. Public and cheap; says nothing about tenants or settings.
+   */
+  async function liveness() {
+    const t0 = Date.now();
+    let applied = null;
+    try {
+      await whenReady();
+      for (const table of ['d1_migrations', 'schema_migrations']) {
+        const r = await store.sql.first(`SELECT name FROM ${table} ORDER BY name DESC LIMIT 1`).catch(() => null);
+        if (r && r.name) { applied = String(r.name).replace(/\.sql$/, ''); break; }
+      }
+      if (!applied) await store.sql.first('SELECT 1 AS ok');
+    } catch (error) {
+      log('health: database', error && error.message);
+      return { status: 503, body: { ok: false, db: 'unreachable' }, headers: { 'cache-control': 'no-store' } };
+    }
+    const behind = applied !== null && applied < SCHEMA_VERSION;
+    const body = { ok: !behind, db: 'ok', schema: { expected: SCHEMA_VERSION, applied }, ms: Date.now() - t0, at: new Date().toISOString() };
+    if (behind) body.error = `database is behind: apply migrations up to ${SCHEMA_VERSION}`;
+    return { status: behind ? 503 : 200, body, headers: { 'cache-control': 'no-store' } };
+  }
+  // Answered in handle() before sign-in and tenant lookup; listed here so the
+  // route inventory (and its RBAC rule) stays complete.
+  route('GET', /^\/api\/healthz$/, async () => (await liveness()).body);
+
+  // Platform: the production checks of `npm run doctor`, run where the secret
+  // values actually are (a Worker's secrets are invisible to the CLI).
+  // Findings name settings, never their values.
+  route('GET', /^\/api\/platform\/doctor$/, async () => {
+    if (!doctor) throw new HttpError(501, 'this server was started without the configuration check');
+    const findings = await doctor();
+    return { doctor: { ...doctorCore.summary(findings), findings } };
+  });
+
   // Platform: what needs a human in billing (open problems, who is behind).
   route('GET', /^\/api\/platform\/billing$/, async ctx => {
     if (!billingOn()) return { billing: { enabled: false } };
@@ -2744,6 +2785,7 @@ function createApi({
     req.headers = req.headers || {};
     try {
       if (path === '/api/auth' && method === 'GET') return { status: 200, body: { ok: true, ...auth.status() } };
+      if (path === '/api/healthz' && method === 'GET') return await liveness();
       await whenReady();
       const sessionRoute = sessionRoutes[`${method} ${path}`];
       if (sessionRoute) {
@@ -2912,4 +2954,4 @@ function createApi({
   return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
-module.exports = { createApi, scopeFor, createDetail, HttpError };
+module.exports = { createApi, scopeFor, createDetail, HttpError, SCHEMA_VERSION };

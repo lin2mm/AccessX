@@ -15,7 +15,9 @@
     "audit:keygen": "node scripts/audit-keygen.js",
     "audit:verify": "node scripts/verify-audit-export.js",
     "ttlock:check": "node scripts/ttlock-check.js",
-    "load:scim": "node support/scim-load.js"
+    "load:scim": "node support/scim-load.js",
+    "doctor": "node scripts/doctor.js",
+    "backup": "node scripts/backup.js"
   },
   "keywords": [],
   "author": "",
