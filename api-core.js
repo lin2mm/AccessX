@@ -2158,7 +2158,7 @@ function createApi({
       params: [id, s.email, s.company, s.name, s.timeZone, sha256Hex(token), ipk, capped ? 'skipped: address limit' : null, new Date(now).toISOString(), new Date(now + D.linkHours * 3600e3).toISOString()],
     }]);
     if (capped) return sent;
-    const link = `${publicUrl.replace(/\/+$/, '')}/signup.html#t=${token}`;
+    const link = `${publicUrl.replace(/\/+$/, '')}/signup#t=${token}`;
     const delivery = await alerts.emailTo(s.email, signupCore.verificationEmail({ ...s, link, hours: D.linkHours }), `signup-${id}`);
     await store.sql.batch([{ sql: 'UPDATE signups SET sent = ? WHERE id = ?', params: [String(delivery).slice(0, 200), id] }]);
     if (delivery !== 'delivered') {
@@ -2191,7 +2191,6 @@ function createApi({
     await store.tenant(tenantId).unit().raw(stmt.sql, stmt.params)
       .audit('operator.create', `${op.id} role=r_owner sites=* (self-service signup; email ${row.email} verified by link)`, 'signup').commit();
     await store.sql.batch([{ sql: 'UPDATE signups SET tenant_id = ? WHERE id = ?', params: [tenantId, row.id] }]);
-    log('signup: tenant created', tenantId);
     return { status: 200, body: { ok: true, tenant: { id: tenantId, name: row.company }, owner: { id: op.id, name: row.name, token: ownerToken }, billing: billingOn() } };
   }
 

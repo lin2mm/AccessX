@@ -1,6 +1,6 @@
 // Self-service signup (docs/21-SIGNUP.md).
-//  /signup.html           → form → "check your inbox"
-//  /signup.html#t=<token> → the emailed link: creates the account, shows the
+//  /signup                → form → "check your inbox"
+//  /signup#t=<token>      → the emailed link: creates the account, shows the
 //                           owner's sign-in key ONCE, then signs in.
 // The token is in the fragment, so browsers never send it to a server (no
 // access logs, no Referer); it travels only in a POST body.
@@ -49,14 +49,14 @@
       go.disabled = true; go.textContent = 'Sending…'; err.textContent = '';
       const r = await post('/api/signup', { company: v('company'), name: v('name'), email: v('email'), timeZone: v('tz'), website: v('website'), acceptTerms: document.getElementById('terms').checked });
       if (!r.ok) { go.disabled = false; go.textContent = 'Email me a confirmation link'; err.textContent = r.error || 'Something went wrong. Please try again.'; return; }
-      show(`<h1 class="ok">Check your inbox</h1><p>${esc(r.message)}</p><p class="meta">Sent to <b>${esc(v('email'))}</b>. Nothing arrived after a few minutes? Check spam, or <a href="/signup.html">try again</a>.</p>`);
+      show(`<h1 class="ok">Check your inbox</h1><p>${esc(r.message)}</p><p class="meta">Sent to <b>${esc(v('email'))}</b>. Nothing arrived after a few minutes? Check spam, or <a href="/signup">try again</a>.</p>`);
     });
   }
 
   async function verify(t) {
     show('<h1>Creating your account…</h1>');
     const r = await post('/api/signup/verify', { token: t });
-    if (!r.ok) return show(`<h1 class="bad">Link not valid</h1><p>${esc(r.error)}</p><p class="meta"><a href="/signup.html">Start again</a></p>`);
+    if (!r.ok) return show(`<h1 class="bad">Link not valid</h1><p>${esc(r.error)}</p><p class="meta"><a href="/signup">Start again</a></p>`);
     const key = r.owner.token;
     show(`<h1 class="ok">${esc(r.tenant.name)} is ready</h1>
       <p>This is your <b>sign-in key</b>. It is shown <b>only now</b>: save it in your password manager.</p>
@@ -76,7 +76,13 @@
       a.download = 'accessx-sign-in-key.txt';
       document.body.appendChild(a); a.click(); a.remove();
     });
-    document.getElementById('saved').addEventListener('change', e => { document.getElementById('open').disabled = !e.target.checked; });
+    // The key cannot be shown again: warn before leaving until it is saved.
+    const guard = e => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', guard);
+    document.getElementById('saved').addEventListener('change', e => {
+      document.getElementById('open').disabled = !e.target.checked;
+      if (e.target.checked) window.removeEventListener('beforeunload', guard); else window.addEventListener('beforeunload', guard);
+    });
     document.getElementById('open').addEventListener('click', async e => {
       e.target.disabled = true; e.target.textContent = 'Signing in…';
       const s = await post('/api/auth/login', { token: key });

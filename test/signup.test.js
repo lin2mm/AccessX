@@ -27,7 +27,7 @@ async function setup(t, { statuses, env = {} } = {}) {
 const post = (api, path, body) => fetch(`${api.base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   .then(async r => ({ status: r.status, body: await r.json(), headers: r.headers }));
 const form = (extra = {}) => ({ company: 'Harbour Studio', name: 'Maya Chen', email: 'Maya@Harbour.example', timeZone: 'Australia/Sydney', acceptTerms: true, ...extra });
-const linkToken = mail => (mail.text.match(/signup\.html#t=([A-Za-z0-9_-]+)/) || [])[1];
+const linkToken = mail => (mail.text.match(/signup#t=([A-Za-z0-9_-]+)/) || [])[1];
 
 test('signup is off unless SIGNUP_ENABLED=1 with email and PUBLIC_URL', async t => {
   const off = await boot({ ADMIN_TOKEN: 'owner-token' });
@@ -53,7 +53,7 @@ test('signup → emailed link → a new tenant with its owner; the link works on
   assert.match(mail.got[0].subject, /Harbour Studio/);
   const token = linkToken(mail.got[0]);
   assert.ok(token && token.length >= 40, mail.got[0].text);
-  assert.match(mail.got[0].text, /^https:\/\/doors\.example\/signup\.html#t=/m);
+  assert.match(mail.got[0].text, /^https:\/\/doors\.example\/signup#t=/m);
 
   // Nothing exists until the link is opened.
   const before = (await api.call('GET', '/api/tenants', { token: PLATFORM })).body.tenants.length;

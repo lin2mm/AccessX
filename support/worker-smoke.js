@@ -27,6 +27,21 @@ const checks = [];
 const check = (name, fn) => checks.push([name, fn]);
 const { OWNER, GYM, AUDIT, PLATFORM } = process.env;
 
+// R15: remember where the wrangler log ends now; any new "[ERROR]" line
+// (console.error in the Worker, cron failures included) fails the run.
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const wranglerLog = (() => {
+  if (process.env.WRANGLER_LOG) return process.env.WRANGLER_LOG;
+  const dir = path.join(os.homedir(), '.config', '.wrangler', 'logs');
+  try {
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.log')).map(f => path.join(dir, f));
+    return files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] || null;
+  } catch { return null; }
+})();
+const logStart = wranglerLog && fs.existsSync(wranglerLog) ? fs.statSync(wranglerLog).size : 0;
+
 check('public auth status', async () => {
   const r = await call('GET', '/api/auth');
   assert.equal(r.status, 200);
@@ -252,6 +267,47 @@ check('writes run in the tenant Durable Object (serialized), reads do not', asyn
   assert.equal(bad.status, 401, 'unknown credentials are rejected at the edge, never reach a DO');
   assert.equal(bad.headers.get('x-accessx-writer'), null);
 });
+check('self-service signup: emailed link → new tenant + owner (or cleanly off)', async () => {
+  const info = await call('GET', '/api/signup');
+  assert.equal(info.status, 200);
+  if (!info.body.enabled || !process.env.MAIL_PORT) {
+    if (!info.body.enabled) assert.equal((await call('POST', '/api/signup', null, { company: 'X', name: 'Y', email: 'y@x.example', acceptTerms: true })).status, 404);
+    console.log('     (signup round trip skipped: needs SIGNUP_ENABLED=1, EMAIL_API_BASE=http://127.0.0.1:$MAIL_PORT and MAIL_PORT)');
+    return;
+  }
+  const http = require('node:http');
+  const got = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { got.push(JSON.parse(b || '{}')); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"id":"e"}'); }); });
+  await new Promise(r => srv.listen(Number(process.env.MAIL_PORT), '127.0.0.1', r));
+  try {
+    const email = `smoke-${Date.now().toString(36)}@harbour.example`;
+    const r = await raw('POST', '/api/signup', { body: { company: 'Smoke Harbour', name: 'Smoke Owner', email, timeZone: 'Australia/Sydney', acceptTerms: true } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.headers.get('cache-control'), 'no-store');
+    assert.equal(got.length, 1);
+    const token = (got[0].text.match(/#t=([A-Za-z0-9_-]+)/) || [])[1];
+    const v = await raw('POST', '/api/signup/verify', { body: { token } });
+    assert.equal(v.status, 200, JSON.stringify(v.body));
+    const me = await call('GET', '/api/me', v.body.owner.token);
+    assert.equal(me.body.tenant.id, v.body.tenant.id);
+    assert.equal((await call('GET', '/api/users', v.body.owner.token)).body.users.length, 0);
+    assert.equal((await raw('POST', '/api/signup/verify', { body: { token } })).status, 410);
+    const list = await call('GET', '/api/platform/signups', PLATFORM);
+    assert.equal(list.body.signups.recent[0].tenantId, v.body.tenant.id);
+  } finally { srv.close(); }
+});
+check('demo reset through the tenant Durable Object restores the seed and keeps the audit chain', async () => {
+  const before = (await call('GET', '/api/audit/verify', OWNER)).body.verification;
+  assert.equal((await call('POST', '/api/platform/tenants/t_default/demo-reset', PLATFORM, {})).status, 400);
+  const r = await raw('POST', '/api/platform/tenants/t_default/demo-reset', { token: PLATFORM, body: { confirm: 't_default' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const users = (await call('GET', '/api/users', OWNER)).body.users;
+  assert.equal(users.length, r.body.reset.counts.users);
+  assert.ok(!users.some(u => u.name.startsWith('<img')), 'smoke-created users are gone');
+  const after = (await call('GET', '/api/audit/verify', OWNER)).body.verification;
+  assert.equal(after.ok, true);
+  assert.ok(after.count > before.count);
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });
@@ -261,6 +317,18 @@ check('wrong token is rejected', async () => {
   for (const [name, fn] of checks) {
     try { await fn(); console.log(`ok   ${name}`); } catch (error) { failed++; console.log(`FAIL ${name}\n     ${error.message}`); }
   }
+  let logFailed = false;
+  if (wranglerLog && fs.existsSync(wranglerLog)) {
+    await new Promise(r => setTimeout(r, 500)); // let wrangler flush
+    const fd = fs.openSync(wranglerLog, 'r');
+    const size = fs.statSync(wranglerLog).size;
+    const buf = Buffer.alloc(Math.max(0, size - logStart));
+    fs.readSync(fd, buf, 0, buf.length, logStart);
+    fs.closeSync(fd);
+    const errors = buf.toString('utf8').split('\n').filter(l => /\[ERROR\]/.test(l));
+    if (errors.length) { logFailed = true; console.log(`FAIL wrangler log has ${errors.length} new [ERROR] line(s) (${wranglerLog}):\n     ${errors.slice(0, 5).join('\n     ')}`); }
+    else console.log(`ok   wrangler log: no new [ERROR] lines (${path.basename(wranglerLog)})`);
+  } else console.log('     (wrangler log not found: set WRANGLER_LOG to check it for errors)');
   console.log(`${checks.length - failed}/${checks.length} passed`);
-  process.exit(failed ? 1 : 0);
+  process.exit(failed || logFailed ? 1 : 0);
 })();
