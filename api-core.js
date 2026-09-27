@@ -21,7 +21,7 @@ const { sha256Hex } = require('./audit-core');
 const { operatorStatement } = require('./store/repo');
 const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
 const { createOidcClient, randomB64url } = require('./oidc-core');
-const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { encryptSecret, decryptSecret, codeMac, codeMacs } = require('./secrets-core');
 const { createSecretsRotation } = require('./secrets-rotation');
 const { revocationReport } = require('./reports-core');
 const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
@@ -111,7 +111,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null,
+  secretsKey = '', ttlockNotifySecret = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -676,8 +676,10 @@ function createApi({
     return { hosts: snap.users.filter(u => !u.suspended && ctx.scope.userVisible(u)).map(u => ({ id: u.id, name: u.name })).sort((a, b) => String(a.name).localeCompare(String(b.name))) };
   });
 
+  // Arrival detection needs SECRETS_KEY (code fingerprints); the TTLock callback is optional (else polling).
+  const arrivalInfo = () => ({ enabled: Boolean(secretsKey), callback: Boolean(ttlockNotifySecret) });
   route('GET', /^\/api\/visits\/settings$/, async ctx => ({
-    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), limits: visitors.LIMITS,
+    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo(),
   }));
 
   route('PUT', /^\/api\/visits\/settings$/, async ctx => {
@@ -686,8 +688,8 @@ function createApi({
     const next = { ...visitors.settingsOf((await store.tenantSettings(ctx.tenantId)) || {}), ...v.value };
     // json_set: only this key, a concurrent SSO/alerts change is never overwritten.
     await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.visitors', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
-      .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays}`, ctx.actor).commit();
-    return { ...next, emailAvailable: emailAvailable(), limits: visitors.LIMITS };
+      .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays} notifyHost=${next.notifyHost}`, ctx.actor).commit();
+    return { ...next, emailAvailable: emailAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo() };
   });
 
   route('POST', /^\/api\/visits$/, async ctx => {
@@ -729,9 +731,15 @@ function createApi({
     }
     const now = new Date().toISOString();
     const host = plan.host;
+    // Keyed fingerprints (not the codes) so the first unlock can be recognised as the arrival.
+    const macs = {};
+    for (const { lockId, out } of created) {
+      const m = await codeMac(secretsKey, { tenantId: ctx.tenantId, lockId, code: out.keyboardPwd }).catch(() => null);
+      if (m) macs[lockId] = m;
+    }
     const uow = ctx.t.unit().raw(
-      'INSERT INTO visits (tenant_id, id, visitor_name, visitor_email, company, host_user_id, site_id, lock_ids, start_at, end_at, status, delivery, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [ctx.tenantId, id, v.visitorName, v.visitorEmail, v.company, v.hostUserId, v.siteId, JSON.stringify(v.lockIds), v.startAt, v.endAt, 'scheduled', 'shown', ctx.actor, now]);
+      'INSERT INTO visits (tenant_id, id, visitor_name, visitor_email, company, host_user_id, site_id, lock_ids, start_at, end_at, status, delivery, created_by, created_at, code_macs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, v.visitorName, v.visitorEmail, v.company, v.hostUserId, v.siteId, JSON.stringify(v.lockIds), v.startAt, v.endAt, 'scheduled', 'shown', ctx.actor, now, Object.keys(macs).length ? JSON.stringify(macs) : null]);
     const entries = created.map(({ lockId, out }) => {
       const entry = creds.register({ credentials: [] }, {
         type: 'passcode', userId: v.hostUserId, lockId, siteId: v.siteId, startAt: v.startAt, endAt: v.endAt,
@@ -764,7 +772,7 @@ function createApi({
           .audit(delivery === 'emailed' ? 'visit.code_emailed' : 'visit.email_failed', `${id}${delivery === 'emailed' ? '' : `: ${result}`}`, ctx.actor).commit();
       }
     }
-    const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null };
+    const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null };
     // The codes are returned exactly once and never stored.
     return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings };
   });
@@ -818,6 +826,110 @@ function createApi({
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
     return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, company: null, erased: true, erasedAt: at }) };
   });
+
+  // --- visitor arrival --------------------------------------------------
+  // TTLock reports unlocks (callback or record list) with the code that was
+  // typed. The first successful unlock with a visitor's code is their arrival.
+  // Informational only: nothing here changes who can open what.
+
+  /** Read-only, across tenants (the callback does not know the tenant). */
+  async function matchArrivals(records, { tenantId = null } = {}) {
+    if (!secretsKey) return [];
+    const found = new Map();
+    for (const r of visitors.arrivalCandidates(records)) {
+      const at = new Date(r.at).toISOString();
+      const rows = await store.sql.all(
+        `SELECT tenant_id, id, code_macs FROM visits WHERE status = 'scheduled' AND arrived_at IS NULL AND code_macs IS NOT NULL AND start_at <= ? AND end_at >= ?${tenantId ? ' AND tenant_id = ?' : ''} AND EXISTS (SELECT 1 FROM json_each(visits.lock_ids) WHERE json_each.value = ?) LIMIT 50`,
+        tenantId ? [at, at, tenantId, r.lockId] : [at, at, r.lockId]);
+      for (const row of rows) {
+        let stored = null;
+        try { stored = JSON.parse(row.code_macs)[String(r.lockId)] || null; } catch { /* malformed: skip */ }
+        if (!stored) continue;
+        // The fingerprint binds tenant + lock + code: only the visitor's real code matches.
+        if (!(await codeMacs(secretsKey, { tenantId: row.tenant_id, lockId: r.lockId, code: r.code }).catch(() => [])).includes(stored)) continue;
+        const key = `${row.tenant_id}|${row.id}`;
+        if (!found.has(key) || found.get(key).at > at) found.set(key, { tenantId: row.tenant_id, visitId: row.id, lockId: r.lockId, at });
+      }
+    }
+    return [...found.values()];
+  }
+
+  /** Inside the tenant's write queue: record the first arrival once, then tell the host. */
+  async function recordArrival(tenantId, m) {
+    const row = await store.sql.first('SELECT * FROM visits WHERE tenant_id = ? AND id = ?', [tenantId, String(m.visitId)]);
+    const at = new Date(m.at).toISOString();
+    const lockId = Number(m.lockId);
+    if (!row || row.arrived_at || row.status !== 'scheduled' || at < row.start_at || at > row.end_at) return { recorded: false };
+    if (!JSON.parse(row.lock_ids || '[]').map(Number).includes(lockId)) return { recorded: false };
+    await store.tenant(tenantId).unit()
+      .raw('UPDATE visits SET arrived_at = ?, arrived_lock = ? WHERE tenant_id = ? AND id = ? AND arrived_at IS NULL', [at, lockId, tenantId, row.id])
+      .audit('visit.arrived', `${row.id} lock ${lockId} at ${at} via ${m.source === 'records' ? 'records' : 'callback'}`, 'system').commit();
+    const out = { recorded: true, visitId: row.id };
+    const v = visitors.rowToVisit(row);
+    const snap = await store.tenant(tenantId).snapshot();
+    const host = snap.users.find(u => u.id === v.hostUserId);
+    const locks = await (await resolveVendor(tenantId)).listLocks().catch(() => []);
+    const door = doorName(locks, lockId);
+    const tz = policy.siteTimeZone(snap, v.siteId);
+    if (alerts && visitors.settingsOf(snap.settings).notifyHost && host && host.email && alerts.emailAvailable) {
+      out.hostEmail = await alerts.emailTo(host.email, visitors.arrivalEmail({ visit: v, hostName: host.name, door, at, timeZone: tz, tenantName: snap.tenant && snap.tenant.name }), `arrival-${row.id}`);
+    }
+    if (alerts) {
+      // Opt-in event (names a person): channels get it only if an owner enabled visitor_arrived.
+      out.alert = await alerts.send(tenantId, 'visitor_arrived', {
+        title: 'Visitor arrived',
+        text: `${v.visitorName || 'A visitor'}${v.company ? ` (${v.company})` : ''} for ${host ? host.name : v.hostUserId} opened ${door}.`,
+        facts: [['Door', door], ['Time', policy.localParts(new Date(at), tz).label], ['Visit', row.id]], path: '/#visitors',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * TTLock "lock records notify" callback: POST <form> to /api/ttlock/notify/<secret>
+   * with records=<JSON array>. One callback URL per TTLock developer app, so it
+   * serves every tenant; `dispatch(tenantId, match)` runs the write in that
+   * tenant's queue (the Worker hops to its Durable Object).
+   */
+  async function ttlockNotify({ secret, form }, { dispatch = null } = {}) {
+    if (!ttlockNotifySecret || !rbac.constantTimeEqual(String(secret || ''), ttlockNotifySecret)) return { status: 404, body: { ok: false, error: 'not found' } };
+    const list = [];
+    for (const chunk of [].concat((form && form.records) || [])) {
+      try { list.push(...[].concat(typeof chunk === 'string' ? JSON.parse(chunk) : chunk)); } catch { /* not JSON: ignore */ }
+    }
+    const matches = await matchArrivals(list);
+    let recorded = 0;
+    for (const m of matches) {
+      try {
+        const r = dispatch ? await dispatch(m.tenantId, m) : await serialize(m.tenantId, () => recordArrival(m.tenantId, m));
+        if (r && r.recorded) recorded++;
+      } catch (error) {
+        log('visitor arrival failed', m.tenantId, error);
+      }
+    }
+    return { status: 200, body: { ok: true, records: list.length, matched: matches.length, recorded } };
+  }
+
+  /** Fallback without the callback: read recent records of doors with a visitor on site now. */
+  async function pollArrivals(tenantId) {
+    if (!secretsKey) return 0;
+    const now = new Date().toISOString();
+    const rows = await store.sql.all("SELECT id, lock_ids, start_at FROM visits WHERE tenant_id = ? AND status = 'scheduled' AND arrived_at IS NULL AND code_macs IS NOT NULL AND start_at <= ? AND end_at >= ? ORDER BY start_at LIMIT 20", [tenantId, now, now]);
+    if (!rows.length) return 0;
+    const vendor = await resolveVendor(tenantId);
+    // Records reach the cloud promptly only through a gateway.
+    const gateway = new Set((await vendor.listLocks()).filter(l => l.hasGateway).map(l => Number(l.lockId)));
+    const lockIds = [...new Set(rows.flatMap(r => JSON.parse(r.lock_ids || '[]').map(Number)))].filter(id => gateway.has(id)).slice(0, 10);
+    const since = Math.min(...rows.map(r => Date.parse(r.start_at)));
+    let recorded = 0;
+    for (const lockId of lockIds) {
+      const records = (await vendor.records(lockId)).map(r => ({ ...r, lockId })).filter(r => Number(r.lockDate || r.serverDate) >= since);
+      for (const m of await matchArrivals(records, { tenantId })) {
+        if ((await recordArrival(tenantId, { ...m, source: 'records' })).recorded) recorded++;
+      }
+    }
+    return recorded;
+  }
 
   route('GET', /^\/api\/credentials$/, async ctx => {
     const snap = await ctx.snap();
@@ -1707,6 +1819,12 @@ function createApi({
       if (f.retried || f.error) out.alerts = f;
     }
     try {
+      const n = await pollArrivals(tenantId);
+      if (n) out.arrivals = n;
+    } catch (error) {
+      log(`maintenance ${tenantId} arrival polling failed`, error);
+    }
+    try {
       // Visitors: personal details are kept only `retentionDays` after the visit ends.
       const { retentionDays } = visitors.settingsOf((await store.tenantSettings(tenantId)) || {});
       const cutoff = new Date(Date.now() - retentionDays * 864e5).toISOString();
@@ -1748,7 +1866,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };

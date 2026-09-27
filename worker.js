@@ -88,7 +88,7 @@ function apiFor(env) {
   const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
   const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
   const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -146,6 +146,23 @@ async function handleApi(request, env) {
   return toResponse(await api.handle(req));
 }
 
+/** TTLock record callback (form-encoded, secret in the path). Arrivals are written in each tenant's DO. */
+async function handleTtlockNotify(request, env, url) {
+  if (Number(request.headers.get('content-length') || 0) > 256 * 1024) return new Response('too large', { status: 413 });
+  const text = await request.text();
+  if (text.length > 256 * 1024) return new Response('too large', { status: 413 });
+  const params = new URLSearchParams(text);
+  const form = { records: params.getAll('records'), lockId: params.get('lockId') };
+  const api = apiFor(env);
+  const dispatch = env.TENANT_WRITER ? async (tenantId, match) => {
+    const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+    const res = await stub.fetch(new Request('https://tenant-writer/__tenant/arrival', { method: 'POST', headers: { 'x-accessx-tenant': tenantId, 'content-type': 'application/json' }, body: JSON.stringify(match) }));
+    return res.json();
+  } : null;
+  const out = await api.ttlockNotify({ secret: decodeURIComponent(url.pathname.slice('/api/ttlock/notify/'.length)), form }, { dispatch });
+  return new Response(out.status === 200 ? 'success' : 'not found', { status: out.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
+}
+
 /**
  * One instance per tenant, worldwide. Serializes the tenant's writes so the
  * optimistic audit-head check never has to fight a burst (a 2,000-user SCIM
@@ -162,6 +179,12 @@ export class TenantWriter {
     // Scheduled work for this tenant (worker.js scheduled()). Only the front
     // Worker reaches a DO, and it forwards nothing but /api/* and /scim/*,
     // so this path cannot be called from outside.
+    if (new URL(request.url).pathname === '/__tenant/arrival') {
+      const tenantId = request.headers.get('x-accessx-tenant');
+      const match = await request.json();
+      const out = await this.queue.run('tenant', () => apiFor(this.env).recordArrival(tenantId, match));
+      return Response.json(out);
+    }
     if (new URL(request.url).pathname === '/__tenant/cron') {
       const tenantId = request.headers.get('x-accessx-tenant');
       const api = apiFor(this.env);
@@ -186,6 +209,7 @@ export class TenantWriter {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
     return env.ASSETS.fetch(request);
   },

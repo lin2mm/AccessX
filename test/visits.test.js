@@ -272,8 +272,8 @@ test('personal data: erased on request, and automatically after the retention pe
 });
 
 test('core: settings bounds and state', () => {
-  assert.deepEqual(visitors.settingsOf({}), { maxHours: 24, retentionDays: 30 });
-  assert.deepEqual(visitors.settingsOf({ visitors: { maxHours: 999, retentionDays: 3 } }), { maxHours: 24, retentionDays: 3 });
+  assert.deepEqual(visitors.settingsOf({}), { maxHours: 24, retentionDays: 30, notifyHost: true });
+  assert.deepEqual(visitors.settingsOf({ visitors: { maxHours: 999, retentionDays: 3, notifyHost: false } }), { maxHours: 24, retentionDays: 3, notifyHost: false });
   const v = { status: 'scheduled', startAt: '2026-10-05T08:00:00Z', endAt: '2026-10-05T17:00:00Z' };
   assert.equal(visitors.stateOf(v, Date.parse('2026-10-05T07:00:00Z')), 'scheduled');
   assert.equal(visitors.stateOf(v, Date.parse('2026-10-05T09:00:00Z')), 'active');
@@ -286,4 +286,120 @@ test('core: settings bounds and state', () => {
   assert.deepEqual(creds.reviewCredentials(db).map(f => f.reasons), [['host suspended']]);
   db.users = [];
   assert.deepEqual(creds.reviewCredentials(db).map(f => f.reasons), [['host deleted']]);
+});
+
+// ---- arrival: TTLock record callback / polling ---------------------------------------
+const NOTIFY = 'notify-secret-9f2c';
+const notify = (api, records, secret = NOTIFY) => fetch(`${api.base}/api/ttlock/notify/${secret}`, {
+  method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ lockId: String(records[0] ? records[0].lockId : ''), notifyType: '1', records: JSON.stringify(records), admin: 'owner@x.example' }),
+}).then(async r => ({ status: r.status, text: await r.text() }));
+const rec = (lockId, code, at, extra = {}) => ({ lockId, recordType: 4, success: 1, keyboardPwd: code, lockDate: at, serverDate: at, username: 'x', electricQuantity: 80, ...extra });
+
+test('arrival: the first unlock with the visitor\'s code (TTLock callback) is recorded once and the host is emailed', async t => {
+  const mail = await provider(t, [200]);
+  const { api } = await setup(t, { TTLOCK_NOTIFY_SECRET: NOTIFY, EMAIL_PROVIDER: 'resend', EMAIL_API_KEY: 're_k', EMAIL_FROM: 'desk@accessx.example', EMAIL_API_BASE: mail.base });
+  const s = await api.call('GET', '/api/visits/settings', DESK);
+  assert.deepEqual(s.body.arrivals, { enabled: true, callback: true });
+  const r = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ lockIds: [9001, 9003] }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const id = r.body.visit.id;
+  const code = r.body.codes[0].code;
+  const inWindow = Date.parse(r.body.visit.startAt) + 36e5;
+  const row = await api.server.store.sql.first('SELECT code_macs FROM visits WHERE id = ?', [id]);
+  assert.ok(!row.code_macs.includes(code), 'fingerprints, not codes');
+  assert.deepEqual(Object.keys(JSON.parse(row.code_macs)).sort(), ['9001', '9003']);
+
+  assert.equal((await notify(api, [rec(9001, code, inWindow)], 'wrong-secret')).status, 404);
+  const other = String((Number(code) + 1) % 1e6).padStart(6, '0');
+  for (const [records, why] of [
+    [[rec(9001, other, inWindow)], 'another code'],
+    [[rec(9002, code, inWindow)], 'the code on a door that is not part of the visit'],
+    [[rec(9001, code, Date.parse(r.body.visit.startAt) - 60e3)], 'before the visit'],
+    [[rec(9001, code, inWindow, { success: 0 })], 'a failed attempt'],
+    [[rec(9001, code, inWindow, { recordType: 7 })], 'not a passcode unlock'],
+  ]) {
+    const n = await notify(api, records);
+    assert.equal(n.status, 200, why);
+    assert.equal(n.text, 'success', 'TTLock expects "success"');
+  }
+  assert.equal((await api.call('GET', '/api/visits', DESK)).body.visits.find(v => v.id === id).arrivedAt, null);
+  assert.equal(mail.got.length, 0);
+
+  // The real arrival: several records in one callback, the earliest wins.
+  await notify(api, [rec(9003, r.body.codes[1].code, inWindow + 60e3), rec(9001, code, inWindow)]);
+  const v = (await api.call('GET', '/api/visits', DESK)).body.visits.find(x => x.id === id);
+  assert.equal(v.arrivedAt, new Date(inWindow).toISOString());
+  assert.equal(v.arrivedLock, 9001);
+  assert.equal(mail.got.length, 1);
+  assert.deepEqual(mail.got[0].body.to, ['sarah@acme.co.uk'], 'the host (u1)');
+  assert.match(mail.got[0].body.subject, new RegExp(`${MARKER} \\(Acme Audit\\) has arrived`));
+  assert.match(mail.got[0].body.text, /opened Main Entrance at/);
+  assert.equal(mail.got[0].headers['idempotency-key'], `accessx-arrival-${id}`);
+  // Once.
+  await notify(api, [rec(9001, code, inWindow + 5 * 60e3)]);
+  assert.equal(mail.got.length, 1);
+  const log = (await api.call('GET', '/api/audit?action=visit.arrived', OWNER)).body.log;
+  assert.equal(log.length, 1);
+  assert.equal(log[0].detail, `${id} lock 9001 at ${new Date(inWindow).toISOString()} via callback`);
+  assert.ok(!JSON.stringify(log).includes(MARKER));
+  // Checked-out visits are not "arrived" afterwards.
+  const r2 = await api.call('POST', '/api/visits', { ...DESK, body: visitBody() });
+  await api.call('POST', `/api/visits/${r2.body.visit.id}/cancel`, { ...DESK, body: {} });
+  await notify(api, [rec(9001, r2.body.codes[0].code, inWindow)]);
+  assert.equal((await api.call('GET', '/api/visits', DESK)).body.visits.find(x => x.id === r2.body.visit.id).arrivedAt, null);
+  // Host notification can be switched off by an owner.
+  assert.equal((await api.call('PUT', '/api/visits/settings', { ...OWNER, body: { notifyHost: 'yes' } })).status, 400);
+  assert.equal((await api.call('PUT', '/api/visits/settings', { ...OWNER, body: { notifyHost: false } })).body.notifyHost, false);
+  const r3 = await api.call('POST', '/api/visits', { ...DESK, body: visitBody() });
+  await notify(api, [rec(9001, r3.body.codes[0].code, inWindow)]);
+  assert.ok((await api.call('GET', '/api/visits', DESK)).body.visits.find(x => x.id === r3.body.visit.id).arrivedAt);
+  assert.equal(mail.got.length, 1, 'no email when switched off');
+});
+
+test('arrival without the callback: maintenance reads recent records of doors with a visitor on site', async t => {
+  const { api, vendor } = await setup(t);
+  assert.equal((await notify(api, [])).status, 404, 'callback disabled without TTLOCK_NOTIFY_SECRET');
+  const in6h = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(Date.now() + 6 * 36e5)).replace(' ', 'T');
+  const r = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ startLocal: undefined, endLocal: in6h, lockIds: [9001, 9004] }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const asked = [];
+  const records = vendor.records;
+  vendor.records = async lockId => { asked.push(Number(lockId)); return Number(lockId) === 9001 ? [rec(9001, '000000', Date.now() - 120e3), rec(9001, r.body.codes[0].code, Date.now() - 60e3)] : []; };
+  t.after(() => { vendor.records = records; });
+  const m = await api.server.api.maintenance();
+  assert.equal(m.find(x => x.tenantId === 't_default').arrivals, 1);
+  assert.deepEqual(asked, [9001], 'only doors with a gateway (9004 has none)');
+  const v = (await api.call('GET', '/api/visits', DESK)).body.visits.find(x => x.id === r.body.visit.id);
+  assert.equal(v.arrivedLock, 9001);
+  assert.match((await api.call('GET', '/api/audit?action=visit.arrived', OWNER)).body.log[0].detail, /via records$/);
+  asked.length = 0;
+  await api.server.api.maintenance();
+  assert.deepEqual(asked, [], 'arrived visits are not polled again');
+});
+
+test('code fingerprints: bound to tenant and lock, verifiable under every key in the ring, useless without the key', async () => {
+  const { codeMac, codeMacs } = require('../secrets-core');
+  const k1 = Buffer.alloc(32, 1).toString('base64');
+  const k2 = Buffer.alloc(32, 2).toString('base64');
+  const a = await codeMac(k1, { tenantId: 't1', lockId: 9001, code: '123456' });
+  assert.match(a, /^[0-9a-f]{16}:[0-9a-f]{32}$/);
+  assert.notEqual(await codeMac(k1, { tenantId: 't2', lockId: 9001, code: '123456' }), a, 'other tenant');
+  assert.notEqual(await codeMac(k1, { tenantId: 't1', lockId: 9002, code: '123456' }), a, 'other lock');
+  assert.notEqual(await codeMac(k2, { tenantId: 't1', lockId: 9001, code: '123456' }), a, 'other key');
+  // After rotation (new key first) the old fingerprint still matches.
+  assert.ok((await codeMacs(`${k2},${k1}`, { tenantId: 't1', lockId: 9001, code: '123456' })).includes(a));
+  assert.equal(await codeMac('', { tenantId: 't1', lockId: 9001, code: '123456' }), null);
+  // Arrival candidates: only successful passcode unlocks with a plausible code.
+  assert.deepEqual(visitors.arrivalCandidates([rec(1, '123456', 5), rec(1, '12', 5), rec(1, '123456', 5, { recordType: 1 }), { junk: true }, null]).map(r => r.code), ['123456']);
+});
+
+test('visitor_arrived alerts are opt-in (they name people)', async t => {
+  const { api } = await setup(t);
+  const a = await api.call('GET', '/api/alerts', OWNER);
+  assert.ok(!a.body.alerts.events.includes('visitor_arrived'));
+  assert.ok(a.body.alerts.events.includes('removal_overdue'));
+  const on = await api.call('PUT', '/api/alerts', { ...OWNER, body: { events: ['removal_overdue', 'visitor_arrived'] } });
+  assert.equal(on.status, 200, JSON.stringify(on.body));
+  assert.deepEqual(on.body.alerts.events, ['removal_overdue', 'visitor_arrived']);
 });

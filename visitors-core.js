@@ -33,6 +33,7 @@ function settingsOf(settings) {
   return {
     maxHours: int(v.maxHours, 1, LIMITS.maxHoursCap, LIMITS.maxHours),
     retentionDays: int(v.retentionDays, LIMITS.retentionMin, LIMITS.retentionMax, LIMITS.retentionDays),
+    notifyHost: v.notifyHost !== false, // email the host when their visitor first opens a door
   };
 }
 
@@ -46,6 +47,10 @@ function validateSettings(body) {
   if (body.retentionDays !== undefined) {
     if (!Number.isInteger(body.retentionDays) || body.retentionDays < LIMITS.retentionMin || body.retentionDays > LIMITS.retentionMax) return { ok: false, error: `retentionDays must be a whole number from ${LIMITS.retentionMin} to ${LIMITS.retentionMax}` };
     out.retentionDays = body.retentionDays;
+  }
+  if (body.notifyHost !== undefined) {
+    if (typeof body.notifyHost !== 'boolean') return { ok: false, error: 'notifyHost must be true or false' };
+    out.notifyHost = body.notifyHost;
   }
   return { ok: true, value: out };
 }
@@ -123,6 +128,7 @@ function rowToVisit(r) {
     startAt: r.start_at, endAt: r.end_at, status: r.status, delivery: r.delivery,
     createdBy: r.created_by, createdAt: r.created_at, endedAt: r.ended_at, endedBy: r.ended_by,
     erased: Boolean(r.erased_at), erasedAt: r.erased_at,
+    arrivedAt: r.arrived_at || null, arrivedLock: r.arrived_lock === null || r.arrived_lock === undefined ? null : Number(r.arrived_lock),
   };
 }
 
@@ -145,4 +151,24 @@ function invitationEmail({ visit, hostName, siteName, doors, timeZone, tenantNam
   return { subject: `Your door code for ${siteName || 'your visit'}`.slice(0, 200), text: lines.join('\n') };
 }
 
-module.exports = { LIMITS, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail };
+/** Host notification: "your visitor has arrived". */
+function arrivalEmail({ visit, hostName, door, at, timeZone, tenantName }) {
+  const who = visit.visitorName ? `${visit.visitorName}${visit.company ? ` (${visit.company})` : ''}` : 'Your visitor';
+  const when = policy.localParts(new Date(at), timeZone).label;
+  return {
+    subject: `${who} has arrived`.slice(0, 200),
+    text: [`Hello ${hostName || ''},`.replace(/ ,$/, ','), '', `${who} opened ${door} at ${when}.`, '',
+      'You get this because you are their host in AccessX. Reception can check them out when they leave.', '', '—', `${tenantName || 'AccessX'} · sent by AccessX`].join('\n'),
+  };
+}
+
+/** Unlock records that can be a visitor's arrival: a successful passcode unlock. */
+const PASSCODE_UNLOCK = 4;
+function arrivalCandidates(records) {
+  return (Array.isArray(records) ? records : []).slice(0, 200).map(r => ({
+    lockId: Number(r && r.lockId), recordType: Number(r && r.recordType), success: Number(r && r.success),
+    code: String((r && r.keyboardPwd) || '').trim(), at: Number(r && (r.lockDate || r.serverDate)),
+  })).filter(r => r.recordType === PASSCODE_UNLOCK && r.success === 1 && /^\d{4,12}$/.test(r.code) && Number.isFinite(r.lockId) && Number.isFinite(r.at));
+}
+
+module.exports = { LIMITS, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail, arrivalEmail, arrivalCandidates };

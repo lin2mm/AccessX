@@ -633,8 +633,12 @@ async function loadVisitors(){
   const s=await api('/api/visits/settings');
   // Owner-only (also enforced by the server).
   $('#vis-settings').hidden=!(s.ok&&ME&&ME.role==='r_owner');
-  if(s.ok){$('#vs-max').value=s.maxHours;$('#vs-ret').value=s.retentionDays;}
-  const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">on site window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
+  if(s.ok){$('#vs-max').value=s.maxHours;$('#vs-ret').value=s.retentionDays;$('#vs-notify').checked=s.notifyHost;
+    const a=s.arrivals||{};
+    $('#vs-arrivals').textContent=!a.enabled?'Arrival detection is off: SECRETS_KEY is not set on the server.'
+      :a.callback?'Arrivals: reported by TTLock within seconds (record callback), doors with a gateway.'
+      :'Arrivals: checked every scheduled run (about 15 min) on doors with a gateway. Set TTLOCK_NOTIFY_SECRET and the TTLock callback URL for instant notice.';}
+  const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
   const rows=r.visits.map(v=>{
     const lock=v.lockIds[0];
@@ -642,7 +646,7 @@ async function loadVisitors(){
     const who=v.erased?'<span class="meta">details erased</span>':`<b>${esc(v.visitorName)}</b><div class="meta">${esc([v.company,v.visitorEmail].filter(Boolean).join(' · '))}</div>`;
     const doors=v.codes.map(c=>{const d=DOORS.find(x=>Number(x.lockId)===Number(c.lockId));return `<div>${esc(d?d.lockAlias:c.lockId)} ${codeTag(c)}</div>`;}).join('');
     return `<tr><td>${who}</td><td>${esc(v.hostName||v.hostUserId)}</td><td>${doors}</td>
-      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.delivery==='emailed'?'<div class="meta">code emailed</div>':v.delivery==='email_failed'?'<div class="meta">email failed</div>':''}</td>
+      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.arrivedAt?`<div class="meta">arrived ${esc(atDoor(v.arrivedAt,v.arrivedLock||lock))}${(()=>{const d=DOORS.find(x=>Number(x.lockId)===Number(v.arrivedLock));return d?' · '+esc(d.lockAlias):'';})()}</div>`:''}${v.delivery==='emailed'?'<div class="meta">code emailed</div>':v.delivery==='email_failed'?'<div class="meta">email failed</div>':''}</td>
       <td style="white-space:nowrap">${open?`<button class="btn2 sm" data-vact="${v.state==='scheduled'?'cancel':'checkout'}" data-vid="${esc(v.id)}">${v.state==='scheduled'?'Cancel':'Check out'}</button> `:''}${v.erased?'':`<button class="btn2 sm" data-vact="erase" data-vid="${esc(v.id)}" title="Erase this visitor's personal details now">Erase details</button>`}</td></tr>`;
   }).join('');
   $('#vis-list').innerHTML=rows?`<table><tr><th>Visitor</th><th>Host</th><th>Doors</th><th>When (door time)</th><th>State</th><th></th></tr>${rows}</table>`:'<div class="meta">No visitors in this period.</div>';
@@ -686,7 +690,7 @@ $('#vis-list').addEventListener('click',async e=>{
 });
 $('#vs-form').addEventListener('submit',async e=>{
   e.preventDefault();
-  const r=await api('/api/visits/settings',{method:'PUT',body:JSON.stringify({maxHours:Number($('#vs-max').value),retentionDays:Number($('#vs-ret').value)})});
+  const r=await api('/api/visits/settings',{method:'PUT',body:JSON.stringify({maxHours:Number($('#vs-max').value),retentionDays:Number($('#vs-ret').value),notifyHost:$('#vs-notify').checked})});
   $('#vs-msg').textContent=r.ok?`Saved: visits up to ${r.maxHours} h, details kept ${r.retentionDays} days after the visit.`:errText(r);
 });
 init();

@@ -66,4 +66,39 @@ const sealedKeyId = sealed => { const p = String(sealed || '').split('.'); retur
 const primaryKeyId = async secretsKey => (await keyring(secretsKey))[0].kid;
 const keyIds = async secretsKey => (await keyring(secretsKey)).map(k => k.kid);
 
-module.exports = { encryptSecret, decryptSecret, sealedKeyId, primaryKeyId, keyIds };
+/**
+ * Keyed fingerprint of a door code, so an unlock record ("code 482913 opened
+ * lock 9001") can be recognised as a visitor's arrival without storing the
+ * code. HMAC-SHA256 under a subkey derived from each SECRETS_KEY entry; the
+ * input binds tenant and lock. Without SECRETS_KEY a fingerprint is useless
+ * (a 6-digit code cannot be recovered from it); with SECRETS_KEY nothing new
+ * is exposed — that key already unseals the TTLock tokens, which can list
+ * every code on the lock.
+ *   codeMac  → "<kid>:<hex>" under the primary key (store this)
+ *   codeMacs → the same under every key in the ring (match against these)
+ */
+const macKeys = new Map(); // keyring string → Promise<[{ kid, key }]>
+function macRing(secretsKey) {
+  const spec = String(secretsKey || '');
+  if (!macKeys.has(spec)) {
+    macKeys.set(spec, Promise.all(spec.split(',').map(s => s.trim()).filter(Boolean).map(async k => {
+      const raw = unb64(k);
+      if (raw.length !== 32) throw new Error('each SECRETS_KEY entry must be 32 bytes, base64-encoded');
+      const kid = hex(await globalThis.crypto.subtle.digest('SHA-256', raw)).slice(0, 16);
+      const root = await globalThis.crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const sub = await globalThis.crypto.subtle.sign('HMAC', root, enc.encode('accessx/code-fingerprint/v1'));
+      return { kid, key: await globalThis.crypto.subtle.importKey('raw', sub, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']) };
+    })).catch(error => { macKeys.delete(spec); throw error; }));
+  }
+  return macKeys.get(spec);
+}
+const macInput = ({ tenantId, lockId, code }) => enc.encode(`${tenantId}|${Number(lockId)}|${String(code).trim()}`);
+async function codeMacs(secretsKey, input) {
+  if (!String(secretsKey || '').trim()) return [];
+  return Promise.all((await macRing(secretsKey)).map(async ({ kid, key }) => `${kid}:${hex(await globalThis.crypto.subtle.sign('HMAC', key, macInput(input))).slice(0, 32)}`));
+}
+async function codeMac(secretsKey, input) {
+  return (await codeMacs(secretsKey, input))[0] || null;
+}
+
+module.exports = { encryptSecret, decryptSecret, sealedKeyId, primaryKeyId, keyIds, codeMac, codeMacs };

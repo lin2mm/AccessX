@@ -77,6 +77,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
 | `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI and for links in alerts; without it links are left out and the redirect URI follows the request host. |
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
+| `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
@@ -199,6 +200,9 @@ Operators (people who administer the system) are separate from door users.
   rule and four-eyes), at most 24 h by default, codes optionally emailed
   (never queued or stored). Visitor details never enter the audit chain or
   TTLock, and are erased 30 days after the visit (configurable) or on request.
+  **Arrival**: the first unlock with the visitor's code (TTLock callback, or
+  lock records every scheduled run) marks them arrived and emails the host;
+  a Slack/Teams `visitor_arrived` alert is available opt-in.
 - **Codes run on whole hours** — TTLock period codes are valid on whole
   hours only and must be used once within 24 h of their start, or the lock
   voids them. Windows are rounded on the door's clock (start down, end up,

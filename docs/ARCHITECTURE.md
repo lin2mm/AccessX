@@ -451,6 +451,35 @@ and a fake TTLock that rotates refresh tokens.
   `door.read` + `visitor.manage` — no people, rules, reports or sensitive
   doors. `PUT /api/visits/settings` is owner-only.
 
+### Visitor arrival
+
+- TTLock reports each unlock with the code that was typed
+  (`lockRecord/list`, and the "lock records notify" callback: a form POST
+  with `records=<JSON array>` of `{lockId, recordType, success, keyboardPwd,
+  lockDate, …}`; recordType 4 = passcode unlock). We never store codes, so
+  a visit keeps **keyed fingerprints** of its codes (`visits.code_macs`,
+  `secrets-core.codeMac`: HMAC-SHA256 under a subkey of each `SECRETS_KEY`
+  entry, input = tenant | lock | code). A 6-digit code cannot be recovered
+  from the fingerprint without the key; with the key nothing new is exposed
+  (it already unseals the TTLock tokens, which can list every code).
+  Rotation-safe: matching tries every key in the ring.
+- **Callback** (`POST /api/ttlock/notify/<TTLOCK_NOTIFY_SECRET>`): TTLock
+  accepts one callback URL per developer app, so it serves every tenant.
+  The request is unauthenticated apart from the secret path, so it is
+  treated as information only: it can mark an arrival and send a notice,
+  never change access. Matching is read-only and cross-tenant (open visits
+  covering that lock at that time, then the fingerprint — which binds the
+  tenant — must match). The write (`visit.arrived` + audit + host email +
+  opt-in `visitor_arrived` alert) runs in the tenant's queue: `serialize()`
+  on Node, the tenant's Durable Object (`/__tenant/arrival`) on Workers.
+  Responds `success` as TTLock expects.
+- **Polling fallback** (maintenance): for visits on site now and not yet
+  arrived, read the last 100 records of up to 10 gateway doors per tenant.
+  Doors without a gateway only upload records when a phone syncs, so their
+  arrivals may show late or never.
+- Recorded once (CAS on `arrived_at IS NULL`); cancelled/checked-out visits
+  and unlocks outside the window are ignored.
+
 ### TTLock validity rules (all passcodes)
 
 TTLock's keyboardPwd/get documents two rules the lock enforces regardless of

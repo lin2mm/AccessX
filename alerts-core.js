@@ -30,7 +30,10 @@
 const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { checkWebhookUrl } = require('./audit-ops');
 
-const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect'];
+const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived'];
+// Informational, and they name people: channels get these only when an owner turns them on.
+const OPT_IN_EVENTS = ['visitor_arrived'];
+const DEFAULT_EVENTS = EVENTS.filter(e => !OPT_IN_EVENTS.includes(e));
 const FORMATS = ['slack', 'teams', 'json'];
 const EMAIL_PROVIDERS = {
   resend: { base: 'https://api.resend.com', path: '/emails' },
@@ -108,7 +111,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     return {
       configured: Boolean(a.sealedUrl || (emailCfg && (a.emails || []).length)), format: a.format || null, host: a.host || null,
       emails: a.emails || [], emailAvailable: Boolean(emailCfg), emailProvider: emailCfg ? emailCfg.provider : null,
-      events: a.events || EVENTS, slaHours: a.slaHours || DEFAULT_SLA_HOURS,
+      events: a.events || DEFAULT_EVENTS, slaHours: a.slaHours || DEFAULT_SLA_HOURS,
       lastDelivery: a.lastDelivery || null, lastEmailDelivery: a.lastEmailDelivery || null,
       retrying: { count: outbox.n || 0, nextAt: outbox.next || null },
       availableEvents: EVENTS, formats: FORMATS, secretsKeyConfigured: Boolean(secretsKey),
@@ -155,7 +158,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     await store.tenant(tenantId).unit()
       .raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...all, alerts: next }), tenantId])
       // Recipients are personal data: the audit carries their number only.
-      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${(next.events || EVENTS).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}`, actor)
+      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${(next.events || DEFAULT_EVENTS).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}`, actor)
       .commit();
     return settings(tenantId);
   }
@@ -215,7 +218,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
       const a = await read(tenantId);
       const channels = channelsOf(a);
       if (!channels.length) return 'skipped: no channel';
-      if (!force && !(a.events || EVENTS).includes(event)) return 'skipped: event disabled';
+      if (!force && !(a.events || DEFAULT_EVENTS).includes(event)) return 'skipped: event disabled';
       if (channels.includes('webhook') && !secretsKey) return 'skipped: SECRETS_KEY missing';
       const id = uid();
       const at = iso(now());

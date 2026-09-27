@@ -96,6 +96,7 @@ const api = createApi({
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
+  ttlockNotifySecret: process.env.TTLOCK_NOTIFY_SECRET || '',
   // The bundled mock IdP runs on plain http; real issuers must be https.
   allowHttpIssuers: process.env.MOCK_IDP === '1',
 });
@@ -120,6 +121,16 @@ app.use((req, res, next) => {
   next();
 });
 // SCIM clients (Entra ID, Okta) send application/scim+json.
+// TTLock's record callback is form-encoded and unauthenticated: the secret is the last path segment.
+app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, limit: '256kb' }), async (req, res) => {
+  try {
+    const out = await api.ttlockNotify({ secret: req.params.secret, form: req.body || {} });
+    res.status(out.status).type('text/plain').send(out.status === 200 ? 'success' : 'not found');
+  } catch (error) {
+    console.error('ttlock notify failed', error);
+    res.status(500).type('text/plain').send('error');
+  }
+});
 app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));
 // Okta/Entra may PUT a group with its full member list: allow larger bodies here only.
 app.use('/scim', express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] }));
