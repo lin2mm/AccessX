@@ -38,6 +38,7 @@
 | [20-PREREGISTRATION.md](20-PREREGISTRATION.md) | 访客预登记设计 | 产品、开发 |
 | [21-SIGNUP.md](21-SIGNUP.md) | 自助开通（注册 → 邮件确认 → 新租户 + 所有者）、防滥用规则、演示租户一键重置 | 产品、开发、平台运维 |
 | [22-KIOSK.md](22-KIOSK.md) | 前台平板：访客自助签到 / 临时访客 / 签退、手机二维码、到访须知、打印名单；注册页 Turnstile 人机验证 | 前台、产品、开发 |
+| [23-CALENDAR.md](23-CALENDAR.md) | 日历邀请 → 访客预登记：Cloudflare Email Routing 设置、组织者确认、改期/取消、安全模型 | 管理员、前台、开发 |
 | [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) | 自动化安全门、外部渗透测试范围、限流 | 安全、测试方 |
 | [40-BILLING.md](40-BILLING.md) | Stripe 计费：计划、实现、运维 | 商业、开发 |
 | [90-ROUNDS.md](90-ROUNDS.md) | 每轮做了什么（总表） | 所有人 |

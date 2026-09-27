@@ -998,7 +998,8 @@ $('#vs-form').addEventListener('submit',async e=>{
 // --- Front-desk kiosk (R16) ---
 async function loadWalkins(){
   const r=await api('/api/walkins');
-  const list=r.ok?r.walkins:[];
+  if(!r.ok)return; // a failed poll changes nothing (otherwise every waiting walk-in would look new next time)
+  const list=r.walkins||[];
   $('#walk-card').hidden=!list.length;
   // New since the last look: highlight them, and count them in a background tab's title.
   const seen=VIS.walkinsSeen;VIS.walkinsSeen=new Set(list.map(w=>w.id));
@@ -1110,7 +1111,7 @@ $('#cal-rotate').addEventListener('click',async()=>{
 // Reception: new walk-ins appear without a reload (every 20 s while the Visitors page is open);
 // a background tab shows the count in its title.
 const BASE_TITLE=document.title;
-setInterval(()=>{if(document.visibilityState==='visible'||VIS.walkinsSeen){if($('#v-visitors').classList.contains('on'))loadWalkins();}},20000);
+setInterval(()=>{if(document.visibilityState==='visible'||VIS.walkinsSeen){if($('#v-visitors').classList.contains('on'))loadWalkins().catch(e=>console.warn('walk-in refresh failed',e));}},20000);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){document.title=BASE_TITLE;VIS.walkinsUnseen=0;}});
 init();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
