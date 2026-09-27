@@ -85,7 +85,8 @@ function summarize(name, rs) {
   if (!BASE) {
     const nukiBase = await cloud.listen(0);
     const { boot } = require('./boot');
-    api = await boot({ ADMIN_TOKEN: OWNER, PLATFORM_TOKEN: PLATFORM, NUKI_API_BASE: nukiBase, NUKI_POLL_MS: '50', RECONCILE_INTERVAL_MIN: '0', SECRETS_KEY: crypto.randomBytes(32).toString('base64') });
+    // ACCESSX_SNAPSHOT_GUARD=0: measure production, not the test-only mutation guard (a Proxy on every read).
+    api = await boot({ ACCESSX_SNAPSHOT_GUARD: process.env.ACCESSX_SNAPSHOT_GUARD || '0', ADMIN_TOKEN: OWNER, PLATFORM_TOKEN: PLATFORM, NUKI_API_BASE: nukiBase, NUKI_POLL_MS: '50', RECONCILE_INTERVAL_MIN: '0', SECRETS_KEY: crypto.randomBytes(32).toString('base64') });
     BASE = api.base;
   } else {
     await cloud.listen(Number(process.env.NUKI_PORT || 4002));

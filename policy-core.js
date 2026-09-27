@@ -20,14 +20,21 @@ const DEFAULT_TZ = 'UTC';
 const WEEKDAY = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
 const formatters = new Map();
 
+const zoneValidity = new Map(); // building an Intl.DateTimeFormat costs ~20 µs; compile asks thousands of times (R20)
+
 function isValidTimeZone(timeZone) {
   if (!timeZone || typeof timeZone !== 'string') return false;
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone });
-    return true;
-  } catch {
-    return false;
+  let ok = zoneValidity.get(timeZone);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone });
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    if (zoneValidity.size < 1000) zoneValidity.set(timeZone, ok); // bounded: time zones come from user input
   }
+  return ok;
 }
 
 function formatter(timeZone) {
