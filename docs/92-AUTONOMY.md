@@ -45,6 +45,8 @@ R22（2026-09-27）应你的要求写：我在这 22 轮里遇到过哪些环境
 | 改写已推送的历史 | 用过（例如 R21 的时间修正：amend 之后强推） | 只用 `--force-with-lease=<分支>:<预期 sha>`；尽量不 amend：统计数字放在最后一个提交之前改 |
 | CI 失败 | 62 次运行中 1 次失败：`21faba1`（15:42，“Unit + API tests”这一步）。下一个提交就通过了。**原因没有查明**：CI 日志从沙盒下载不了（EOF） | 推送后检查 CI 状态；CI 只跑本地同样能跑的命令；失败时先在本地用 `TZ=UTC ACCESSX_SNAPSHOT_GUARD=1` 复现 |
 | `gh repo view --json visibility` 报错 | 字段不存在 | 用 `isPrivate` |
+| `gh pr edit` 报错（R24） | GitHub 的 GraphQL 返回 “Projects (classic) is being deprecated”，编辑没有生效 | 用 REST：`gh api -X PATCH repos/<owner>/<repo>/pulls/N -f title=… -F body=@文件`；改完读回来确认 |
+| `gh api …/deployments` 403（R23） | 集成令牌没有这个权限 | 用每个提交的 `check-suites` / `check-runs` 看 Cloudflare 的状态 |
 | 提交时间 | `git log` 默认显示 UTC，而文档写悉尼时间；R20、R21、R22 都把文档提交的时间预写成“+1 分钟”，三次都错 | **R23 起：** 一轮的结束时间 = 最后一个**代码**提交（写文档时已经知道）；文档提交的时间不写。核对用 `TZ=Australia/Sydney git log --date=format-local:%H:%M` |
 | **标签（tag）** | `v1.0-pilot` 本来计划在 R22 打。你在 R22 后同意“都按建议”；但 R23 发现生产跑的是 `main`（Git 部署），标签应该标在 `main` 上实际部署的提交 | **R23 决定：** 合并 PR #1（Create a merge commit）之后，在 `main` 上建 Release `v1.0-pilot`（你点，或者说“建 release”，我执行 `gh release create v1.0-pilot --target main`） |
 | **部署** | *R22 写错了：* 我写“沙盒里没有 Cloudflare 账号，从来没部署过”，没去查仓库。**实际上仓库已经装了 Cloudflare Workers and Pages 应用**（你在 R23 更正）。查到的情况：每个提交上的 Cloudflare 检查都是 queued、没有运行，也就是还没构建过。原配置如果被构建部署，会因为占位 id 失败，而且会把匿名读取带到生产 | **R23 起：** 下结论之前先查 `gh api repos/…/installations`（已装应用）和每个提交的 `check-suites`。合并到 `main` 就是上线，所以 `npm run deploy` 负责迁移、部署、健康检查，CI 检查配置，控制台设置写在 `13-CLOUDFLARE-GIT-DEPLOY.md`。沙盒里仍然没有 Cloudflare 凭据：构建设置、令牌权限、密钥都要你来做。已知陷阱：R2 桶先建、绑定后加（`12-GO-LIVE.md` §4） |
