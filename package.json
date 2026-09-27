@@ -15,6 +15,8 @@
     "audit:keygen": "node scripts/audit-keygen.js",
     "audit:verify": "node scripts/verify-audit-export.js",
     "ttlock:check": "node scripts/ttlock-check.js",
+    "nuki:check": "node scripts/nuki-check.js",
+    "load:test": "node --no-warnings support/load-test.js",
     "load:scim": "node support/scim-load.js",
     "doctor": "node scripts/doctor.js",
     "backup": "node scripts/backup.js"

@@ -22,6 +22,7 @@ import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.
 import { createLimiters, allow } from './rate-limit-core.js';
 import { securityTxt } from './security-txt.js';
 import { billingConfigFromEnv, createStripe } from './billing-core.js';
+import { maybeExport, exportBackup, listBackups } from './backup-export-core.js';
 
 const MAX_BODY = 64 * 1024;
 
@@ -49,6 +50,15 @@ let cached = null;
 let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
+/** Platform view of the weekly R2 export (GET/POST /api/platform/backups); null without a BACKUPS binding. */
+function backupsFor(env, sql) {
+  if (!env.BACKUPS) return null;
+  return {
+    list: () => listBackups(env.BACKUPS),
+    run: () => exportBackup({ sql, bucket: env.BACKUPS, keep: Number(env.BACKUP_KEEP || 8) }),
+  };
+}
+
 function apiFor(env) {
   const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.NUKI_API_BASE, env.NUKI_POLL_MS, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN, env.USAGE_METER].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
@@ -109,7 +119,7 @@ function apiFor(env) {
   const billingConfig = billingConfigFromEnv(env);
   if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
   const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), signup: signupConfigFromEnv(env), calendarDomain: env.CALENDAR_INBOUND_DOMAIN || '', demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), backups: backupsFor(env, sql), signup: signupConfigFromEnv(env), calendarDomain: env.CALENDAR_INBOUND_DOMAIN || '', demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api, meter };
   return api;
 }
@@ -365,6 +375,12 @@ export default {
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
   async scheduled(event, env, ctx) {
     const api = apiFor(env);
+    // Weekly D1 -> R2 export (backup-export-core.js); needs the BACKUPS binding.
+    if (env.BACKUPS) {
+      ctx.waitUntil(maybeExport({ sql: d1Adapter(env.DB), bucket: env.BACKUPS, hourUtc: Number(env.BACKUP_HOUR_UTC || 17), keep: Number(env.BACKUP_KEEP || 8) })
+        .then(r => { if (!r.skipped) console.log('backup', JSON.stringify(r)); })
+        .catch(error => console.error('backup export failed', String(error && error.message || error))));
+    }
     if (!env.TENANT_WRITER) {
       ctx.waitUntil(api.reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
       ctx.waitUntil(api.maintenance().then(results => console.log('maintenance', JSON.stringify(results))));

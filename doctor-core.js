@@ -100,6 +100,13 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
   if (val('TTLOCK_API_BASE') && production) add('warn', 'TTLOCK_API_BASE', `TTLOCK_API_BASE is overridden (${val('TTLOCK_API_BASE')}): real locks are not reached through TTLock's cloud`);
 
   // --- audit evidence
+  // R20. A running Worker (env.DB is a binding) without an R2 bucket bound as
+  // BACKUPS has no automatic weekly export (backup-export-core.js).
+  if (runtime === 'worker' && env.DB && typeof env.DB === 'object') {
+    if (env.BACKUPS) add('ok', 'BACKUPS', 'weekly D1 export to R2 is on (GET /api/platform/backups)');
+    else add('warn', 'BACKUPS', 'no R2 bucket bound as BACKUPS: no automatic weekly database export, only D1 Time Travel (30 days)', 'wrangler r2 bucket create accessx-backups, then add "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "accessx-backups" }] to wrangler.jsonc');
+  }
+  if (production && val('USAGE_METER') === '1') add('warn', 'USAGE_METER', 'USAGE_METER=1 adds a D1 cost header to every response and counts rows per request: meant for load tests', 'remove USAGE_METER in production');
   if (!has('AUDIT_SIGNING_KEY')) add('warn', 'AUDIT_SIGNING_KEY', 'audit anchors are not signed: an auditor cannot tell your anchors from forged ones', 'npm run audit:keygen');
   else if (!hidden('AUDIT_SIGNING_KEY')) {
     try { const k = JSON.parse(val('AUDIT_SIGNING_KEY')); if (!k || k.kty !== 'OKP' || k.crv !== 'Ed25519' || !k.d || !k.x) throw new Error('not an Ed25519 private JWK with d and x'); add('ok', 'AUDIT_SIGNING_KEY', 'audit anchors are signed'); } catch (error) { add('error', 'AUDIT_SIGNING_KEY', `AUDIT_SIGNING_KEY is not a usable key: ${error.message}`, 'npm run audit:keygen'); }

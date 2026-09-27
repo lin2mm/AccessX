@@ -127,7 +127,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null, signup = null, demoData = null, calendarDomain = '',
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null, backups = null, signup = null, demoData = null, calendarDomain = '',
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -3489,6 +3489,17 @@ function createApi({
     if (!doctor) throw new HttpError(501, 'this server was started without the configuration check');
     const findings = await doctor();
     return { doctor: { ...doctorCore.summary(findings), findings } };
+  });
+
+  // Platform: the weekly D1 -> R2 export (Worker with a BACKUPS binding;
+  // backup-export-core.js). Listing shows keys, sizes and row counts, never data.
+  route('GET', /^\/api\/platform\/backups$/, async () => {
+    if (!backups) return { backups: { enabled: false, hint: 'add an R2 binding named BACKUPS (docs/12-GO-LIVE.md)' } };
+    return { backups: { enabled: true, copies: await backups.list() } };
+  });
+  route('POST', /^\/api\/platform\/backups\/run$/, async () => {
+    if (!backups) throw new HttpError(501, 'no R2 binding named BACKUPS');
+    return { backup: await backups.run() };
   });
 
   // Platform: what needs a human in billing (open problems, who is behind).

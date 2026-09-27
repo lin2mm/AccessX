@@ -80,6 +80,8 @@ const ROUTES = [
   ['POST', /^\/api\/platform\/secrets\/reseal$/, PLATFORM],
   ['GET', /^\/api\/platform\/usage$/, PLATFORM],
   ['GET', /^\/api\/platform\/doctor$/, PLATFORM],
+  ['GET', /^\/api\/platform\/backups$/, PLATFORM],
+  ['POST', /^\/api\/platform\/backups\/run$/, PLATFORM],
   ['GET', /^\/api\/platform\/signups$/, PLATFORM],
   ['POST', /^\/api\/platform\/tenants\/([^/]+)\/demo-reset$/, PLATFORM],
   ['GET', /^\/api\/platform\/billing$/, PLATFORM],

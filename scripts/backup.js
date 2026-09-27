@@ -5,7 +5,8 @@
  *   npm run backup -- node   [--data-dir DIR] [--out FILE]      # Node: consistent copy (VACUUM INTO)
  *   npm run backup -- d1     [--db NAME|BINDING (default DB)] [--local [--persist-to DIR]] [--out FILE]
  *                                                               # Cloudflare D1: wrangler d1 export (remote by default)
- *   npm run backup -- verify FILE.sqlite|FILE.sql [--secrets-key KEYS]
+ *   npm run backup -- verify FILE.sqlite|FILE.sql|FILE.sql.gz [--secrets-key KEYS]
+ *                                                               # .sql.gz = the Worker's weekly R2 export
  *
  * `node` and `d1` verify the file right after writing it. Verifying = restoring
  * it into a scratch database, never touching the original:
@@ -53,9 +54,11 @@ async function verifyBackup(file, { secretsKey = process.env.SECRETS_KEY || '' }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'accessx-restore-'));
   const scratch = path.join(dir, 'restore.sqlite');
   try {
-    if (/\.sql$/i.test(file)) {
+    if (/\.sql(\.gz)?$/i.test(file)) {
       const db = new DatabaseSync(scratch);
-      try { db.exec(fs.readFileSync(file, 'utf8')); add(true, 'load', `SQL dump loaded (${(fs.statSync(file).size / 1024).toFixed(0)} KiB)`); } catch (error) { add(false, 'load', `SQL dump does not load: ${error.message}`); return { ok: false, checks }; } finally { db.close(); }
+      // .sql.gz: the Worker's weekly R2 export (backup-export-core.js).
+      const text = () => (/\.gz$/i.test(file) ? require('node:zlib').gunzipSync(fs.readFileSync(file)).toString('utf8') : fs.readFileSync(file, 'utf8'));
+      try { db.exec(text()); add(true, 'load', `SQL dump loaded (${(fs.statSync(file).size / 1024).toFixed(0)} KiB)`); } catch (error) { add(false, 'load', `SQL dump does not load: ${error.message}`); return { ok: false, checks }; } finally { db.close(); }
     } else {
       fs.copyFileSync(file, scratch);
       add(true, 'load', `database file copied (${(fs.statSync(file).size / 1024).toFixed(0)} KiB)`);
