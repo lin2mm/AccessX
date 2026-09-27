@@ -71,6 +71,8 @@ const vendorAccounts = createVendorAccounts({
   store,
   secretsKey: process.env.SECRETS_KEY || '',
   apiBase: process.env.TTLOCK_API_BASE || '', // deployment-level override (tests, egress proxy) — never per tenant
+  nukiApiBase: process.env.NUKI_API_BASE || '', // same, for Nuki (tests)
+  nukiPoll: process.env.NUKI_POLL_MS ? { pollMs: Math.max(50, Number(process.env.NUKI_POLL_MS) || 1500) } : {},
   platformApp: { clientId: process.env.TTLOCK_CLIENT_ID || '', clientSecret: process.env.TTLOCK_CLIENT_SECRET || '' },
   log: (...a) => console.error(...a),
   // `alerts` is created below; the hook only runs later, at request time.

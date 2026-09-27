@@ -20,9 +20,13 @@
 const { TTLock, ERR } = require('./ttlock');
 const { createCloudVendor, VendorUnavailableError } = require('./vendor-ttlock-core');
 const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { Nuki } = require('./nuki');
+const { createNukiVendor } = require('./vendor-nuki-core');
 
 const PURPOSE = 'vendor.ttlock';
 const REGIONS = ['eu', 'cn'];
+const KINDS = ['ttlock', 'nuki'];
+const NEVER = '9999-12-31T00:00:00.000Z'; // Nuki API tokens do not expire (they die with a password change)
 const DAY = 864e5;
 
 class AccountError extends Error {
@@ -40,7 +44,7 @@ function loginError(error) {
 }
 
 function createVendorAccounts({
-  store, secretsKey = '', fetchFn, apiBase = '', platformApp = {}, log = () => {},
+  store, secretsKey = '', fetchFn, apiBase = '', nukiApiBase = '', platformApp = {}, log = () => {}, nukiPoll = {},
   refreshBeforeMs = 7 * DAY, lockCacheMs = 60e3, now = () => Date.now(), refreshGraceMs = 3000,
   onNeedsReconnect = null, // (tenantId, { accountUid, why }) → alert the owners; called once per incident
 }) {
@@ -55,12 +59,12 @@ function createVendorAccounts({
   const unseal = async (tenantId, sealed) => JSON.parse(await decryptSecret(secretsKey, sealed, { tenantId, purpose: PURPOSE }));
 
   function publicView(r) {
-    const base = { platformAppConfigured: hasPlatformApp, secretsKeyConfigured: Boolean(secretsKey), regions: REGIONS };
+    const base = { platformAppConfigured: hasPlatformApp, secretsKeyConfigured: Boolean(secretsKey), regions: REGIONS, kinds: KINDS };
     if (!r) return { connected: false, ...base };
     return {
       connected: true, ...base,
       kind: r.kind, region: r.region, account: r.account, accountUid: r.account_uid, status: r.status, lastError: r.last_error || null,
-      lockCount: r.lock_count, usesPlatformApp: !r.client_id, tokenExpiresAt: r.token_expires_at,
+      lockCount: r.lock_count, usesPlatformApp: r.kind === 'ttlock' ? !r.client_id : null, tokenExpiresAt: r.token_expires_at === NEVER ? null : r.token_expires_at,
       connectedAt: r.connected_at, connectedBy: r.connected_by, updatedAt: r.updated_at,
     };
   }
@@ -79,7 +83,7 @@ function createVendorAccounts({
     const after = await row(tenantId);
     cache.delete(tenantId);
     if (!after || after.status !== 'needs_reconnect' || after.sealed !== r.sealed || after.updated_at !== at) return false; // someone else won
-    await store.tenant(tenantId).unit().audit('vendor.needs_reconnect', `ttlock uid=${r.account_uid}: ${String(why).slice(0, 120)}`, 'system').commit();
+    await store.tenant(tenantId).unit().audit('vendor.needs_reconnect', `${r.kind} uid=${r.account_uid}: ${String(why).slice(0, 120)}`, 'system').commit();
     if (onNeedsReconnect) {
       try { await onNeedsReconnect(tenantId, { accountUid: r.account_uid, why: String(why).slice(0, 200) }); } catch (error) { log('needs_reconnect hook failed', error.message); }
     }
@@ -90,6 +94,9 @@ function createVendorAccounts({
 
   async function connect(tenantId, input, actor) {
     const b = input || {};
+    const kind = String(b.kind || 'ttlock');
+    if (!KINDS.includes(kind)) throw new AccountError(400, `kind must be one of ${KINDS.join(', ')}`);
+    if (kind === 'nuki') return connectNuki(tenantId, b, actor);
     const region = String(b.region || 'eu');
     if (!REGIONS.includes(region)) throw new AccountError(400, `region must be one of ${REGIONS.join(', ')}`);
     const username = typeof b.username === 'string' ? b.username.trim() : '';
@@ -136,11 +143,50 @@ function createVendorAccounts({
     return { ...publicView(await row(tenantId)), switchedAccount: Boolean(prev && prev.account_uid !== uid) };
   }
 
+  /**
+   * Nuki: an API token from Nuki Web → API (full access to that Nuki account).
+   * Checked against the account and its locks before anything is stored.
+   */
+  async function connectNuki(tenantId, b, actor) {
+    const apiToken = typeof b.apiToken === 'string' ? b.apiToken.trim() : '';
+    if (apiToken.length < 16 || apiToken.length > 500 || /\s/.test(apiToken)) throw new AccountError(400, 'apiToken is required: Nuki Web → API → Generate API token');
+    if (!secretsKey) throw new AccountError(400, 'SECRETS_KEY is not configured on the server; cannot store vendor tokens');
+    const nuki = new Nuki({ token: apiToken, apiBase: nukiApiBase, fetch });
+    let account; let locks;
+    try {
+      account = await nuki.account();
+      locks = await nuki.listSmartlocks();
+    } catch (error) {
+      if (error && error.auth) throw new AccountError(400, 'Nuki rejected the API token (a token dies when the Nuki Web password changes)');
+      throw new AccountError(502, `could not reach Nuki: ${String((error && error.message) || error).slice(0, 160)}`);
+    }
+    const uid = String((account && account.accountId) || '');
+    if (!uid) throw new AccountError(502, 'Nuki did not return an account id');
+    const clash = await sql.first('SELECT tenant_id FROM vendor_accounts WHERE kind = ? AND region = ? AND account_uid = ? AND tenant_id <> ?', ['nuki', 'eu', uid, tenantId]);
+    if (clash) throw new AccountError(409, 'this Nuki account is already connected to another AccessX account');
+    const at = new Date(now()).toISOString();
+    const sealed = await seal(tenantId, { apiToken });
+    const prev = await row(tenantId);
+    const shown = String((account && (account.email || account.name)) || `Nuki ${uid}`).slice(0, 100);
+    await store.tenant(tenantId).unit().raw(
+      `INSERT INTO vendor_accounts (tenant_id, kind, region, account, account_uid, client_id, sealed, token_expires_at, status, last_error, lock_count, connected_by, connected_at, updated_at)
+       VALUES (?, 'nuki', 'eu', ?, ?, NULL, ?, ?, 'connected', NULL, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id) DO UPDATE SET kind = excluded.kind, region = excluded.region, account = excluded.account, account_uid = excluded.account_uid,
+         client_id = NULL, sealed = excluded.sealed, token_expires_at = excluded.token_expires_at, status = 'connected', last_error = NULL,
+         lock_count = excluded.lock_count, connected_by = excluded.connected_by, connected_at = excluded.connected_at, updated_at = excluded.updated_at`,
+      [tenantId, shown, uid, sealed, NEVER, locks.length, actor, at, at],
+    )
+      .audit(prev ? 'vendor.reconnect' : 'vendor.connect', `nuki uid=${uid} locks=${locks.length}${prev && (prev.kind !== 'nuki' || prev.account_uid !== uid) ? ` (was ${prev.kind} uid=${prev.account_uid})` : ''}`, actor)
+      .commit();
+    cache.delete(tenantId);
+    return { ...publicView(await row(tenantId)), switchedAccount: Boolean(prev && (prev.kind !== 'nuki' || prev.account_uid !== uid)) };
+  }
+
   async function disconnect(tenantId, actor) {
     const r = await row(tenantId);
     if (!r) throw new AccountError(404, 'no vendor account connected');
     await store.tenant(tenantId).unit().raw('DELETE FROM vendor_accounts WHERE tenant_id = ?', [tenantId])
-      .audit('vendor.disconnect', `ttlock uid=${r.account_uid}`, actor).commit();
+      .audit('vendor.disconnect', `${r.kind} uid=${r.account_uid}`, actor).commit();
     cache.delete(tenantId);
     return publicView(null);
   }
@@ -228,7 +274,23 @@ function createVendorAccounts({
     if (hit && hit.key === `${r.connected_at}|${r.status}`) return hit.vendor;
     let vendor;
     if (r.status === 'needs_reconnect') {
-      vendor = brokenVendor(new VendorUnavailableError('the TTLock account must be reconnected by an owner', { reason: 'needs_reconnect' }), r);
+      vendor = brokenVendor(new VendorUnavailableError(`the ${r.kind === 'nuki' ? 'Nuki' : 'TTLock'} account must be reconnected by an owner`, { reason: 'needs_reconnect' }), r);
+    } else if (r.kind === 'nuki') {
+      let mem = null; // { sealed, apiToken }: decrypted once per stored token
+      const token = async () => {
+        const cur = await row(tenantId);
+        if (!cur) throw new VendorUnavailableError('the Nuki account was disconnected', { reason: 'disconnected' });
+        if (!mem || mem.sealed !== cur.sealed) {
+          let t;
+          try { t = await unseal(tenantId, cur.sealed); } catch (error) { throw new VendorUnavailableError(`stored Nuki token cannot be decrypted: ${error.message}`, { reason: 'needs_reconnect' }); }
+          mem = { sealed: cur.sealed, apiToken: t.apiToken };
+        }
+        return mem.apiToken;
+      };
+      vendor = createNukiVendor(new Nuki({ token, apiBase: nukiApiBase, fetch }), {
+        label: `Nuki account ${r.account}`, cacheMs: lockCacheMs, now, ...nukiPoll,
+        onAuthFailure: error => markNeedsReconnect(tenantId, error.message),
+      });
     } else {
       const tt = new TTLock({ region: r.region, apiBase, fetch, clientId: r.client_id || platformApp.clientId, tokenProvider: tokenSource(tenantId, r.client_id || platformApp.clientId) });
       vendor = createCloudVendor(tt, {
@@ -245,11 +307,12 @@ function createVendorAccounts({
 
 function brokenVendor(error, r) {
   const fail = async () => { throw error; };
+  const name = r.kind === 'nuki' ? 'Nuki' : 'TTLock';
   return {
-    kind: 'ttlock', demo: false, broken: true,
-    status: () => ({ mode: `TTLock account ${r.account} — reconnect required`, region: r.region, reason: error.reason }),
+    kind: r.kind, demo: false, broken: true,
+    status: () => ({ mode: `${name} account ${r.account} — reconnect required`, region: r.region, reason: error.reason }),
     listLocks: fail, unlock: fail, createPasscode: fail, deletePasscode: fail, listPasscodes: fail, records: fail,
-    async info() { return { active: 'ttlock', available: ['ttlock', 'demo'], capabilities: {}, health: { vendor: 'ttlock', ok: false, mode: 'reconnect required', note: error.message } }; },
+    async info() { return { active: r.kind, available: [r.kind, 'demo'], capabilities: {}, health: { vendor: r.kind, ok: false, mode: 'reconnect required', note: error.message } }; },
     mirror: null,
   };
 }

@@ -3868,7 +3868,8 @@ function createApi({
     } catch (error) {
       if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
       if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
-      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError' || error.name === 'BillingError')) return { status: error.status, body: { ok: false, error: error.message } };
+      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError' || error.name === 'BillingError' || error.name === 'VendorRequestError')) return { status: error.status, body: { ok: false, error: error.message } };
+      if (error && error.code === 'NO_GATEWAY') return { status: 409, body: { ok: false, error: error.message, reason: 'no_gateway' } };
       if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' }, headers: { 'retry-after': '2' } };
       if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
       // Lock vendor unusable (token revoked, TTLock down): say why, never a 500 or an empty fleet.

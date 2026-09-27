@@ -96,6 +96,7 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
     if (!has('TTLOCK_NOTIFY_SECRET')) add('warn', 'TTLOCK_NOTIFY_SECRET', 'no TTLock callback: lock alarms and visitor arrivals only arrive by polling (~15 min) or not at all', 'set a random value and register https://<host>/api/ttlock/notify/<value> in the TTLock console');
     else if (!hidden('TTLOCK_NOTIFY_SECRET') && val('TTLOCK_NOTIFY_SECRET').length < 24) add(bad, 'TTLOCK_NOTIFY_SECRET', 'TTLOCK_NOTIFY_SECRET is short: it is the only thing protecting the callback URL');
   }
+  if (val('NUKI_API_BASE') && production) add('warn', 'NUKI_API_BASE', `NUKI_API_BASE is overridden (${val('NUKI_API_BASE')}): real locks are not reached through Nuki's cloud`);
   if (val('TTLOCK_API_BASE') && production) add('warn', 'TTLOCK_API_BASE', `TTLOCK_API_BASE is overridden (${val('TTLOCK_API_BASE')}): real locks are not reached through TTLock's cloud`);
 
   // --- audit evidence

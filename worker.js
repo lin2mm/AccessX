@@ -50,7 +50,7 @@ let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.NUKI_API_BASE, env.NUKI_POLL_MS, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -94,6 +94,8 @@ function apiFor(env) {
     store,
     secretsKey: env.SECRETS_KEY || '',
     apiBase: env.TTLOCK_API_BASE || '',
+    nukiApiBase: env.NUKI_API_BASE || '',
+    nukiPoll: env.NUKI_POLL_MS ? { pollMs: Math.max(50, Number(env.NUKI_POLL_MS) || 1500) } : {},
     platformApp: { clientId: env.TTLOCK_CLIENT_ID || '', clientSecret: env.TTLOCK_CLIENT_SECRET || '' },
     log: (...a) => console.error(...a),
     onNeedsReconnect: (tenantId, info) => alerts.send(tenantId, 'vendor_needs_reconnect', needsReconnectMessage(info)),
