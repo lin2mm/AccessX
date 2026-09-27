@@ -223,10 +223,25 @@ the gap. The passcode API takes `endLocal` (`YYYY-MM-DDTHH:mm`, site time);
 `pending_removal` until someone confirms it was removed at the door.
 `overdueRemovals()` (reconcile-core) lists those older than
 `REMOVAL_SLA_HOURS` (48). Each reconcile run adds `removal_overdue` notices
-to the plan, and the first run that sees a credential overdue writes one
+to the plan (the SLA is per tenant, see below), and the first run that sees a credential overdue writes one
 `credential.removal_overdue` audit entry (deduplicated on the credential id),
 so webhook/anchor consumers and SIEMs see it. The revocation report tags the
 row *over 48 h*; the evidence pack counts `overdueOnSite`.
+
+**Per-tenant SLA and alerts.** The removal target is a tenant setting
+(`PUT /api/alerts {slaHours}`, 1–720, default 48): a pharmacy may want 24 h.
+`alerts-core.js` pushes the events a person must act on — approval requested,
+removal overdue, first failed revoke of a credential, break-glass sign-in —
+to one webhook per tenant in Slack (`{text}`), Microsoft Teams Workflows
+(Adaptive Card attachment; the Office 365 connector format is retired) or
+plain JSON (SIEM/ticketing). The URL is a bearer secret, so it is sealed with
+`SECRETS_KEY` and only its host is ever shown. Delivery is best effort (4 s
+timeout, result kept in `alerts.lastDelivery` via `json_set` so it never
+clobbers a concurrent settings change) and never fails the change that
+triggered it; the audit log stays the record. Repeating conditions alert
+once: overdue removals ride on the one-time `credential.removal_overdue`
+entry, failed revokes alert only when the credential had no earlier
+`credential.revoke_failed`.
 
 **RBAC coverage gate.** `rbac-core.js` fails closed: a path matching no rule
 needs the owner. That is safe but hides mistakes — a new manager-level route

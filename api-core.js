@@ -109,7 +109,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null,
+  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null,
 }) {
   /** A tenant's own connected account wins; otherwise the adapter's default (demo / legacy env). */
   const resolveVendor = async tenantId => (vendorAccounts && await vendorAccounts.vendorFor(tenantId)) || vendorFor(tenantId);
@@ -133,11 +133,14 @@ function createApi({
   /* ---------------------------------------------------------------- */
   /* Reconciliation                                                    */
   /* ---------------------------------------------------------------- */
+  const slaOf = snap => ((snap.settings || {}).alerts || {}).slaHours || reconciler.REMOVAL_SLA_HOURS;
+
   async function reconcileTenant(tenantId, { userId = null, lockFilter = () => true, dryRun = false, actor } = {}) {
     const t = store.tenant(tenantId);
     const vendor = await resolveVendor(tenantId);
     const [snap, locks] = await Promise.all([t.snapshot(), vendor.listLocks()]);
-    const planned = reconciler.plan(snap, locks, { userId, lockFilter });
+    const slaHours = slaOf(snap);
+    const planned = reconciler.plan(snap, locks, { userId, lockFilter, slaHours });
     const overdue = planned.notices.filter(n => n.type === 'removal_overdue');
     // Escalate each overdue on-site removal once (the audit entry is the marker).
     let fresh = [];
@@ -149,7 +152,35 @@ function createApi({
     const uow = t.unit();
     const outcome = planned.actions.length ? await reconciler.execute(planned, { vendor, uow, snapshot: snap, actor }) : { summary: { revoked: 0, expired: 0, pendingRemoval: 0, failed: 0 }, results: [] };
     for (const n of fresh) uow.audit('credential.removal_overdue', `${n.credentialId} lock ${n.lockId} user ${n.userId} still on the lock after ${n.ageHours} h (SLA ${n.slaHours} h)`, reconciler.ACTOR);
+    const failedNow = outcome.results.filter(r => !r.ok);
+    const failedBefore = failedNow.length
+      ? new Set((await t.auditRecent({ action: 'credential.revoke_failed', limit: 1000 })).map(e => String(e.detail).split(' ')[0]))
+      : new Set();
     await uow.commit();
+    // Tell a human (best effort, never fails the run): each overdue removal and
+    // each credential's first failed revoke, once.
+    if (alerts) {
+      const name = id => ((snap.users || []).find(u => u.id === id) || {}).name || id;
+      const door = id => { const c = (locks || []).find(l => Number(l.lockId) === Number(id)); return c ? `${c.lockAlias || c.name || id} (${id})` : String(id); };
+      if (fresh.length) {
+        await alerts.send(tenantId, 'removal_overdue', {
+          title: `${fresh.length} code${fresh.length > 1 ? 's' : ''} still on offline locks past the ${slaHours} h removal target`,
+          text: 'Access was revoked, but the lock cannot be reached from the cloud. Someone has to remove the code at the door and confirm it in AccessX.',
+          facts: fresh.slice(0, 10).map(n => [door(n.lockId), `${name(n.userId)} — revoked ${n.ageHours} h ago`]),
+          path: '/#reports',
+        });
+      }
+      const newFailures = failedNow.filter(r => !failedBefore.has(r.credentialId));
+      if (newFailures.length) {
+        const creds = snap.credentials || [];
+        await alerts.send(tenantId, 'revoke_failed', {
+          title: `Could not revoke ${newFailures.length} code${newFailures.length > 1 ? 's' : ''} — ${newFailures.length > 1 ? 'they' : 'it'} still work${newFailures.length > 1 ? '' : 's'}`,
+          text: 'AccessX keeps retrying every 15 minutes. If the lock or its gateway is offline, remove the code on site.',
+          facts: newFailures.slice(0, 10).map(r => { const c = creds.find(x => x.id === r.credentialId) || {}; return [door(c.lockId), `${name(c.userId)}: ${String(r.error).slice(0, 120)}`]; }),
+          path: '/#reports',
+        });
+      }
+    }
     return { dryRun, plan: planned, ...outcome, summary: { ...outcome.summary, overdue: overdue.length, escalated: fresh.length } };
   }
 
@@ -333,6 +364,14 @@ function createApi({
         [ctx.tenantId, approval.id, summary, JSON.stringify({ method: ctx.method, path: ctx.path, body: ctx.body }), JSON.stringify(hit), ctx.actor, approval.requestedAt, approval.expiresAt])
       .audit('approval.request', `${approval.id}: ${summary} [sensitive locks ${hit.join(',')}]`, ctx.actor)
       .commit();
+    if (alerts) {
+      await alerts.send(ctx.tenantId, 'approval_requested', {
+        title: 'Approval needed: access to a sensitive door',
+        text: `${ctx.operator && ctx.operator.name ? ctx.operator.name : ctx.actor} asked for: ${summary}. A different operator with the same permission must approve within 72 hours.`,
+        facts: [['Doors', hit.join(', ')], ['Requested by', ctx.actor], ['Expires', approval.expiresAt]],
+        path: '/#log',
+      });
+    }
     return { _status: 202, approvalRequired: true, approval, message: 'This grants access to a sensitive door: a second operator must approve it (within 72 hours).' };
   }
 
@@ -848,7 +887,22 @@ function createApi({
     if (!ctx.scope.all) delete report.triggers; // other sites' leavers are not yours to count
     return { windowDays: days, generatedAt: new Date(now).toISOString(), ...report };
   }
-  route('GET', /^\/api\/reports\/revocation$/, async ctx => revocationFor(ctx, Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 365)));
+  route('GET', /^\/api\/reports\/revocation$/, async ctx => ({
+    ...(await revocationFor(ctx, Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 365))),
+    slaHours: slaOf(await ctx.snap()),
+  }));
+
+  // --- alerts (Slack / Teams / JSON webhook) ---------------------------------
+  const needAlerts = () => { if (!alerts) throw new HttpError(501, 'alerts are not available in this deployment'); return alerts; };
+  route('GET', /^\/api\/alerts$/, async ctx => ({ alerts: await needAlerts().settings(ctx.tenantId) }));
+  route('PUT', /^\/api\/alerts$/, async ctx => ({ alerts: await needAlerts().save(ctx.tenantId, ctx.body, ctx.actor) }));
+  route('POST', /^\/api\/alerts\/test$/, async ctx => {
+    const status = await needAlerts().send(ctx.tenantId, 'test', {
+      title: 'AccessX test alert', text: `Sent by ${ctx.actor}. You will get approval requests, overdue on-site removals, failed revocations and break-glass sign-ins here.`,
+      facts: [['Tenant', (await ctx.snap()).tenant.name]], path: '/',
+    }, { force: true });
+    return { delivery: status, alerts: await alerts.settings(ctx.tenantId) };
+  });
 
   // --- audit anchoring, export, retention -----------------------------------
   const ops = () => {
@@ -920,8 +974,8 @@ function createApi({
       generatedBy: ctx.actor,
       accessRemoval: {
         remote: revocation.remote, onSite: revocation.onsite, triggers: revocation.triggers ? revocation.triggers.length : undefined,
-        stillOpen: revocation.open, pendingOnSite: pending, slaHours: reconciler.REMOVAL_SLA_HOURS,
-        overdueOnSite: pending.filter(p => p.ageHours >= reconciler.REMOVAL_SLA_HOURS).length,
+        stillOpen: revocation.open, pendingOnSite: pending, slaHours: slaOf(snap),
+        overdueOnSite: pending.filter(p => p.ageHours >= slaOf(snap)).length,
       },
       administrators: { people, machineIdentities: live.filter(o => o.role === 'r_provisioner').map(o => ({ id: o.id, name: o.name, createdAt: o.createdAt })),
         bootstrap: auth.envOperators(ctx.tenantId).map(o => ({ id: o.id, name: o.name, role: roleName(o.role), note: 'server configuration (env token)' })),
@@ -1158,6 +1212,14 @@ function createApi({
       await store.tenant(result.tenantId).unit()
         .raw('UPDATE operators SET last_login_at = ? WHERE tenant_id = ? AND id = ?', [new Date().toISOString(), result.tenantId, result.operator.id])
         .audit(glass ? 'operator.break_glass' : 'operator.login', glass ? `token sign-in while single sign-on is enforced${result.operator.env ? ' (server bootstrap token)' : ''}` : 'via token', result.operator.id).commit();
+      if (glass && alerts) {
+        await alerts.send(result.tenantId, 'break_glass', {
+          title: 'Break-glass sign-in',
+          text: `${result.operator.name || result.operator.id} signed in with a token while single sign-on is enforced. If this was not a planned emergency, revoke the token and review the audit log.`,
+          facts: [['Operator', result.operator.id], ['Role', result.operator.role], ['From', req.ip || 'unknown']],
+          path: '/#log',
+        });
+      }
       return {
         status: 200,
         cookies: [sessionCookie(result.cookieValue, { ...cookieOpts(req), maxAgeSec: result.maxAgeSec })],
@@ -1362,7 +1424,7 @@ function createApi({
     } catch (error) {
       if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
       if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
-      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError')) return { status: error.status, body: { ok: false, error: error.message } };
+      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError')) return { status: error.status, body: { ok: false, error: error.message } };
       if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' } };
       if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
       // Lock vendor unusable (token revoked, TTLock down): say why, never a 500 or an empty fleet.

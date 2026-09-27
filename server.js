@@ -80,6 +80,8 @@ const auth = createAuthenticator({
   openReads: process.env.AUTH_OPEN_READS === undefined ? tt.demo : process.env.AUTH_OPEN_READS === '1',
 });
 // Signed audit anchors (AUDIT_SIGNING_KEY, Ed25519 JWK) + retention.
+const { createAlerts } = require('./alerts-core');
+const alerts = createAlerts({ store, secretsKey: process.env.SECRETS_KEY || '', allowHttp: process.env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: process.env.PUBLIC_URL || '', log: (...a) => console.error(...a) });
 const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: process.env.ALLOW_HTTP_WEBHOOKS === '1' });
 // SSO domain proof (TXT over DoH). Tests set overrides via `dns.set()`.
 const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
@@ -87,7 +89,7 @@ const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-qu
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const api = createApi({
-  store, auth, vendorFor, vendorAccounts, auditOps, dns, ensureReady, log: (...a) => console.error(...a),
+  store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
   // The bundled mock IdP runs on plain http; real issuers must be https.
@@ -210,7 +212,7 @@ async function autoconfigureMockSso(port) {
 }
 
 module.exports = {
-  writeQueue, app, api, store, dns, startReconciler, autoconfigureMockSso };
+  writeQueue, app, api, store, dns, alerts, vendorFor, startReconciler, autoconfigureMockSso };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;

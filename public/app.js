@@ -77,7 +77,7 @@ async function init(){
   await loadMode();
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 async function loadDoors(){
@@ -280,14 +280,15 @@ async function loadRevocation(){
   const r=await api('/api/reports/revocation?days=30');
   if(!r.ok){$('#ttr-kpis').innerHTML=`<div class="empty">${esc(errText(r))}</div>`;$('#ttr-open').innerHTML='';return;}
   const o=r.open||{};
+  const SLA_H=Number(r.slaHours)||48;
   $('#ttr-kpis').innerHTML=`
     <div class="kpi"><div class="n ${r.remote.p95Sec>300?'warn':'ok'}">${dur(r.remote.p95Sec)}</div><div class="l">Remote revoke p95 (${Number(r.remote.count)})</div></div>
-    <div class="kpi"><div class="n ${r.onsite.p95Sec>172800?'warn':''}">${dur(r.onsite.p95Sec)}</div><div class="l">On-site removal p95 (${Number(r.onsite.count)})</div></div>
+    <div class="kpi"><div class="n ${r.onsite.p95Sec>SLA_H*3600?'warn':''}">${dur(r.onsite.p95Sec)}</div><div class="l">On-site removal p95 (${Number(r.onsite.count)})</div></div>
     <div class="kpi"><div class="n ${o.stillActive?'bad':o.count?'warn':'ok'}">${Number(o.count)||0}</div><div class="l">Still open${o.oldestSec?' · oldest '+dur(o.oldestSec):''}</div></div>`;
   const door=id=>(DOORS.find(d=>Number(d.lockId)===Number(id))||{}).lockAlias||`Lock ${Number(id)}`;
   $('#ttr-open').innerHTML=(o.items||[]).length?`<table><tr><th>Door</th><th>Why</th><th>Status</th><th>Open for</th></tr>`+
     o.items.map(i=>`<tr><td>${esc(door(i.lockId))}</td><td>${esc(i.trigger)}</td>
-    <td>${i.outcome==='open_remote'?'<span class="tag r">code still works — revoke failing</span>':'<span class="tag o">remove at the lock</span>'}${i.ageSec>=48*3600?' <span class="tag r">over 48 h</span>':''}</td>
+    <td>${i.outcome==='open_remote'?'<span class="tag r">code still works — revoke failing</span>':'<span class="tag o">remove at the lock</span>'}${i.ageSec>=SLA_H*3600?` <span class="tag r">over ${SLA_H} h</span>`:''}</td>
     <td>${dur(i.ageSec)}</td></tr>`).join('')+'</table>'
     :`<div class="meta">Nothing open. ${Number(r.credentials)||0} credentials of ${r.triggers??'—'} leavers were removed in this window.</div>`;
 }
@@ -463,6 +464,41 @@ $('#a-verify').addEventListener('click',async()=>{
   $('#a-verify-res').textContent=!r.ok?errText(r):v.ok
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
+});
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins'};
+async function loadAlerts(){
+  const r=await api('/api/alerts');
+  $('#alerts-box').hidden=!r.ok;
+  if(!r.ok)return;
+  const a=r.alerts;
+  $('#alerts-state').textContent=(a.configured?`Sending to ${a.host} as ${a.format}`:'No webhook yet.')+
+    ` · removal target ${a.slaHours} h`+(a.lastDelivery?` · last delivery ${new Date(a.lastDelivery.at).toLocaleString()}: ${a.lastDelivery.status}`:'')+
+    (a.secretsKeyConfigured?'':' · SECRETS_KEY is not set on the server, so a webhook cannot be stored');
+  $('#al-sla').value=a.slaHours;
+  $('#al-format').value=a.format||'';
+  $('#al-remove').hidden=!a.configured;$('#al-test').hidden=!a.configured;
+  $('#al-events').innerHTML=a.availableEvents.map(e=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;font-weight:normal"><input type="checkbox" data-alev="${esc(e)}" ${a.events.includes(e)?'checked':''}>${esc(ALERT_LABELS[e]||e)}</label>`).join('');
+}
+$('#alerts-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const body={slaHours:Number($('#al-sla').value),events:[...document.querySelectorAll('[data-alev]')].filter(x=>x.checked).map(x=>x.dataset.alev)};
+  if($('#al-format').value)body.format=$('#al-format').value;
+  if($('#al-url').value.trim())body.webhookUrl=$('#al-url').value.trim();
+  const r=await api('/api/alerts',{method:'PUT',body:JSON.stringify(body)});
+  $('#al-url').value='';
+  $('#alerts-msg').textContent=r.ok?'Saved.':errText(r);
+  loadAlerts();loadRevocation();
+});
+$('#al-test').addEventListener('click',async()=>{
+  const r=await post('/api/alerts/test',{});
+  $('#alerts-msg').textContent=r.ok?`Test: ${r.delivery}`:errText(r);
+  loadAlerts();
+});
+$('#al-remove').addEventListener('click',async()=>{
+  if(!confirm('Stop sending alerts?'))return;
+  const r=await api('/api/alerts',{method:'PUT',body:JSON.stringify({webhookUrl:null})});
+  $('#alerts-msg').textContent=r.ok?'Webhook removed.':errText(r);
+  loadAlerts();
 });
 async function loadAnchors(){
   const r=await api('/api/audit/anchors?limit=1');

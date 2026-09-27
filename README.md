@@ -141,9 +141,13 @@ Operators (people who administer the system) are separate from door users.
   a second operator; approved requests are re-checked before they run. The
   approver never sees an approved passcode — only the requester can collect
   it, once.
-- **48 h removal SLA** — a code that still has to be removed at an offline
-  lock is flagged *over 48 h* in the revocation report and evidence pack, and
-  escalated once in the audit log (`credential.removal_overdue`).
+- **Removal SLA (default 48 h, per tenant)** — a code that still has to be
+  removed at an offline lock is flagged in the revocation report and evidence
+  pack once it passes the target, and escalated once in the audit log
+  (`credential.removal_overdue`).
+- **Alerts to Slack / Teams / SIEM** — approval requests, overdue removals,
+  failed revocations and break-glass sign-ins go to one webhook per tenant
+  (URL stored encrypted).
 - **Local times mean the site's clock** — passcode end dates and schedules
   are converted in the door's time zone; on a daylight-saving fall-back the
   ambiguous hour uses the *earlier* instant, a skipped hour moves forward

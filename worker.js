@@ -14,6 +14,7 @@ import { createDemoVendor, staticMirror } from './vendor-demo.js';
 import { createVendorAccounts } from './vendor-accounts.js';
 import { createAuditOps } from './audit-ops.js';
 import { createDnsTxtResolver } from './dns-core.js';
+import { createAlerts } from './alerts-core.js';
 import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
 
 const MAX_BODY = 64 * 1024;
@@ -40,7 +41,7 @@ async function appState(sql, key) {
  */
 let cached = null;
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -84,7 +85,8 @@ function apiFor(env) {
   });
   const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
   const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', log: (...a) => console.error(...a) });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }

@@ -184,7 +184,10 @@ test('SSO: only DNS-verified domains route sign-ins; a verified domain cannot be
 });
 
 test('SSO enforcement: people must use SSO; break-glass and SCIM tokens still work; turning it on is guarded', async () => {
-  const ctx = await boot({ MOCK_IDP: '1', SECRETS_KEY: KEY, PLATFORM_TOKEN: 'plat' });
+  const ctx = await boot({ MOCK_IDP: '1', SECRETS_KEY: KEY, PLATFORM_TOKEN: 'plat', ALLOW_HTTP_WEBHOOKS: '1' });
+  const alertsGot = [];
+  const hook = require('node:http').createServer((req, res) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { alertsGot.push(JSON.parse(b)); res.end(); }); });
+  await new Promise(r => hook.listen(0, '127.0.0.1', r));
   try {
     const t2 = await ctx.call('POST', '/api/tenants', { token: 'plat', body: { name: 'Enforced Co' } });
     const tid = t2.body.tenant.id;
@@ -210,6 +213,7 @@ test('SSO enforcement: people must use SSO; break-glass and SCIM tokens still wo
     assert.match(noGlass.body.error, /break-glass/);
     assert.equal((await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'x', role: 'r_manager', breakGlass: true } })).status, 400, 'break-glass must be an owner');
     const glass = await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'Break glass (safe)', role: 'r_owner', breakGlass: true } });
+    assert.equal((await ctx.call('PUT', '/api/alerts', { token: owner, body: { webhookUrl: `http://127.0.0.1:${hook.address().port}/siem`, format: 'json' } })).status, 200);
     assert.equal(glass.body.operator.breakGlass, true);
     // 3) on — existing token sessions of people end immediately
     const on = await enforce(alice);
@@ -232,6 +236,10 @@ test('SSO enforcement: people must use SSO; break-glass and SCIM tokens still wo
     const audit = (await ctx.call('GET', '/api/audit?action=operator.break_glass', { headers: { cookie: alice } })).body.log;
     assert.equal(audit.length, 1, 'every break-glass sign-in is on the record');
     assert.match(audit[0].detail, /while single sign-on is enforced/);
+    const bgAlert = alertsGot.find(a => a.type === 'accessx.alert.break_glass');
+    assert.ok(bgAlert, 'the break-glass sign-in was pushed to the alert channel');
+    assert.equal(bgAlert.tenant.id, tid);
+    assert.equal(bgAlert.facts.Operator, glass.body.operator.id);
 
     // Guards: cannot remove the last break-glass owner or SSO itself while enforced
     assert.equal((await ctx.call('DELETE', `/api/operators/${glass.body.operator.id}`, { token: glass.body.token })).status, 409, 'cannot revoke yourself');
@@ -245,5 +253,5 @@ test('SSO enforcement: people must use SSO; break-glass and SCIM tokens still wo
     assert.equal((await ctx.call('POST', '/api/auth/login', { body: { token: manager } })).status, 200);
     const actions = (await ctx.call('GET', '/api/audit?action=sso.enforce', { token: owner })).body.log.map(x => x.detail);
     assert.deepEqual(actions, ['off', `on (token sessions ended: ${on.body.tokenSessionsEnded})`]);
-  } finally { await ctx.close(); }
+  } finally { hook.close(); await ctx.close(); }
 });

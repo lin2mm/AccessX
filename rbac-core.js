@@ -82,6 +82,7 @@ const ROUTES = [
   ['GET', /^\/api\/sso$/, OWNER], ['PUT', /^\/api\/sso$/, OWNER], ['DELETE', /^\/api\/sso$/, OWNER],
   ['POST', /^\/api\/sso\/domains\/verify$/, OWNER], ['PUT', /^\/api\/sso\/enforcement$/, OWNER],
   ['POST', /^\/api\/audit\/anchor$/, OWNER], ['PUT', /^\/api\/audit\/settings$/, OWNER], ['POST', /^\/api\/audit\/purge$/, OWNER],
+  ['GET', /^\/api\/alerts$/, OWNER], ['PUT', /^\/api\/alerts$/, OWNER], ['POST', /^\/api\/alerts\/test$/, OWNER],
   ['GET', /^\/api\/vendor-account$/, OWNER], ['PUT', /^\/api\/vendor-account$/, OWNER], ['DELETE', /^\/api\/vendor-account$/, OWNER],
   // Four-eyes: listing is operational; deciding re-checks the ORIGINAL route's permission inside.
   ['GET', /^\/api\/approvals$/, 'door.read'],

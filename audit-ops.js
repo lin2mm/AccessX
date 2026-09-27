@@ -21,15 +21,15 @@ class AuditOpsError extends Error {
 }
 
 /** https only, no credentials, no loopback/private literals (SSRF). DNS rebinding: see docs. */
-function checkWebhookUrl(raw, { allowHttp = false } = {}) {
+function checkWebhookUrl(raw, { allowHttp = false, field = 'anchorWebhook' } = {}) {
   let u;
-  try { u = new URL(String(raw)); } catch { throw new AuditOpsError(400, 'anchorWebhook must be a URL'); }
-  if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw new AuditOpsError(400, 'anchorWebhook must use https');
-  if (u.username || u.password) throw new AuditOpsError(400, 'anchorWebhook must not contain credentials');
+  try { u = new URL(String(raw)); } catch { throw new AuditOpsError(400, `${field} must be a URL`); }
+  if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw new AuditOpsError(400, `${field} must use https`);
+  if (u.username || u.password) throw new AuditOpsError(400, `${field} must not contain credentials`);
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   const privateV4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
   if (!allowHttp && (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || privateV4.test(host) || host === '::1' || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host))) {
-    throw new AuditOpsError(400, 'anchorWebhook must be a public address');
+    throw new AuditOpsError(400, `${field} must be a public address`);
   }
   return u.toString();
 }

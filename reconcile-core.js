@@ -22,7 +22,7 @@ const DAY = 864e5;
 
 const isExpiryOnly = reasons => reasons.every(r => r.startsWith('expired'));
 
-function plan(snapshot, locks, { now = Date.now(), userId = null, lockFilter = () => true, dstHorizonDays = 14 } = {}) {
+function plan(snapshot, locks, { now = Date.now(), userId = null, lockFilter = () => true, dstHorizonDays = 14, slaHours = REMOVAL_SLA_HOURS } = {}) {
   const lockById = new Map((locks || []).map(l => [Number(l.lockId), l]));
   const online = lockId => Boolean((lockById.get(Number(lockId)) || {}).hasGateway);
   const actions = [];
@@ -53,7 +53,7 @@ function plan(snapshot, locks, { now = Date.now(), userId = null, lockFilter = (
 
   return {
     at: new Date(now).toISOString(), actions,
-    notices: [...dstNotices(snapshot, locks, { now, days: dstHorizonDays, lockFilter }), ...overdueRemovals(snapshot, { now, lockFilter })],
+    notices: [...dstNotices(snapshot, locks, { now, days: dstHorizonDays, lockFilter }), ...overdueRemovals(snapshot, { now, lockFilter, slaHours })],
   };
 }
 
