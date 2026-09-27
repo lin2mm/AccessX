@@ -213,3 +213,70 @@ discounts; shown to the owner (People → Billing, with the per-door-month
 price) and on the platform views. Tiered or non-per-unit prices show no
 estimate rather than a wrong one. The Stripe invoice is what counts.
 
+
+## Cloudflare cost per tenant (R20)
+
+The price floor: what one more tenant costs us on Cloudflare. Short answer:
+**$5/month flat for the whole account up to roughly 70-120 tenants (the
+first allowances to run out are Worker CPU, and Durable Object duration in the
+worst case), then about $0.07 per tenant per month ($0.13 worst case).** Infrastructure does not set
+the price; SMS, email, Stripe fees, installs and support time do.
+
+**Prices** (Workers Paid, checked 2026-09-27; re-check before quoting):
+Workers $5/month base, 10 M requests and 30 M CPU-ms included, then $0.30 per
+M requests and $0.02 per M CPU-ms. Durable Objects: 1 M requests and 400,000
+GB-s included, then $0.15 per M and $12.50 per M GB-s; billed while running,
+not while idle and able to hibernate (TenantWriter holds no WebSockets). D1:
+25 B rows read, 50 M rows written, 5 GB included, then $0.001 per M read, $1
+per M written, $0.75 per GB-month. R2: 10 GB, 1 M class A and 10 M class B
+operations free, then $0.015 per GB-month. Sources: developers.cloudflare.com
+D1 pricing, R2 pricing, Durable Objects lifecycle.
+
+**Measured** (`npm run load:test`, local workerd + D1, R20; the
+`x-accessx-d1` header with `USAGE_METER=1`):
+
+| Request | D1 queries | Rows read | Rows written |
+|---|---|---|---|
+| Any warm read (doors, users, compile, a person's doors) | 3 | 3 | 0 |
+| Door health / reconcile dry-run | 5 | 5 | 0 |
+| Audit page (100 entries) | 4 | 103 | 0 |
+| Revocation report (5,000 people) | 9 | 5,236 | 0 |
+| Add a person | 8 | 9 | 8 |
+| Nuki code: create / delete | 11 / 9 | 12 / 11 | 9 / 8 |
+| Cold snapshot load (new isolate, or after 15 min) | ~10 | ~2 x the tenant's rows (about 15,000 at 7,000 people) | 0 |
+| Weekly export, 16,317 rows | 76 | 16,605 | 0 |
+
+**A typical pilot tenant** (50 people, 10 doors, 300 visits, ~1,000 changes a
+month, reception with the Visitors tab open in office hours):
+
+| Meter | Per tenant per month | Covered by the $5 plan | Beyond that, per tenant |
+|---|---|---|---|
+| Worker requests | ~45,000 (walk-in refresh every 20 s ≈ 40,000, admin ~1,500, visitors ~3,000) | ~220 tenants | $0.014 |
+| Worker CPU | ~0.25 M ms (~5 ms a request, estimate) | ~120 tenants | $0.005 |
+| DO requests | ~3,900 (cron: 96 a day = 2,880; writes ~1,000) | ~250 tenants | $0.001 |
+| DO duration | ~750 GB-s (128 MB x ~2 s per cron tick with vendor calls); worst case, if idle time is billed: ~5,600 | ~530 tenants (worst ~70) | $0.009 (worst $0.07) |
+| D1 rows read | up to ~24 M (worst case: every request and cron tick is a cold load of ~500 rows) | ~1,000 tenants | $0.024 |
+| D1 rows written | ~15,000 | ~3,000 tenants | $0.015 |
+| D1 storage | 1-2 MB a year (audit grows) | ~2,500 tenant-years | $0.002 |
+| R2 (weekly export, 8 kept) | ~20 KB a copy | thousands | ~0 |
+
+**What to watch as it grows:**
+
+1. **The cron is the biggest cost driver:** 96 Durable Object wake-ups per
+   tenant per day even when nothing changes. Beyond ~100 tenants, skip tenants
+   with nothing due, or run every 30 minutes. That halves the DO lines.
+2. **One D1 database holds at most 10 GB** (hard limit). At 1-2 MB per tenant
+   per year that is thousands of tenant-years, but big tenants and long audit
+   retention add up. Watch `GET /api/platform/usage` and the D1 dashboard; the
+   way out is one database per region or per large tenant.
+3. **Large tenants:** 5,000 people means a 656 KB `GET /api/users` (not
+   paginated) and a 275 KB compile. Cheap on Cloudflare, slow on a phone.
+   Pagination goes in the backlog before the first tenant above ~1,000 people.
+4. **Latency:** D1 has one primary location. Create it near the customers
+   (`wrangler d1 create accessx --location oc` for Australia; check the
+   current location hints first). Local numbers above do not include that
+   round trip.
+
+**Not Cloudflare, and larger:** SMS (pass-through with margin, capped by
+`SMS_MONTHLY_CAP`), the email provider's plan, Stripe fees, and installs and
+support time. The door minimum (e.g. 5 doors) covers those.

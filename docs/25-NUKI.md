@@ -117,6 +117,16 @@ The fake runs standalone with `node support/fake-nuki.js 4002`.
 
 ## 6. Before the first real Nuki site
 
+**Start with `npm run nuki:check` (R20)**, using the customer's real token:
+`NUKI_API_TOKEN=… npm run nuki:check` lists every lock and reports whether it
+is online, has a keypad, its battery, how many of its ~200 authorizations are
+used, and whether the log is readable. `… npm run nuki:check -- --write <smartlockId> --json site.json`
+also creates a 1-hour code through the same code as production, waits for
+Nuki to confirm it, prints the digits, deletes it and waits until it is gone.
+Type the code on the keypad before and after the delete. Keep `site.json` in
+the site log. The script covers point 3 below, and point 1 if you do the keypad test. The
+others are still manual.
+
 The fake follows the documentation. These points can only be confirmed on a real
 account (about 20 minutes with one Smart Lock, a Keypad and a Bridge or Wi-Fi model):
 

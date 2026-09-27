@@ -24,7 +24,7 @@ Related: [10-PILOT.md](10-PILOT.md) (real locks), [11-OFFICE-SETUP.md](11-OFFICE
 | 8 | Migrate, deploy | `npm run cf:db:migrate:remote`, then `npm run cf:deploy` (always in that order) | `GET /api/healthz` → 200 |
 | 9 | Doctor on the live site | `npm run doctor -- --url https://<host> --platform-token …` | `✓ ready`, warnings understood |
 | 10 | Monitor | uptime check on `/api/healthz` (section 3) | test alert received |
-| 11 | Backup drill | `npm run backup -- d1`, restore test (section 4) | `✓ restorable`, date written in section 6 |
+| 11 | Backup drill | R2 bucket bound as `BACKUPS`, `POST /api/platform/backups/run`, download, `npm run backup -- verify` (section 4) | `✓ restorable`, date written in section 6 |
 | 12 | Remove dev switches | no `ALLOW_HTTP_WEBHOOKS`, `ALLOW_HTTP_ISSUERS`, `MOCK_IDP*`, `*_API_BASE` | doctor has no errors |
 | 13 | Billing (later) | [40-BILLING.md](40-BILLING.md) | doctor: billing active |
 
@@ -113,13 +113,36 @@ database** to check:
 | | Cloudflare D1 | Node (SQLite file) |
 |---|---|---|
 | Automatic | **Time Travel**: always on, free, restore to any minute in the last 30 days (Workers Paid) or 7 (Free) | none: schedule it |
-| Off-site copy | weekly `npm run backup -- d1` (runs `wrangler d1 export DB --remote`), stored outside Cloudflare, encrypted | nightly `npm run backup -- node --data-dir /var/lib/accessx` (`VACUUM INTO`: consistent while running), copied off the host |
-| Check an old file | `npm run backup -- verify backups/d1-….sql --secrets-key "$SECRETS_KEY"` | same with the `.sqlite` |
+| Off-site copy | **automatic weekly export to R2** (R20, below). Monthly: also keep one copy outside Cloudflare (`npm run backup -- d1`, runs `wrangler d1 export DB --remote`), encrypted | nightly `npm run backup -- node --data-dir /var/lib/accessx` (`VACUUM INTO`: consistent while running), copied off the host |
+| Check an old file | `npm run backup -- verify backups/d1-….sql[.gz] --secrets-key "$SECRETS_KEY"` | same with the `.sqlite` |
 | RPO / RTO target | ~1 min / ~15 min | 24 h (hourly if you can) / ~15 min |
 
 Backups contain personal data (names, emails, phone numbers, visit history)
 and sealed secrets: encrypt them at rest, limit who can read them, and delete
 them on the same retention as the live data.
+
+**Weekly export to R2 (R20, `backup-export-core.js`).** Once a week, in the
+quiet hour `BACKUP_HOUR_UTC` (default 17 UTC = 03:00/04:00 Sydney), the cron
+dumps the database as gzipped SQL to `d1/accessx-<time>.sql.gz`. It keeps the
+newest `BACKUP_KEEP` (default 8). Measured: 16,317 rows → 0.5 MB in 0.3 s. The
+dump is streamed through gzip, so memory holds only the compressed bytes.
+
+```sh
+npx wrangler r2 bucket create accessx-backups
+# wrangler.jsonc: "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "accessx-backups" }]
+# (not in the repo's wrangler.jsonc: a deploy fails if the bucket does not exist)
+curl -X POST -H "authorization: Bearer $PLATFORM_TOKEN" https://…/api/platform/backups/run   # first copy now
+curl -H "authorization: Bearer $PLATFORM_TOKEN" https://…/api/platform/backups               # keys, sizes, row counts
+npx wrangler r2 object get accessx-backups/d1/accessx-….sql.gz --remote --file latest.sql.gz
+npm run backup -- verify latest.sql.gz --secrets-key "$SECRETS_KEY"
+```
+
+`GET /api/platform/doctor` warns while no bucket is bound. Limits: D1 has no
+snapshot across queries, so a write during the export can leave the copy
+slightly inconsistent. That is why it runs in the quiet hour, and why `verify`
+re-checks every audit chain. If a copy fails verification, use Time Travel.
+The bucket must stay private: the copy holds personal data. Secrets in it are
+sealed, not plain text, and need the same `SECRETS_KEY`.
 
 **Restore, Cloudflare (Time Travel):**
 
@@ -129,7 +152,8 @@ npx wrangler d1 time-travel restore accessx --timestamp "2026-10-20T09:00:00+11:
 ```
 
 **Restore, Cloudflare (from an export):** `npx wrangler d1 create accessx-restore`,
-then `npx wrangler d1 execute accessx-restore --remote --file backups/d1-….sql`.
+then `npx wrangler d1 execute accessx-restore --remote --file backups/d1-….sql`
+(an R2 copy: `gunzip -k accessx-….sql.gz` first).
 Put the new id in `wrangler.jsonc`, run `npm run cf:db:migrate:remote`, then deploy.
 
 **Restore, Node:** stop the service; move `accessx.sqlite`, `-wal` and `-shm`
@@ -160,8 +184,9 @@ Write the date and result in section 6.
 
 ## 5. What this does not cover (yet)
 
-- Automatic off-site export: a scheduled Workflow to R2 (Cloudflare's guide
-  "Export and save D1 database") would replace the weekly manual step.
+- The R2 export is not encrypted by AccessX (only by R2 at rest), and it is
+  not a consistent snapshot (see section 4). A copy outside Cloudflare is still
+  a monthly manual step.
 - Codes set at the keypad in admin mode, or deleted over Bluetooth without a
   sync, are invisible to the passcode sweep (R18): it reads the vendor cloud.
 - A status page for tenants.
