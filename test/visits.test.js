@@ -470,3 +470,18 @@ test('SMS config and helpers', () => {
   assert.equal(normalizePhone('+1 (555) 867-5310'), '+15558675310');
   for (const bad of ['5558675310', '+0123456789', '+12', 'call me']) assert.equal(normalizePhone(bad), null, bad);
 });
+
+test('erasing a visitor deletes their arrival alert while it waits for the daily summary', async t => {
+  const hook = await provider(t, [200]);
+  const { api } = await setup(t, { ALLOW_HTTP_WEBHOOKS: '1', TTLOCK_NOTIFY_SECRET: NOTIFY });
+  const put = await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: `${hook.base}/hook/x`, format: 'json', events: ['visitor_arrived'], digest: { events: ['visitor_arrived'], hour: 8, timeZone: 'Europe/London' } } });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const v = await api.call('POST', '/api/visits', { ...DESK, body: visitBody() });
+  const r = await notify(api, [rec(9001, v.body.codes[0].code, Date.parse(v.body.visit.startAt) + 36e5)]);
+  assert.equal(r.status, 200);
+  const rows = () => api.server.store.sql.all("SELECT * FROM alert_outbox WHERE channel = 'digest'");
+  assert.equal((await rows()).length, 1, 'waiting for the summary');
+  assert.ok((await rows())[0].message.includes(MARKER));
+  await api.call('POST', `/api/visits/${v.body.visit.id}/erase`, { ...DESK, body: {} });
+  assert.equal((await rows()).length, 0, 'the name left with the visit');
+});

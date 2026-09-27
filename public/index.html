@@ -349,6 +349,13 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
           <label>Removal target (hours)<input id="al-sla" type="number" min="1" max="720" step="1"></label>
           <label id="al-emails-wrap" style="grid-column:1/-1">Email recipients (up to 10, comma-separated)<input id="al-emails" type="text" placeholder="security@example.com, it@example.com" autocomplete="off"></label>
           <div id="al-events" style="grid-column:1/-1"></div>
+          <fieldset id="al-digest" style="grid-column:1/-1;border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 10px">
+            <legend class="meta">Daily summary: send these once a day instead of one by one</legend>
+            <div id="al-dg-events"></div>
+            <label style="display:inline-block;margin-top:6px">at <select id="al-dg-hour"></select></label>
+            <label style="display:inline-block">time zone <input id="al-dg-tz" maxlength="64" style="width:180px"></label>
+            <div class="meta" id="al-dg-state"></div>
+          </fieldset>
           <div><button class="btn sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="al-test">Send test</button> <button class="btn2 sm" type="button" id="al-remove">Remove webhook</button></div>
           <div id="alerts-msg" class="meta"></div>
         </form>

@@ -307,3 +307,64 @@ test('TTLock refusing the account alerts the owners once (vendor_needs_reconnect
   assert.match(alertsSent[0].body.text, /uid 71001/);
   assert.ok(!alertsSent[0].body.text.includes('riverside-admin'), 'the TTLock username is not sent');
 });
+
+// ---- Daily summary (digest) -----------------------------------------------------------
+test('daily summary: non-urgent events wait and go out as one message at the local hour; security events cannot wait', async t => {
+  const hook = await scripted(t, [200]);
+  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  t.after(api.close);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'json' } });
+  for (const bad of [{ events: ['break_glass'], hour: 8, timeZone: 'Europe/London' }, { events: ['approval_requested'], hour: 24, timeZone: 'Europe/London' }, { events: ['approval_requested'], hour: 8, timeZone: 'Mars/Olympus' }]) {
+    const r = await api.call('PUT', '/api/alerts', { ...OWNER, body: { digest: bad } });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await api.call('PUT', '/api/alerts', { ...M1, body: { digest: null } })).status, 403);
+  const saved = await api.call('PUT', '/api/alerts', { ...OWNER, body: { digest: { events: ['approval_requested', 'removal_overdue'], hour: 8, timeZone: 'Europe/London' } } });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const next = Date.parse(saved.body.alerts.digestPending.nextAt);
+  assert.ok(next > Date.now() && next <= Date.now() + 864e5, 'next summary within a day');
+  assert.match(new Date(next).toLocaleString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), /^08:00$/);
+  const audit = (await api.call('GET', '/api/audit?action=alerts.settings', OWNER)).body.log[0];
+  assert.match(audit.detail, /digest=approval_requested,removal_overdue@08:00 Europe\/London/);
+
+  await requestApproval(api);
+  await requestApproval(api);
+  assert.equal(hook.got.length, 0, 'batched, not sent');
+  let q = await outbox(api);
+  assert.deepEqual(q.map(r => r.channel), ['digest', 'digest']);
+  assert.equal((await api.call('GET', '/api/alerts', OWNER)).body.alerts.retrying.count, 0, 'waiting ≠ retrying');
+  assert.equal((await api.call('GET', '/api/alerts', OWNER)).body.alerts.digestPending.count, 2);
+  const m0 = await api.server.api.maintenance();
+  assert.equal(m0.find(r => r.tenantId === 't_default').digest, undefined, 'not 08:00 yet');
+  assert.equal(hook.got.length, 0);
+  const tt = await api.call('POST', '/api/alerts/test', { ...OWNER, body: {} });
+  assert.equal(tt.body.delivery, 'delivered', 'a test alert is never batched');
+
+  await makeDue(api);
+  const m1 = await api.server.api.maintenance();
+  assert.equal(m1.find(r => r.tenantId === 't_default').digest.items, 2);
+  assert.equal(hook.got.length, 2);
+  const sum = hook.got[1].body;
+  assert.equal(sum.type, 'accessx.alert.digest');
+  assert.equal(sum.title, 'Daily summary: 2 alerts');
+  assert.match(sum.text, /^Approvals requested \(2\)\n• \d{4}-\d\d-\d\d \d\d:\d\d .*Manager One/);
+  assert.deepEqual(sum.facts, { 'Approvals requested': '2' });
+  assert.equal((await outbox(api)).length, 0);
+  await api.server.api.maintenance();
+  assert.equal(hook.got.length, 2, 'sent once');
+
+  // Switched off: alerts are instant again.
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { digest: null } });
+  await requestApproval(api);
+  assert.equal(hook.got.length, 3);
+  assert.equal(hook.got[2].body.type, 'accessx.alert.approval_requested');
+});
+
+test('nextDigestAt: local hour across DST changes', () => {
+  const { nextDigestAt } = require('../alerts-core');
+  // London clocks go back 25 Oct 2026 02:00 BST → 01:00 GMT; Sydney forward 4 Oct 2026 02:00 → 03:00.
+  assert.equal(new Date(nextDigestAt(8, 'Europe/London', Date.parse('2026-10-24T08:30:00Z'))).toISOString(), '2026-10-25T08:00:00.000Z', '08:00 GMT');
+  assert.equal(new Date(nextDigestAt(8, 'Europe/London', Date.parse('2026-10-24T06:00:00Z'))).toISOString(), '2026-10-24T07:00:00.000Z', '08:00 BST');
+  assert.equal(new Date(nextDigestAt(2, 'Australia/Sydney', Date.parse('2026-10-03T12:00:00Z'))).toISOString(), '2026-10-03T16:00:00.000Z', '02:00 does not exist on 4 Oct: 03:00 AEDT');
+  assert.equal(new Date(nextDigestAt(0, 'UTC', Date.parse('2026-01-01T00:00:00Z'))).toISOString(), '2026-01-02T00:00:00.000Z', 'strictly after now');
+});

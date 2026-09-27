@@ -842,6 +842,7 @@ function createApi({
     const at = new Date().toISOString();
     await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
+    if (alerts) await alerts.forget(ctx.tenantId, id);
     return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, visitorPhone: null, company: null, erased: true, erasedAt: at }) };
   });
 
@@ -898,6 +899,7 @@ function createApi({
         title: 'Visitor arrived',
         text: `${v.visitorName || 'A visitor'}${v.company ? ` (${v.company})` : ''} for ${host ? host.name : v.hostUserId} opened ${door}.`,
         facts: [['Door', door], ['Time', policy.localParts(new Date(at), tz).label], ['Visit', row.id]], path: '/#visitors',
+        ref: row.id, // erasing the visitor deletes this message if it is still waiting (retry / daily summary)
       });
     }
     return out;
@@ -1835,6 +1837,8 @@ function createApi({
     if (alerts) {
       const f = await alerts.flush(tenantId);
       if (f.retried || f.error) out.alerts = f;
+      const d = await alerts.flushDigest(tenantId);
+      if (d) out.digest = d;
     }
     try {
       const n = await pollArrivals(tenantId);

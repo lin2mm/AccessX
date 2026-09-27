@@ -191,7 +191,11 @@ Operators (people who administer the system) are separate from door users.
   removals, failed revocations, break-glass sign-ins and a TTLock account
   that must be reconnected go to one webhook per tenant (URL stored
   encrypted) and/or up to 10 email recipients. Undelivered alerts are
-  retried for about a day, then recorded as `alerts.dropped`.
+  retried for about a day, then recorded as `alerts.dropped`. Visitor
+  arrivals are opt-in (they name a person). **Daily summary**: approval
+  requests, overdue removals and arrivals can wait for one message a day at
+  a local hour; break-glass, failed revocations and TTLock disconnections are
+  always sent at once. Erasing a visitor also deletes their waiting alerts.
 - **Visitors** — reception (`r_front_desk`, or anyone who may issue codes)
   registers a visitor with a host, doors and a window; each door gets a code
   valid only for the visit, so the lock ends it by itself, even offline.

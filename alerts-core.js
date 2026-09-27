@@ -26,15 +26,45 @@
  * audited (`alerts.dropped`). Other 4xx are configuration errors: not retried.
  * The outbox stores the message, never the URL or the recipients: a retry
  * goes to the channel as configured *now*. The audit log remains the record.
+ *
+ * Daily summary (digest): an owner may batch the noisy, non-urgent events
+ * (DIGEST_EVENTS) into one message a day at a local hour. Batched items wait
+ * in the outbox as channel 'digest' rows due at the summary time; the summary
+ * is then sent like any alert (with retries). Security events — break-glass,
+ * failed revocations, a disconnected TTLock account — are always instant.
+ * A message may carry `ref` (e.g. a visit id): forget(ref) deletes waiting
+ * rows, so erasing a visitor also erases their name from pending alerts.
  */
 const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { checkWebhookUrl } = require('./audit-ops');
+const policy = require('./policy-core');
 
 const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived'];
 // Informational, and they name people: channels get these only when an owner turns them on.
 const OPT_IN_EVENTS = ['visitor_arrived'];
 const DEFAULT_EVENTS = EVENTS.filter(e => !OPT_IN_EVENTS.includes(e));
 const FORMATS = ['slack', 'teams', 'json'];
+// Non-urgent events that may wait for the daily summary. Never: break_glass,
+// revoke_failed, vendor_needs_reconnect (someone must act now).
+const DIGEST_EVENTS = ['approval_requested', 'removal_overdue', 'visitor_arrived'];
+const DIGEST_MAX_LINES = 40;
+const EVENT_TITLES = {
+  approval_requested: 'Approvals requested', removal_overdue: 'Codes still on offline locks',
+  revoke_failed: 'Revocations failed', break_glass: 'Break-glass sign-ins',
+  vendor_needs_reconnect: 'TTLock accounts to reconnect', visitor_arrived: 'Visitors arrived',
+};
+
+/** Next occurrence of `hour`:00 in `timeZone` strictly after `nowMs` (DST-safe). */
+function nextDigestAt(hour, timeZone, nowMs) {
+  const hh = String(hour).padStart(2, '0');
+  let day = policy.localParts(new Date(nowMs), timeZone).isoDate;
+  for (let i = 0; i < 3; i++) {
+    const at = policy.zonedTimeToDate(`${day}T${hh}:00`, timeZone).getTime();
+    if (at > nowMs) return at;
+    const d = new Date(`${day}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); day = d.toISOString().slice(0, 10);
+  }
+  return nowMs + 864e5;
+}
 const EMAIL_PROVIDERS = {
   resend: { base: 'https://api.resend.com', path: '/emails' },
   postmark: { base: 'https://api.postmarkapp.com', path: '/email' },
@@ -107,13 +137,16 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
 
   async function settings(tenantId) {
     const a = await read(tenantId);
-    const outbox = await store.sql.first('SELECT COUNT(*) AS n, MIN(next_at) AS next FROM alert_outbox WHERE tenant_id = ?', [tenantId]);
+    const outbox = await store.sql.first("SELECT COUNT(*) AS n, MIN(next_at) AS next FROM alert_outbox WHERE tenant_id = ? AND channel != 'digest'", [tenantId]);
+    const waiting = await store.sql.first("SELECT COUNT(*) AS n, MIN(next_at) AS next FROM alert_outbox WHERE tenant_id = ? AND channel = 'digest'", [tenantId]);
     return {
       configured: Boolean(a.sealedUrl || (emailCfg && (a.emails || []).length)), format: a.format || null, host: a.host || null,
       emails: a.emails || [], emailAvailable: Boolean(emailCfg), emailProvider: emailCfg ? emailCfg.provider : null,
       events: a.events || DEFAULT_EVENTS, slaHours: a.slaHours || DEFAULT_SLA_HOURS,
       lastDelivery: a.lastDelivery || null, lastEmailDelivery: a.lastEmailDelivery || null,
       retrying: { count: outbox.n || 0, nextAt: outbox.next || null },
+      digest: a.digest || null, digestEvents: DIGEST_EVENTS,
+      digestPending: { count: waiting.n || 0, nextAt: waiting.next || (a.digest ? iso(nextDigestAt(a.digest.hour, a.digest.timeZone, now())) : null) },
       availableEvents: EVENTS, formats: FORMATS, secretsKeyConfigured: Boolean(secretsKey),
     };
   }
@@ -132,6 +165,18 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     if ('events' in body) {
       if (!Array.isArray(body.events) || body.events.some(e => !EVENTS.includes(e))) throw new AlertsError(400, `events must be a list drawn from ${EVENTS.join(', ')}`);
       next.events = [...new Set(body.events)];
+    }
+    if ('digest' in body) {
+      const d = body.digest;
+      if (d === null || (d && Array.isArray(d.events) && !d.events.length)) delete next.digest;
+      else {
+        if (!d || typeof d !== 'object' || !Array.isArray(d.events)) throw new AlertsError(400, 'digest must be {events, hour, timeZone} or null');
+        const bad = d.events.filter(e => !DIGEST_EVENTS.includes(e));
+        if (bad.length) throw new AlertsError(400, `only ${DIGEST_EVENTS.join(', ')} can wait for the daily summary (${bad.join(', ')} must be sent at once)`);
+        if (!Number.isInteger(d.hour) || d.hour < 0 || d.hour > 23) throw new AlertsError(400, 'digest.hour must be a whole hour 0-23');
+        if (!policy.isValidTimeZone(d.timeZone)) throw new AlertsError(400, 'digest.timeZone must be an IANA time zone, e.g. Europe/London');
+        next.digest = { events: [...new Set(d.events)], hour: d.hour, timeZone: d.timeZone };
+      }
     }
     if ('format' in body) {
       if (!FORMATS.includes(body.format)) throw new AlertsError(400, `format must be one of ${FORMATS.join(', ')}`);
@@ -158,7 +203,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     await store.tenant(tenantId).unit()
       .raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...all, alerts: next }), tenantId])
       // Recipients are personal data: the audit carries their number only.
-      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${(next.events || DEFAULT_EVENTS).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}`, actor)
+      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${(next.events || DEFAULT_EVENTS).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}${next.digest ? ` digest=${next.digest.events.join(',')}@${String(next.digest.hour).padStart(2, '0')}:00 ${next.digest.timeZone}` : ''}`, actor)
       .commit();
     return settings(tenantId);
   }
@@ -198,30 +243,37 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     }
   }
 
-  async function enqueue(tenantId, channel, event, message, id, at, lastError) {
+  async function enqueueRow(tenantId, rowId, channel, event, message, at, nextAt, attempts, lastError) {
     const n = (await store.sql.first('SELECT COUNT(*) AS n FROM alert_outbox WHERE tenant_id = ?', [tenantId])).n;
     if (n >= OUTBOX_CAP) { log('alert outbox full', tenantId, event); return false; }
     await store.sql.batch([{
-      sql: 'INSERT INTO alert_outbox (tenant_id, id, channel, event, message, created_at, attempts, next_at, last_error) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)',
-      params: [tenantId, `${id}:${channel}`, channel, event, JSON.stringify({ ...message, at }), at, iso(now() + RETRY.baseMs), lastError],
+      sql: 'INSERT INTO alert_outbox (tenant_id, id, channel, event, message, created_at, attempts, next_at, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      params: [tenantId, rowId, channel, event, JSON.stringify({ ...message, at }), at, attempts, nextAt, lastError],
     }]);
     return true;
   }
+  const enqueue = (tenantId, channel, event, message, id, at, lastError) =>
+    enqueueRow(tenantId, `${id}:${channel}`, channel, event, message, at, iso(now() + RETRY.baseMs), 1, lastError);
 
   /**
    * Never throws. Returns 'delivered' | 'failed: …' | 'skipped: …' for a single
    * channel, or 'webhook: …; email: …' when both are configured.
    * `force` (test alert): ignore the event filter, never queue a retry.
    */
-  async function send(tenantId, event, message, { force = false } = {}) {
+  async function send(tenantId, event, message, { force = false, internal = false } = {}) {
     try {
       const a = await read(tenantId);
       const channels = channelsOf(a);
       if (!channels.length) return 'skipped: no channel';
-      if (!force && !(a.events || DEFAULT_EVENTS).includes(event)) return 'skipped: event disabled';
+      if (!force && !internal && !(a.events || DEFAULT_EVENTS).includes(event)) return 'skipped: event disabled';
       if (channels.includes('webhook') && !secretsKey) return 'skipped: SECRETS_KEY missing';
       const id = uid();
       const at = iso(now());
+      if (!force && !internal && a.digest && a.digest.events.includes(event)) {
+        const due = iso(nextDigestAt(a.digest.hour, a.digest.timeZone, now()));
+        if (await enqueueRow(tenantId, `${id}:digest`, 'digest', event, message, at, due, 0, null).catch(() => false)) return `waiting for the daily summary (${due})`;
+        // Outbox full: better an instant alert than none.
+      }
       const out = [];
       for (const channel of channels) {
         const r = await attempt(tenantId, channel, a, event, message, id, at);
@@ -242,7 +294,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
   async function flush(tenantId, { limit = 20 } = {}) {
     const res = { retried: 0, delivered: 0, dropped: 0, pending: 0 };
     try {
-      const due = await store.sql.all('SELECT * FROM alert_outbox WHERE tenant_id = ? AND next_at <= ? ORDER BY next_at LIMIT ?', [tenantId, iso(now()), limit]);
+      const due = await store.sql.all("SELECT * FROM alert_outbox WHERE tenant_id = ? AND channel != 'digest' AND next_at <= ? ORDER BY next_at LIMIT ?", [tenantId, iso(now()), limit]);
       if (!due.length) return res;
       const a = await read(tenantId);
       const dropped = [];
@@ -273,12 +325,57 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
         for (const d of dropped) u.audit('alerts.dropped', d, 'system');
         await u.commit();
       }
-      res.pending = (await store.sql.first('SELECT COUNT(*) AS n FROM alert_outbox WHERE tenant_id = ?', [tenantId])).n;
+      res.pending = (await store.sql.first("SELECT COUNT(*) AS n FROM alert_outbox WHERE tenant_id = ? AND channel != 'digest'", [tenantId])).n;
     } catch (error) {
       log('alert flush failed', tenantId, error.message);
       res.error = String(error.message || error);
     }
     return res;
+  }
+
+  /**
+   * Send the daily summary once its time has come (scheduled maintenance, in
+   * the tenant's queue). Everything waiting is sent together, oldest first,
+   * even if the digest was switched off meanwhile. Never throws.
+   */
+  async function flushDigest(tenantId) {
+    try {
+      const first = await store.sql.first("SELECT MIN(next_at) AS due FROM alert_outbox WHERE tenant_id = ? AND channel = 'digest'", [tenantId]);
+      if (!first || !first.due || first.due > iso(now())) return null;
+      const rows = await store.sql.all("SELECT * FROM alert_outbox WHERE tenant_id = ? AND channel = 'digest' ORDER BY created_at LIMIT ?", [tenantId, OUTBOX_CAP]);
+      const a = await read(tenantId);
+      const tz = a.digest ? a.digest.timeZone : 'UTC';
+      const items = rows.map(r => ({ event: r.event, ...JSON.parse(r.message) }));
+      const counts = {};
+      for (const it of items) counts[it.event] = (counts[it.event] || 0) + 1;
+      const lines = [];
+      for (const event of Object.keys(counts)) {
+        lines.push(`${EVENT_TITLES[event] || event} (${counts[event]})`);
+        for (const it of items.filter(x => x.event === event)) {
+          if (lines.length >= DIGEST_MAX_LINES) break;
+          lines.push(`• ${policy.localParts(new Date(it.at), tz).label.replace(/ \S+$/, '')} ${it.text || it.title}`);
+        }
+      }
+      if (items.length + Object.keys(counts).length > lines.length) lines.push(`… and more: see the audit log.`);
+      const status = await send(tenantId, 'digest', {
+        title: `Daily summary: ${items.length} alert${items.length === 1 ? '' : 's'}`,
+        text: lines.join('\n'), facts: Object.entries(counts).map(([e, n]) => [EVENT_TITLES[e] || e, String(n)]), path: '/#audit',
+      }, { internal: true });
+      const ids = rows.map(r => r.id);
+      for (let i = 0; i < ids.length; i += 50) {
+        const chunk = ids.slice(i, i + 50);
+        await store.sql.batch([{ sql: `DELETE FROM alert_outbox WHERE tenant_id = ? AND id IN (${chunk.map(() => '?').join(',')})`, params: [tenantId, ...chunk] }]);
+      }
+      return { items: items.length, status };
+    } catch (error) {
+      log('alert digest failed', tenantId, error.message);
+      return { error: String(error.message || error) };
+    }
+  }
+
+  /** Delete waiting alerts (retry or digest) whose message carries `ref` — personal-data erasure. */
+  async function forget(tenantId, ref) {
+    await store.sql.batch([{ sql: "DELETE FROM alert_outbox WHERE tenant_id = ? AND json_extract(message, '$.ref') = ?", params: [tenantId, String(ref)] }]);
   }
 
   /**
@@ -301,7 +398,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     }
   }
 
-  return { settings, save, send, flush, slaHours, emailTo, emailAvailable: Boolean(emailCfg), EVENTS };
+  return { settings, save, send, flush, flushDigest, forget, slaHours, emailTo, emailAvailable: Boolean(emailCfg), EVENTS };
 }
 
 /** EMAIL_PROVIDER / EMAIL_API_KEY / EMAIL_FROM / EMAIL_API_BASE (tests) → createAlerts({ email }). */
@@ -317,4 +414,4 @@ const needsReconnectMessage = ({ accountUid, why }) => ({
   path: '/#settings',
 });
 
-module.exports = { emailConfigFromEnv, needsReconnectMessage, createAlerts, formatMessage, formatEmail, emailRequest, AlertsError, EVENTS, DEFAULT_SLA_HOURS, RETRY };
+module.exports = { emailConfigFromEnv, needsReconnectMessage, createAlerts, formatMessage, formatEmail, emailRequest, AlertsError, EVENTS, DIGEST_EVENTS, DEFAULT_SLA_HOURS, RETRY, nextDigestAt };

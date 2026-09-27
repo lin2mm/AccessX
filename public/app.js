@@ -499,7 +499,7 @@ $('#a-verify').addEventListener('click',async()=>{
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
 });
-const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected'};
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)'};
 async function loadAlerts(){
   const r=await api('/api/alerts');
   $('#alerts-box').hidden=!r.ok;
@@ -517,11 +517,20 @@ async function loadAlerts(){
   $('#al-emails-wrap').hidden=!a.emailAvailable;
   $('#al-emails').value=a.emails.join(', ');
   $('#al-remove').hidden=!a.host;$('#al-test').hidden=!a.configured;
+  const dg=a.digest||{events:[],hour:8,timeZone:(DOORS[0]&&DOORS[0].timeZone)||BROWSER_TZ};
+  $('#al-dg-events').innerHTML=(a.digestEvents||[]).map(e=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;font-weight:normal"><input type="checkbox" data-aldg="${esc(e)}" ${dg.events.includes(e)?'checked':''}>${esc(ALERT_LABELS[e]||e)}</label>`).join('');
+  $('#al-dg-hour').innerHTML=Array.from({length:24},(_,h)=>`<option value="${h}" ${h===dg.hour?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('');
+  $('#al-dg-tz').value=dg.timeZone;
+  const dp=a.digestPending||{};
+  $('#al-dg-state').textContent=a.digest?`${dp.count||0} waiting · next summary ${dp.nextAt?(()=>{try{return new Date(dp.nextAt).toLocaleString('en-GB',{timeZone:a.digest.timeZone,dateStyle:'medium',timeStyle:'short'})+' '+tzAbbr(new Date(dp.nextAt),a.digest.timeZone);}catch{return dp.nextAt;}})():'—'}. Break-glass, failed revocations and TTLock disconnections are always sent at once.`
+    :'Off: every alert is sent as it happens. Break-glass, failed revocations and TTLock disconnections are always sent at once.';
   $('#al-events').innerHTML=a.availableEvents.map(e=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;font-weight:normal"><input type="checkbox" data-alev="${esc(e)}" ${a.events.includes(e)?'checked':''}>${esc(ALERT_LABELS[e]||e)}</label>`).join('');
 }
 $('#alerts-form').addEventListener('submit',async e=>{
   e.preventDefault();
   const body={slaHours:Number($('#al-sla').value),events:[...document.querySelectorAll('[data-alev]')].filter(x=>x.checked).map(x=>x.dataset.alev)};
+  const dge=[...document.querySelectorAll('[data-aldg]')].filter(x=>x.checked).map(x=>x.dataset.aldg);
+  body.digest=dge.length?{events:dge,hour:Number($('#al-dg-hour').value),timeZone:$('#al-dg-tz').value.trim()}:null;
   if($('#al-format').value)body.format=$('#al-format').value;
   if($('#al-url').value.trim())body.webhookUrl=$('#al-url').value.trim();
   if(!$('#al-emails-wrap').hidden)body.emails=$('#al-emails').value.split(/[\s,;]+/).filter(Boolean);
