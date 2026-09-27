@@ -15,6 +15,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/10-PILOT.md](docs/10-PILOT.md) for trying it with real locks, and
 [docs/20-PREREGISTRATION.md](docs/20-PREREGISTRATION.md) for the visitor pre-registration design,
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
+[docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
 [docs/40-BILLING.md](docs/40-BILLING.md) for Stripe billing (off unless `BILLING_ENABLED=1`).
 
@@ -79,7 +80,10 @@ tenant uses demo locks; tenants that connect a TTLock account use real ones.
    retention, billing usage and notices).
 
 Do not enable public writes. For live lock data, this prototype still needs a
-separate production security review.
+separate production security review. Before a real deployment, work through
+[docs/12-GO-LIVE.md](docs/12-GO-LIVE.md): the shipped `wrangler.jsonc` is a
+**demo** config (placeholder D1 id, `AUTH_OPEN_READS=1`) and `npm run doctor -- --worker`
+fails it until you change both.
 
 ## Configuration
 
@@ -101,7 +105,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
-| `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
+| `AUTH_OPEN_READS` | demo | `1`: read routes without a token (public demo). Explicit opt-in on the Worker; on Node the default only in demo mode. **Ignored whenever `TTLOCK_CLIENT_ID` is set** (R14). Production: `0`. |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
 | `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `SMS_FROM` | texting visitor codes | `twilio`. `SMS_FROM` is a Twilio number (+E.164), an alphanumeric sender ID where the country allows it, or a Messaging Service SID (`MG…`). An API key may replace the auth token (`TWILIO_API_KEY` + `TWILIO_API_SECRET`). Codes are sent once and never queued; Twilio keeps message bodies in its logs according to your account settings. |
 | `SMS_MONTHLY_CAP` | optional | Texts per tenant per calendar month (default unlimited). The platform can set a tenant's own cap (`PUT /api/platform/tenants/:id/limits`); usage for billing: `GET /api/platform/usage?period=YYYY-MM`. At the cap, visits are still created and the code is shown on screen. |
@@ -166,8 +170,8 @@ Operators (people who administer the system) are separate from door users.
   and may change/remove only people whose groups are **all** at their sites.
   Their audit view shows their own actions.
 - A remote unlock without a `userId` (operator override) requires a `reason`.
-- Demo mode allows anonymous read-only access (`AUTH_OPEN_READS`). Writes always
-  need a token. Failed token attempts are rate-limited per client IP.
+- Demo mode allows anonymous read-only access (`AUTH_OPEN_READS=1`, refused once
+  real-lock credentials are configured). Writes always need a token. Failed token attempts are rate-limited per client IP.
 
 ## What the policy engine guarantees
 
@@ -317,6 +321,12 @@ Operators (people who administer the system) are separate from door users.
   with every permission but one site may not change anything at other sites.
 - `MOCK_IDP=1` mounts a fake OIDC provider at `/mock-idp` for demos/tests
   (`MOCK_IDP_AUTOCONFIGURE=1` wires the default tenant to it). Never in production.
+- `npm run doctor` — production configuration check (`--env-file`, `--worker`,
+  or `--url https://<host> --platform-token …` for the running site); exit 1 on errors.
+- `npm run backup -- node|d1|verify` — backup, then a restore test (integrity,
+  schema objects, every tenant's audit chain, sealed secrets vs `SECRETS_KEY`).
+- `GET /api/healthz` — public liveness for uptime monitors; 503 if the database
+  is unreachable or behind the code's migration (`SCHEMA_VERSION`).
 - `npm run test:worker` — smoke test against a running `wrangler dev`
   (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM`, optional `IDP` env vars; see `support/worker-smoke.js`).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after
@@ -330,7 +340,8 @@ Operators (people who administer the system) are separate from door users.
   as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
-connecting real locks or real user data: run `npm run ttlock:check` against
+connecting real locks or real user data: `npm run doctor` must pass and a
+backup must have been restored ([docs/12-GO-LIVE.md](docs/12-GO-LIVE.md)); run `npm run ttlock:check` against
 each lock model on site, set `AUDIT_SIGNING_KEY` and an anchor webhook,
 verify your SSO domains (TXT record) and turn on *Require single sign-on*
 with a break-glass owner, and complete an independent security review

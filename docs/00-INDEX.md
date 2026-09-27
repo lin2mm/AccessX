@@ -17,7 +17,7 @@
 
 规则：
 
-1. **编号不复用。** 新文档取该段中下一个空号（例如下一个运维文档是 `12-…`）。
+1. **编号不复用。** 新文档取该段中下一个空号（例如下一个运维文档是 `13-…`）。
 2. **不删除，只标记。** 过时的文档保留编号，第一行写 `Status: superseded by NN-…`。
 3. **轮次号 `RNN` 贯穿三处：** 提交信息以 `RNN:` 开头（从 R13 起），
    `docs/90-ROUNDS.md` 有一行，`docs/rounds/RNN-…md` 是该轮的完整报告。
@@ -34,6 +34,7 @@
 | [01-ARCHITECTURE.md](01-ARCHITECTURE.md) | 架构：共享 API 核心、多租户、数据、审计链、限制 | 开发 |
 | [10-PILOT.md](10-PILOT.md) | 用真实锁试点的步骤与检查 | 实施 |
 | [11-OFFICE-SETUP.md](11-OFFICE-SETUP.md) | 办公室 45 分钟安装指南 | 实施、客户 |
+| [12-GO-LIVE.md](12-GO-LIVE.md) | 上线清单、`npm run doctor`、健康检查与监控、日志、备份与恢复演练 | 部署与运维 |
 | [20-PREREGISTRATION.md](20-PREREGISTRATION.md) | 访客预登记设计 | 产品、开发 |
 | [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) | 自动化安全门、外部渗透测试范围、限流 | 安全、测试方 |
 | [40-BILLING.md](40-BILLING.md) | Stripe 计费：计划、实现、运维 | 商业、开发 |

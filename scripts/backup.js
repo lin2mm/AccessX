@@ -3,7 +3,7 @@
  * Backups you have actually restored (docs/12-GO-LIVE.md, "Backup and restore").
  *
  *   npm run backup -- node   [--data-dir DIR] [--out FILE]      # Node: consistent copy (VACUUM INTO)
- *   npm run backup -- d1     [--db NAME] [--local [--persist-to DIR]] [--out FILE]
+ *   npm run backup -- d1     [--db NAME|BINDING (default DB)] [--local [--persist-to DIR]] [--out FILE]
  *                                                               # Cloudflare D1: wrangler d1 export (remote by default)
  *   npm run backup -- verify FILE.sqlite|FILE.sql [--secrets-key KEYS]
  *
@@ -179,7 +179,7 @@ async function main() {
     file = backupNode({ dataDir: opt('--data-dir') || process.env.DATA_DIR || path.join(root, 'data', 'runtime'), out: opt('--out') || path.join(root, 'backups', `accessx-${stamp()}.sqlite`) });
     console.log(`wrote ${file}`);
   } else if (mode === 'd1') {
-    file = backupD1({ db: opt('--db') || 'accessx-demo', local: flag('--local'), persistTo: opt('--persist-to'), out: opt('--out') || path.join(root, 'backups', `d1-${stamp()}.sql`) });
+    file = backupD1({ db: opt('--db') || 'DB', local: flag('--local'), persistTo: opt('--persist-to'), out: opt('--out') || path.join(root, 'backups', `d1-${stamp()}.sql`) });
     console.log(`wrote ${file}`);
   } else {
     console.error('usage: npm run backup -- node|d1|verify …   (see scripts/backup.js)');
