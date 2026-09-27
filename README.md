@@ -19,6 +19,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/23-CALENDAR.md](docs/23-CALENDAR.md) for calendar invitations → visitor pre-registration (off unless `CALENDAR_INBOUND_DOMAIN` is set),
 [docs/24-ACCESS-REVIEW.md](docs/24-ACCESS-REVIEW.md) for access reviews, the passcode sweep, data retention and bulk invitations,
 [docs/25-NUKI.md](docs/25-NUKI.md) for Nuki as a second lock vendor (API token, limits, checks before the first real site),
+[docs/26-I18N.md](docs/26-I18N.md) for the Chinese / English interface (`?lang=zh`, glossary, adding strings),
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
