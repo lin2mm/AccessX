@@ -157,6 +157,15 @@ export class TenantWriter {
   }
 
   async fetch(request) {
+    // Scheduled work for this tenant (worker.js scheduled()). Only the front
+    // Worker reaches a DO, and it forwards nothing but /api/* and /scim/*,
+    // so this path cannot be called from outside.
+    if (new URL(request.url).pathname === '/__tenant/cron') {
+      const tenantId = request.headers.get('x-accessx-tenant');
+      const api = apiFor(this.env);
+      const out = await this.queue.run('tenant', async () => ({ reconcile: await api.reconcileOne(tenantId), maintenance: await api.maintainOne(tenantId) }));
+      return Response.json(out);
+    }
     const req = await parseRequest(request, this.env);
     if (req instanceof Response) return req;
     let out;
@@ -181,7 +190,24 @@ export default {
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
   async scheduled(event, env, ctx) {
     const api = apiFor(env);
-    ctx.waitUntil(api.reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
-    ctx.waitUntil(api.maintenance().then(results => console.log('maintenance', JSON.stringify(results))));
+    if (!env.TENANT_WRITER) {
+      ctx.waitUntil(api.reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
+      ctx.waitUntil(api.maintenance().then(results => console.log('maintenance', JSON.stringify(results))));
+      return;
+    }
+    // Each tenant's reconcile + maintenance runs inside its TenantWriter, queued
+    // with that tenant's writes (no optimistic-concurrency fights with users).
+    ctx.waitUntil((async () => {
+      const results = await Promise.all((await api.tenantIds()).map(async tenantId => {
+        try {
+          const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+          const res = await stub.fetch(new Request('https://tenant-writer/__tenant/cron', { method: 'POST', headers: { 'x-accessx-tenant': tenantId } }));
+          return { tenantId, ...(await res.json()) };
+        } catch (error) {
+          return { tenantId, error: String(error.message || error) };
+        }
+      }));
+      console.log('cron', JSON.stringify(results));
+    })());
   },
 };

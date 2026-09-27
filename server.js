@@ -89,7 +89,8 @@ const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-qu
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const api = createApi({
-  store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a),
+  store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady,
+  serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
   // The bundled mock IdP runs on plain http; real issuers must be https.

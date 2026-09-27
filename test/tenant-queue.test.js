@@ -34,6 +34,9 @@ test('SCIM burst on one tenant: no optimistic-concurrency conflicts, nothing los
   const api = await boot({ ADMIN_TOKEN: 'owner-token' });
   t.after(api.close);
   const prov = (await api.call('POST', '/api/operators', { token: 'owner-token', body: { name: 'Entra', role: 'r_provisioner' } })).body.token;
+  // Work for the scheduled reconciler: codes of a person suspended behind its back.
+  for (let i = 0; i < 3; i++) assert.equal((await api.call('POST', '/api/passcode', { token: 'owner-token', body: { lockId: 9002, userId: 'u2' } })).status, 200);
+  await api.server.store.sql.batch([{ sql: "UPDATE users SET suspended = 1 WHERE tenant_id = 't_default' AND id = 'u2'", params: [] }]);
   const sql = api.server.store.sql;
   const batch = sql.batch.bind(sql);
   let conflicts = 0;
@@ -42,7 +45,15 @@ test('SCIM burst on one tenant: no optimistic-concurrency conflicts, nothing los
     try { return await batch(...args); } catch (e) { if (e.name === 'ConflictError') conflicts++; throw e; } // boot() loads its own copy of store/sql: no instanceof
   };
   const scim = (m, u, b) => api.call(m, `/scim/v2${u}`, { token: prov, body: b, contentType: 'application/scim+json' });
-  const res = await Promise.all([...Array(40).keys()].map(i => scim('POST', '/Users', { userName: `b${i}@burst.example`, active: true })));
+  // The scheduled reconciler + maintenance run in the middle of the burst.
+  const [res, cron, maint] = await Promise.all([
+    Promise.all([...Array(40).keys()].map(i => scim('POST', '/Users', { userName: `b${i}@burst.example`, active: true }))),
+    (async () => { await tick(5); return api.server.api.reconcileAll(); })(),
+    (async () => { await tick(10); return api.server.api.maintenance(); })(),
+  ]);
+  assert.ok(cron.every(r => !r.error), JSON.stringify(cron));
+  assert.equal(cron.find(r => r.tenantId === 't_default').revoked, 3, 'the cron really wrote during the burst');
+  assert.ok(maint.every(r => !r.error), JSON.stringify(maint));
   assert.deepEqual([...new Set(res.map(r => r.status))], [201]);
   const g = (await scim('POST', '/Groups', { displayName: 'SG-Burst' })).body;
   const patched = await Promise.all(res.map(r => scim('PATCH', `/Groups/${g.id}`, { Operations: [{ op: 'Add', path: 'members', value: [{ value: r.body.id }] }] })));

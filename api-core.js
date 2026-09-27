@@ -110,6 +110,8 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
   secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null,
+  // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
+  serialize = (tenantId, fn) => fn(),
 }) {
   /** A tenant's own connected account wins; otherwise the adapter's default (demo / legacy env). */
   const resolveVendor = async tenantId => (vendorAccounts && await vendorAccounts.vendorFor(tenantId)) || vendorFor(tenantId);
@@ -196,19 +198,25 @@ function createApi({
     }
   }
 
-  async function reconcileAll() {
-    await whenReady();
-    const results = [];
-    for (const tenant of await store.listTenants()) {
-      if (!tenant.seeded) continue;
-      try {
-        const out = await reconcileTenant(tenant.id, { actor: reconciler.ACTOR });
-        results.push({ tenantId: tenant.id, ...out.summary, notices: out.plan.notices.length });
-      } catch (error) {
-        log(`reconcile ${tenant.id} failed`, error);
-        results.push({ tenantId: tenant.id, error: String(error.message || error) });
-      }
+  /** Scheduled reconcile of one tenant (never throws). */
+  async function reconcileOne(tenantId) {
+    try {
+      const out = await reconcileTenant(tenantId, { actor: reconciler.ACTOR });
+      return { tenantId, ...out.summary, notices: out.plan.notices.length };
+    } catch (error) {
+      log(`reconcile ${tenantId} failed`, error);
+      return { tenantId, error: String(error.message || error) };
     }
+  }
+
+  async function tenantIds() {
+    await whenReady();
+    return (await store.listTenants()).filter(t => t.seeded).map(t => t.id);
+  }
+
+  async function reconcileAll() {
+    const results = [];
+    for (const id of await tenantIds()) results.push(await serialize(id, () => reconcileOne(id)));
     return results;
   }
 
@@ -1435,21 +1443,23 @@ function createApi({
   }
 
   /** Daily housekeeping per tenant: anchor the audit head, apply retention. */
+  /** Anchor + retention for one tenant (never throws). */
+  async function maintainOne(tenantId) {
+    if (!auditOps) return { tenantId, skipped: 'no audit ops' };
+    try {
+      const a = await auditOps.maybeAnchor(tenantId);
+      const p = await auditOps.maybePurge(tenantId);
+      return { tenantId, anchored: a.anchor && !a.skipped ? a.anchor.seq : null, delivery: a.anchor && !a.skipped ? a.anchor.deliveryStatus : undefined, purged: p.purged || 0 };
+    } catch (error) {
+      log(`maintenance ${tenantId} failed`, error);
+      return { tenantId, error: String(error.message || error) };
+    }
+  }
+
   async function maintenance() {
-    await whenReady();
     if (!auditOps) return [];
     const results = [];
-    for (const tenant of await store.listTenants()) {
-      if (!tenant.seeded) continue;
-      try {
-        const a = await auditOps.maybeAnchor(tenant.id);
-        const p = await auditOps.maybePurge(tenant.id);
-        results.push({ tenantId: tenant.id, anchored: a.anchor && !a.skipped ? a.anchor.seq : null, delivery: a.anchor && !a.skipped ? a.anchor.deliveryStatus : undefined, purged: p.purged || 0 });
-      } catch (error) {
-        log(`maintenance ${tenant.id} failed`, error);
-        results.push({ tenantId: tenant.id, error: String(error.message || error) });
-      }
-    }
+    for (const id of await tenantIds()) results.push(await serialize(id, () => maintainOne(id)));
     return results;
   }
 
@@ -1465,7 +1475,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, reconcileAll, maintenance, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };

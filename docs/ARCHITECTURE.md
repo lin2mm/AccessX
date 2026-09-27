@@ -283,7 +283,13 @@ bounded (429 + `Retry-After` past `WRITE_QUEUE_MAX`, default 256):
   handled at the edge — bad credentials never reach a DO.
 - **Node:** the same queue in-process (a single Node process; several
   processes behind a load balancer fall back to optimistic retries).
-- `transact()` stays: the cron reconciler and unqueued paths still rely on it,
+- The scheduled reconciler and audit maintenance run in the same queue:
+  on Cloudflare `scheduled()` sends each tenant's work to its TenantWriter
+  (`/__tenant/cron`, reachable only through the binding — the front Worker
+  forwards nothing but `/api/*` and `/scim/*`); on Node `reconcileAll()` and
+  `maintenance()` go through `writeQueue`.
+- `transact()` stays: unqueued paths (login, platform calls, several Node
+  processes) still rely on it,
   and `test/approvals.api.test.js` runs with `WRITE_QUEUE=off` so the
   in-transaction guard keeps its own race test.
 
@@ -292,6 +298,25 @@ so throughput falls as a tenant grows (Node: 99 req/s at 300 people, 22 req/s
 at 2,000). The DO is the natural place for the next step — cache the snapshot
 in memory and invalidate it on its own commits — or targeted queries per
 route. Not needed for the 5–200-door target; revisit past ~10k people.
+
+## TTLock token refresh across instances
+
+TTLock refresh tokens are single use. Two instances (isolates, processes)
+that refresh at the same moment used to break the account: the loser's
+refresh is rejected *before* the winner has saved the new pair, the loser
+re-read the unchanged row and marked the account `needs_reconnect` — every
+revocation of that tenant then failed with 503 until an owner reconnected.
+Now (`vendor-accounts.js` `tokenSource`):
+
+1. one refresh per tenant per instance (single-flight);
+2. on rejection, poll the row for up to `refreshGraceMs` (3 s) and adopt the
+   winner's tokens when they appear;
+3. `needs_reconnect` is set only if the stored tokens are still the ones that
+   failed (compare on `sealed`), and the winner's save sets `connected` again,
+   so even a winner slower than the grace window heals the account.
+
+Tests reproduce the race with two `vendorAccounts` instances on one database
+and a fake TTLock that rotates refresh tokens.
 
 ## Vendors
 

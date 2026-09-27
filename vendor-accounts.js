@@ -41,8 +41,9 @@ function loginError(error) {
 
 function createVendorAccounts({
   store, secretsKey = '', fetchFn, apiBase = '', platformApp = {}, log = () => {},
-  refreshBeforeMs = 7 * DAY, lockCacheMs = 60e3, now = () => Date.now(),
+  refreshBeforeMs = 7 * DAY, lockCacheMs = 60e3, now = () => Date.now(), refreshGraceMs = 3000,
 }) {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   const sql = store.sql;
   const fetch = fetchFn || ((...a) => globalThis.fetch(...a));
   const hasPlatformApp = Boolean(platformApp.clientId && platformApp.clientSecret);
@@ -63,14 +64,22 @@ function createVendorAccounts({
     };
   }
 
-  async function markNeedsReconnect(tenantId, why) {
+  /**
+   * `expectSealed`: only if the stored tokens are still the ones that failed —
+   * a stale failure must never break an account another instance just refreshed.
+   */
+  async function markNeedsReconnect(tenantId, why, { expectSealed = null } = {}) {
     const at = new Date(now()).toISOString();
     const r = await row(tenantId);
-    if (!r || r.status === 'needs_reconnect') return;
-    await store.tenant(tenantId).unit()
-      .raw("UPDATE vendor_accounts SET status = 'needs_reconnect', last_error = ?, updated_at = ? WHERE tenant_id = ?", [String(why).slice(0, 200), at, tenantId])
-      .audit('vendor.needs_reconnect', `ttlock uid=${r.account_uid}: ${String(why).slice(0, 120)}`, 'system').commit();
+    if (!r || r.status === 'needs_reconnect') return false;
+    if (expectSealed && r.sealed !== expectSealed) return false;
+    await sql.batch([{ sql: "UPDATE vendor_accounts SET status = 'needs_reconnect', last_error = ?, updated_at = ? WHERE tenant_id = ? AND sealed = ? AND status <> 'needs_reconnect'",
+      params: [String(why).slice(0, 200), at, tenantId, r.sealed] }]);
+    const after = await row(tenantId);
     cache.delete(tenantId);
+    if (!after || after.status !== 'needs_reconnect' || after.sealed !== r.sealed || after.updated_at !== at) return false; // someone else won
+    await store.tenant(tenantId).unit().audit('vendor.needs_reconnect', `ttlock uid=${r.account_uid}: ${String(why).slice(0, 120)}`, 'system').commit();
+    return true;
   }
 
   async function status(tenantId) { return publicView(await row(tenantId)); }
@@ -146,16 +155,26 @@ function createVendorAccounts({
       }
       return r;
     };
+    /** Did another instance store newer tokens meanwhile? Waits up to `graceMs`. */
+    const adoptedNewer = async (r, graceMs) => {
+      for (let waited = 0; ; waited += 200) {
+        const latest = await row(tenantId);
+        if (latest && latest.sealed !== r.sealed) { await load(); return true; }
+        if (waited >= graceMs) return false;
+        await sleep(200);
+      }
+    };
     const refresh = async r => {
       let t;
       try {
         t = await TTLock.refresh({ region: r.region, apiBase, fetch, clientId, clientSecret: mem.clientSecret || platformApp.clientSecret, refreshToken: mem.refreshToken });
       } catch (error) {
-        // Another isolate may have refreshed (and rotated the refresh token) first.
-        const latest = await row(tenantId);
-        if (latest && latest.sealed !== r.sealed) { await load(); return; }
-        if (error.errcode === ERR.INVALID_REFRESH || error.errcode === ERR.INVALID_GRANT || error.errcode === ERR.INVALID_TOKEN || !mem.refreshToken) {
-          await markNeedsReconnect(tenantId, `refresh rejected: ${error.message}`);
+        const rejected = error.errcode === ERR.INVALID_REFRESH || error.errcode === ERR.INVALID_GRANT || error.errcode === ERR.INVALID_TOKEN || !mem.refreshToken;
+        // Refresh tokens are single-use: if another instance refreshed first, TTLock
+        // rejects ours *before* the winner has saved the new pair. Give it a moment.
+        if (await adoptedNewer(r, rejected ? refreshGraceMs : 0)) return;
+        if (rejected) {
+          await markNeedsReconnect(tenantId, `refresh rejected: ${error.message}`, { expectSealed: r.sealed });
           throw new VendorUnavailableError('TTLock refused to refresh the account token — an owner must reconnect the TTLock account', { reason: 'needs_reconnect', cause: error });
         }
         if (mem.expiresAt > now()) { log(`ttlock refresh for ${tenantId} failed, current token still valid`, error.message); return; }
@@ -170,9 +189,15 @@ function createVendorAccounts({
         .audit('vendor.token_refreshed', `ttlock uid=${r.account_uid} expires=${new Date(t.expiresAt).toISOString().slice(0, 10)}`, 'system').commit();
       await load();
     };
+    // Single-flight inside this instance: parallel requests share one refresh.
+    let inflight = null;
     return async ({ force = false } = {}) => {
+      if (inflight) { await inflight; return mem.accessToken; }
       const r = await load();
-      if (force || mem.expiresAt - now() < refreshBeforeMs) await refresh(r);
+      if (force || mem.expiresAt - now() < refreshBeforeMs) {
+        inflight = refresh(r).finally(() => { inflight = null; });
+        await inflight;
+      }
       return mem.accessToken;
     };
   }

@@ -16,7 +16,7 @@ async function setup(t, extraEnv = {}) {
     RECONCILE_INTERVAL_MIN: '0', ...extraEnv,
   });
   t.after(async () => { await api.close(); await cloud.close(); });
-  return { api, cloud, owner: { token: 'owner-token' } };
+  return { api, cloud, base, owner: { token: 'owner-token' } };
 }
 
 const RIVERSIDE = { region: 'eu', username: 'riverside-admin', password: 'river-pass-1' };
@@ -155,4 +155,68 @@ test('own TTLock app, disconnect falls back to the demo fleet, owner-only, needs
   const r = await noKey.api.call('PUT', '/api/vendor-account', { token: 'owner-token', body: RIVERSIDE });
   assert.equal(r.status, 400);
   assert.match(r.body.error, /SECRETS_KEY/);
+});
+
+test('token refresh race between two instances: the loser adopts the winner\'s token instead of demanding a reconnect', async t => {
+  const { api, cloud, base, owner } = await setup(t);
+  assert.equal((await api.call('PUT', '/api/vendor-account', { ...owner, body: RIVERSIDE })).status, 200);
+  const { createVendorAccounts } = require('../vendor-accounts');
+  const store = api.server.store;
+  const make = () => createVendorAccounts({ store, secretsKey: SECRETS_KEY, apiBase: base, platformApp: { clientId: 'platform-app', clientSecret: 'platform-secret' }, lockCacheMs: 0, refreshGraceMs: 2000 });
+  const A = make(); const B = make(); // two isolates / processes sharing one database
+  cloud.expireTokens();
+  // A's refresh succeeds at TTLock (rotating the refresh token), but its write reaches the DB late.
+  const batch = store.sql.batch.bind(store.sql);
+  let delayed = 0;
+  store.sql.batch = async stmts => {
+    if (!delayed && stmts.some(s => /UPDATE vendor_accounts SET sealed/.test(s.sql))) { delayed++; await new Promise(r => setTimeout(r, 400)); }
+    return batch(stmts);
+  };
+  t.after(() => { store.sql.batch = batch; });
+  const pA = (await A.vendorFor('t_default')).listLocks();
+  await new Promise(r => setTimeout(r, 80)); // A has rotated at TTLock, not yet saved
+  const pB = (await B.vendorFor('t_default')).listLocks();
+  const [la, lb] = await Promise.all([pA, pB]);
+  assert.ok(la.length && lb.length, 'both instances keep working');
+  const row = await store.sql.first('SELECT status FROM vendor_accounts');
+  assert.equal(row.status, 'connected', 'no false needs_reconnect');
+  assert.equal((await api.call('GET', '/api/audit?action=vendor.needs_reconnect', owner)).body.log.length, 0);
+  assert.equal(cloud.callsTo('/oauth2/token').filter(c => c.params.grant_type === 'refresh_token').length, 2, 'B really lost the race at TTLock');
+});
+
+test('refresh single-flight: parallel calls in one instance refresh once', async t => {
+  const { api, cloud, base, owner } = await setup(t);
+  await api.call('PUT', '/api/vendor-account', { ...owner, body: RIVERSIDE });
+  const { createVendorAccounts } = require('../vendor-accounts');
+  const A = createVendorAccounts({ store: api.server.store, secretsKey: SECRETS_KEY, apiBase: base, platformApp: { clientId: 'platform-app', clientSecret: 'platform-secret' }, lockCacheMs: 0 });
+  cloud.expireTokens();
+  const v = await A.vendorFor('t_default');
+  const before = cloud.callsTo('/oauth2/token').filter(c => c.params.grant_type === 'refresh_token').length;
+  await Promise.all([v.listLocks(), v.listLocks(), v.listLocks(), v.listLocks()]);
+  assert.equal(cloud.callsTo('/oauth2/token').filter(c => c.params.grant_type === 'refresh_token').length - before, 1);
+  assert.equal((await api.server.store.sql.first('SELECT status FROM vendor_accounts')).status, 'connected');
+});
+
+test('winner slower than the grace window: the loser fails one request, the winner\'s save heals the account', async t => {
+  const { api, cloud, base, owner } = await setup(t);
+  await api.call('PUT', '/api/vendor-account', { ...owner, body: RIVERSIDE });
+  const { createVendorAccounts } = require('../vendor-accounts');
+  const store = api.server.store;
+  const make = grace => createVendorAccounts({ store, secretsKey: SECRETS_KEY, apiBase: base, platformApp: { clientId: 'platform-app', clientSecret: 'platform-secret' }, lockCacheMs: 0, refreshGraceMs: grace });
+  const A = make(3000); const B = make(100);
+  cloud.expireTokens();
+  const batch = store.sql.batch.bind(store.sql);
+  let delayed = 0;
+  store.sql.batch = async stmts => {
+    if (!delayed && stmts.some(s => /UPDATE vendor_accounts SET sealed/.test(s.sql))) { delayed++; await new Promise(r => setTimeout(r, 600)); }
+    return batch(stmts);
+  };
+  t.after(() => { store.sql.batch = batch; });
+  const pA = (await A.vendorFor('t_default')).listLocks();
+  await new Promise(r => setTimeout(r, 80));
+  const rB = await (await B.vendorFor('t_default')).listLocks().then(() => 'ok', e => e.reason);
+  assert.equal(rB, 'needs_reconnect', 'B gave up after its short grace window');
+  assert.ok((await pA).length);
+  assert.equal((await store.sql.first('SELECT status FROM vendor_accounts')).status, 'connected', 'A\'s save restored the account');
+  assert.equal((await api.call('GET', '/api/vendor-account', owner)).body.account.status, 'connected');
 });
