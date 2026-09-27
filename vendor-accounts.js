@@ -160,6 +160,13 @@ function createVendorAccounts({
       if (error && error.auth) throw new AccountError(400, 'Nuki rejected the API token (a token dies when the Nuki Web password changes)');
       throw new AccountError(502, `could not reach Nuki: ${String((error && error.message) || error).slice(0, 160)}`);
     }
+    // Token scopes: reading locks is not enough. Listing codes needs smartlock.auth; find out now, not at the first visitor.
+    try {
+      if (locks.length) await nuki.listAuths(locks[0].smartlockId);
+    } catch (error) {
+      if (error && error.auth) throw new AccountError(400, 'This Nuki API token cannot manage keypad codes: generate one with the scopes smartlock, smartlock.auth, smartlock.action and smartlock.log (Nuki Web → API)');
+      throw new AccountError(502, `could not reach Nuki: ${String((error && error.message) || error).slice(0, 160)}`);
+    }
     const uid = String((account && account.accountId) || '');
     if (!uid) throw new AccountError(502, 'Nuki did not return an account id');
     const clash = await sql.first('SELECT tenant_id FROM vendor_accounts WHERE kind = ? AND region = ? AND account_uid = ? AND tenant_id <> ?', ['nuki', 'eu', uid, tenantId]);

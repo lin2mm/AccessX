@@ -116,6 +116,9 @@ test('a tenant on Nuki: connect with an API token, issue and revoke codes, sweep
   assert.equal((await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { kind: 'nuki', apiToken: 'wrong-token-0123456789' } })).status, 400);
   assert.equal((await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { kind: 'nuki' } })).status, 400);
   assert.equal((await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { kind: 'august', apiToken: 'x'.repeat(20) } })).status, 400);
+  const readOnly = await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { kind: 'nuki', apiToken: 'nuki-readonly-token' } });
+  assert.equal(readOnly.status, 400, 'a token without smartlock.auth is refused at connect, not at the first visitor');
+  assert.match(readOnly.body.error, /smartlock\.auth/);
   const c = await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { kind: 'nuki', apiToken: 'nuki-river-token' } });
   assert.equal(c.status, 200, JSON.stringify(c.body));
   assert.equal(c.body.account.kind, 'nuki');

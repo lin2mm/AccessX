@@ -44,6 +44,8 @@ function createFakeNuki({ accounts = {}, locks = {}, codeShape = 'array', confir
     const acct = state.accounts[token];
     if (!acct || acct.revoked) return [401, { detailMessage: 'Unauthorized' }];
     const mine = id => acct.lockIds.includes(Number(id)) && state.locks[id];
+    // A token generated without the smartlock.auth / smartlock.action scopes.
+    if (acct.readOnly && /^\/smartlock\/\d+\/(auth|action)/.test(path)) return [403, { detailMessage: 'Forbidden' }];
     if (method === 'GET' && path === '/account') return [200, { accountId: acct.accountId, email: acct.email, name: acct.name, type: 0 }];
     if (method === 'GET' && path === '/smartlock') return [200, acct.lockIds.filter(id => state.locks[id]).map(id => lockView(state.locks[id]))];
     let m = path.match(/^\/smartlock\/(\d+)$/);
@@ -155,6 +157,7 @@ function nukiFixture(opts = {}) {
     accounts: {
       'nuki-river-token': { accountId: 81001, email: 'facilities@acme.example', name: 'Acme facilities', lockIds: [9001, 9002, 9003, 9004] },
       'nuki-gym-api-token': { accountId: 81002, email: 'gym@northgate.example', name: 'Northgate', lockIds: [9101, 9102] },
+      'nuki-readonly-token': { accountId: 81003, email: 'viewer@acme.example', name: 'Read only', lockIds: [9101], readOnly: true },
     },
     locks: {
       9001: { name: 'Main Entrance', batteryCharge: 80 },
