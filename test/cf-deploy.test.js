@@ -84,6 +84,10 @@ test('dry run and migrate-only', async () => {
   const mig = fakes();
   await deploy({ configText: REPO_CONFIG, ...mig, migrateOnly: true });
   assert.deepStrictEqual(mig.calls, ['d1 list', 'd1 migrations']);
+  const res = fakes();
+  await deploy({ configText: REPO_CONFIG, ...res, resolveOnly: true });
+  assert.deepStrictEqual(res.calls, ['d1 list']);
+  assert.strictEqual(parseJsonc(res.files['wrangler.deploy.jsonc']).d1_databases[0].database_id, ID);
 });
 
 test('a placeholder id is refused; a real id skips the lookup', async () => {

@@ -167,6 +167,11 @@ function backupD1({ db, local, persistTo, out }) {
   }
   const a = ['wrangler', 'd1', 'export', db, local ? '--local' : '--remote', '--output', out];
   if (local && persistTo) a.push('--persist-to', persistTo);
+  if (!local) {
+    // wrangler.jsonc has no database_id (R23): resolve it by name, as npm run deploy does
+    execFileSync(process.execPath, [path.join(root, 'scripts', 'cf-deploy.js'), '--resolve-only'], { cwd: root, stdio: ['ignore', 'inherit', 'inherit'], timeout: 120000 });
+    a.push('--config', 'wrangler.deploy.jsonc');
+  }
   execFileSync('npx', a, { cwd: root, stdio: ['ignore', 'inherit', 'inherit'], timeout: 600000 });
   return out;
 }
