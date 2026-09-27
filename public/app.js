@@ -86,6 +86,7 @@ async function init(){
   }
   await loadMode();
   await loadDoors();refreshTzNotes(true);await loadHealth();await loadSetup();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();await loadBilling();
+  if(typeof loadReview==='function'){loadReview();loadSweeps();loadRetention();}
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 /* ---- door-local time: every time the operator types or reads is in the door's time zone ---- */
@@ -926,7 +927,7 @@ function renderInviteMode(){
   const on=$('#vi-invite').checked;
   $('#vi-name').required=!on;
   $('#vi-name').closest('div').hidden=on;$('#vi-company').closest('div').hidden=on;
-  $('#vi-direct').hidden=on;$('#vi-invite-note').hidden=!on;
+  $('#vi-direct').hidden=on;$('#vi-invite-note').hidden=!on;$('#vi-bulk-w').hidden=!on;
   $('#vi-submit').textContent=on?'Send invitation':'Register & create code';
 }
 $('#vi-invite').addEventListener('change',renderInviteMode);
@@ -943,6 +944,21 @@ $('#vi-form').addEventListener('submit',async e=>{
   const body={visitorName:$('#vi-name').value,visitorEmail:$('#vi-email').value,visitorPhone:$('#vi-phone').value,sendSms:$('#vi-sms').checked&&!$('#vi-sms').disabled,company:$('#vi-company').value,hostUserId:$('#vi-host').value,lockIds,
     endLocal:until==='24:00'?nextDay(date)+'T00:00':`${date}T${until}`,sendCode:$('#vi-send').checked&&!$('#vi-send').disabled};
   if(from)body.startLocal=`${date}T${from}`;
+  const bulk=$('#vi-invite').checked?[...new Set($('#vi-bulk').value.split(/[\s,;]+/).map(x=>x.trim()).filter(Boolean))]:[];
+  if(bulk.length){
+    const bb={rows:bulk.map(email=>({email})),hostUserId:body.hostUserId,lockIds,endLocal:body.endLocal,
+      startLocal:body.startLocal||`${date}T${tzParts(new Date(),visTz()).time.slice(0,2)}:00`};
+    if(!confirm(`Send ${bulk.length} invitation(s)? Each address gets its own link.`))return;
+    $('#vi-submit').disabled=true;
+    const r=await post('/api/visit-invites/bulk',bb);
+    $('#vi-submit').disabled=false;
+    if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))} — nothing was sent.</div>`;return;}
+    const bad=r.results.filter(x=>!x.ok);
+    out.innerHTML=`<div class="res ${bad.length?'n':'y'}"><b>${r.sent} invitation(s) ${r.results.some(x=>x.ok&&x.delivery==='delivered')?'sent':'created'}</b>${bad.length?`, ${bad.length} not sent:`:''}
+      ${bad.map(x=>`<div class="meta" style="margin-top:4px">${esc(x.email||'(empty)')}: ${esc(x.error)}</div>`).join('')}</div>`;
+    $('#vi-bulk').value=bad.map(x=>x.email).filter(Boolean).join('\n');
+    loadVisitors();loadAudit();return;
+  }
   if($('#vi-invite').checked){
     const ib={visitorEmail:$('#vi-email').value||undefined,visitorPhone:$('#vi-phone').value||undefined,hostUserId:body.hostUserId,lockIds,endLocal:body.endLocal,
       startLocal:body.startLocal||`${date}T${tzParts(new Date(),visTz()).time.slice(0,2)}:00`};

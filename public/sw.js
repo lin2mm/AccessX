@@ -1,8 +1,8 @@
 // Bump C whenever shell assets change. Pages are network-first so users
 // always get the latest UI (and security fixes) when online; the cache is
 // only an offline fallback. API calls are never cached.
-const C='axess-v25';
-const A=['./','./index.html','./app.js','./qr.js','./manifest.json','./icon.svg'];
+const C='axess-v26';
+const A=['./','./index.html','./app.js','./review.js','./qr.js','./manifest.json','./icon.svg'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(A)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{

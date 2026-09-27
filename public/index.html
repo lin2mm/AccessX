@@ -289,6 +289,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <div class="meta tz-note" id="vi-tz"></div>
         <div class="checks"><label id="vi-invite-l" title="The visitor enters their own name and arrival time; the code is sent only to the email or mobile above"><input type="checkbox" id="vi-invite"> Send an invitation instead — the visitor registers themselves</label></div>
         <div class="checks" id="vi-direct"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label><label id="vi-sms-l"><input type="checkbox" id="vi-sms"> Text the code (SMS)</label></div>
+        <div id="vi-bulk-w" hidden><label for="vi-bulk">Several visitors? One email address per line (up to 100) — each gets their own link; the address above is ignored</label><textarea id="vi-bulk" rows="3" style="width:100%" maxlength="20000" placeholder="ana@partner.example&#10;li@partner.example"></textarea></div>
         <div class="meta" id="vi-invite-note" hidden>Give one address — email <i>or</i> mobile. The link can be forwarded, but the code is only ever sent to that address. At a site with sensitive doors, registrations wait for your approval below.</div>
         <div style="margin-top:10px"><button class="btn" type="submit" id="vi-submit">Register &amp; create code</button></div>
       </form>
@@ -373,6 +374,11 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
   <!-- PEOPLE -->
   <section id="v-people" class="view">
     <div class="card"><h2>People</h2><div id="people"></div></div>
+    <div class="card" id="rv-card" hidden>
+      <h2>Access review</h2>
+      <div class="hint">Every few months, the people who manage each site confirm who still needs its doors — and owners confirm the administrators. Anyone not confirmed can be removed in one step after the due date. The record goes into the evidence pack.</div>
+      <div id="rv"></div>
+    </div>
     <div class="card"><h2>User groups</h2><div id="ugroups"></div>
       <form id="ug-add" class="grid c3 rm" hidden style="align-items:end;margin-top:12px">
         <label>New people group<input id="ug-name" required maxlength="100" placeholder="e.g. IT"></label>
@@ -504,6 +510,16 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="hint">Every code the system has issued. Anything current policy would no longer issue is flagged for revocation.</div>
       <div style="overflow-x:auto"><table id="creds"></table></div>
     </div>
+    <div class="card" id="sw-card" hidden>
+      <h2>Passcode sweep</h2>
+      <div class="hint">Reads the codes each lock holds and compares them with AccessX: codes someone set in the TTLock app or an old system, codes AccessX revoked that are still there, and codes AccessX issued that the lock lost. Code digits are never shown. It sees what the lock vendor's cloud knows — a code typed in at the keypad as the admin, or one deleted over Bluetooth only, does not appear.</div>
+      <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+        <div><label for="sw-site">Doors</label><select id="sw-site"></select></div>
+        <button class="btn2" type="button" id="sw-run">Check the codes on the locks</button>
+      </div>
+      <div id="sw-res" style="margin-top:10px"></div>
+      <div id="sw-past" style="margin-top:10px"></div>
+    </div>
     <div class="card">
       <h2>System activity</h2>
       <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
@@ -519,6 +535,11 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="hint" id="a-anchor-state"></div>
       <div style="overflow-x:auto"><table id="alog"></table></div>
     </div>
+    <div class="card" id="rt-card" hidden>
+      <h2>Data retention</h2>
+      <div class="hint">How long AccessX keeps each kind of record, and where to change it. Useful for your privacy notice and for a customer's security questionnaire.</div>
+      <div id="rt" style="overflow-x:auto"></div>
+    </div>
   </section>
 </main>
 
@@ -533,5 +554,6 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
 
 <script src="qr.js"></script>
 <script src="app.js"></script>
+<script src="review.js"></script>
 </body>
 </html>
