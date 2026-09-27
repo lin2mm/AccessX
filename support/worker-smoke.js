@@ -468,7 +468,11 @@ check('wrong token is rejected', async () => {
     const buf = Buffer.alloc(Math.max(0, size - logStart));
     fs.readSync(fd, buf, 0, buf.length, logStart);
     fs.closeSync(fd);
-    const errors = buf.toString('utf8').split('\n').filter(l => /\[ERROR\]/.test(l));
+    // Wrangler colours its tags: "[\x1b[41;97mERROR\x1b[41;31m]". Until R20 this gate
+    // matched the raw text and so never saw a coloured error (it found 0 of 318 in a
+    // failing run). Strip ANSI codes first; also catch "[wrangler:error]".
+    const plain = buf.toString('utf8').replace(/\x1b\[[0-9;]*m/g, '');
+    const errors = plain.split('\n').filter(l => /\[ERROR\]|\[wrangler:error\]/.test(l));
     if (errors.length) { logFailed = true; console.log(`FAIL wrangler log has ${errors.length} new [ERROR] line(s) (${wranglerLog}):\n     ${errors.slice(0, 5).join('\n     ')}`); }
     else console.log(`ok   wrangler log: no new [ERROR] lines (${path.basename(wranglerLog)})`);
   } else console.log('     (wrangler log not found: set WRANGLER_LOG to check it for errors)');

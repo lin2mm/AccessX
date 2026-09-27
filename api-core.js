@@ -11,6 +11,7 @@
  * unit of work, so each change and its audit entry commit together.
  */
 const rbac = require('./rbac-core');
+const { share, awaitShared } = require('./store/shared-wait');
 const policy = require('./policy-core');
 const creds = require('./credentials-core');
 const visitors = require('./visitors-core');
@@ -135,8 +136,8 @@ function createApi({
 
   let ready = null;
   const whenReady = () => {
-    if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
-    return ready;
+    if (!ready) ready = share(ensureReady().catch(error => { ready = null; throw error; }));
+    return awaitShared(ready, { maxMs: 30000 }); // concurrent cold-start requests (shared-wait.js)
   };
 
   const scim = createScim({

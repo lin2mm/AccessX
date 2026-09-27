@@ -20,6 +20,7 @@
 const { TTLock, ERR } = require('./ttlock');
 const { createCloudVendor, VendorUnavailableError } = require('./vendor-ttlock-core');
 const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { share, awaitShared, SharedWaitTimeout } = require('./store/shared-wait');
 const { Nuki } = require('./nuki');
 const { createNukiVendor } = require('./vendor-nuki-core');
 
@@ -260,13 +261,21 @@ function createVendorAccounts({
       }
       await load();
     };
-    // Single-flight inside this instance: parallel requests share one refresh.
+    // Single-flight inside this instance: parallel requests share one refresh
+    // (two refreshes with one refresh token would break the account). Waiters use
+    // awaitShared: on Workers, awaiting another request's fetch fails (shared-wait.js).
     let inflight = null;
     return async ({ force = false } = {}) => {
-      if (inflight) { await inflight; return mem.accessToken; }
+      if (inflight) {
+        try { await awaitShared(inflight); } catch (error) {
+          if (error instanceof SharedWaitTimeout) throw new VendorUnavailableError('the TTLock token refresh is taking too long, try again', { reason: 'unavailable' });
+          throw error;
+        }
+        return mem.accessToken;
+      }
       const r = await load();
       if (force || mem.expiresAt - now() < refreshBeforeMs) {
-        inflight = refresh(r).finally(() => { inflight = null; });
+        inflight = share(refresh(r).finally(() => { inflight = null; }));
         await inflight;
       }
       return mem.accessToken;

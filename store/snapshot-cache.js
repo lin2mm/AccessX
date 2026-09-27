@@ -28,6 +28,7 @@
  * its own cache; they never need to talk to each other because the database
  * version is checked on every read.
  */
+const { share, awaitShared, SharedWaitTimeout } = require('./shared-wait');
 const ID_CHUNK = 90; // D1 allows 100 bound parameters per statement (tenant_id + 90 ids)
 
 function deepFreeze(value) {
@@ -215,10 +216,11 @@ function createSnapshotCache({ sql, collections, toItem, maxRows = 500000, patch
       }
       const running = inflight.get(tenantId);
       if (!running) break;
-      await running.catch(() => {});
+      // Never `await running` directly: on Workers that joins the other request's I/O context (shared-wait.js).
+      try { await awaitShared(running); } catch (error) { if (error instanceof SharedWaitTimeout) break; }
       waited = true;
     }
-    const p = refresh(tenantId, version);
+    const p = share(refresh(tenantId, version));
     inflight.set(tenantId, p);
     try {
       return (await p).cols;
