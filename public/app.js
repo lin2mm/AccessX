@@ -114,20 +114,31 @@ async function loadDoors(){
     return `<div class="door ${cls}">
       <div><b>${esc(l.lockAlias)}</b>
         <div class="meta">${esc(l.site||'—')} ${l.doorGroup?'· '+esc(l.doorGroup):''}</div>
-        <div class="meta"><span class="bat ${batClass(bat)}">${bat}% battery</span>
+        <div class="meta"><span class="bat ${batClass(bat)}">${bat}% battery</span><span class="bat-fc" data-fc="${Number(l.lockId)}"></span>
         ${l.hasGateway?'<span class="tag g" style="margin-left:6px">online</span>':'<span class="tag r" style="margin-left:6px">no gateway</span>'}</div>
       </div><button class="btn sm" type="button" data-unlock="${Number(l.lockId)}">Unlock</button></div>`}).join(''):'<div class="empty">No doors visible to you</div>';
   const opts=DOORS.map(l=>`<option value="${Number(l.lockId)}">${esc(l.lockAlias)}</option>`).join('');
   $('#e-door').innerHTML=opts;$('#r-door').innerHTML=opts;$('#p-door').innerHTML=opts;loadRecords();
 }
+/** Battery trend (lock-health-core): "~N days left" beside the level once there is enough history. */
+async function loadForecasts(){
+  const h=await api('/api/doors/health');if(!h.ok)return null;
+  for(const l of h.locks){const el=$(`[data-fc="${Number(l.lockId)}"]`);if(!el)continue;
+    el.innerHTML=l.daysLeft!==null&&l.daysLeft!==undefined?` <span class="meta" title="${esc(l.slopePerDay!==null?(-l.slopePerDay)+'%/day':'')}">· ~${Number(l.daysLeft)} days left${l.emptyOn?' ('+esc(l.emptyOn)+')':''}</span>`:'';}
+  return h;
+}
 $('#doors').addEventListener('click',e=>{const b=e.target.closest('[data-unlock]');if(b)unlock(b.dataset.unlock,b);});
 async function loadHealth(){
-  const h=await api('/api/health');
+  const [h,f]=await Promise.all([api('/api/health'),loadForecasts()]);
   const low=(h.lowBattery||[]).length, off=(h.offline||[]).length;
+  const soon=f?f.locks.filter(l=>l.band==='forecast').length:0;
+  const silent=f&&f.callback&&f.callback.silent;
   $('#kpis').innerHTML=`
     <div class="kpi"><div class="n">${Number(h.total)||0}</div><div class="l">Doors</div></div>
     <div class="kpi"><div class="n ${low?'warn':'ok'}">${low}</div><div class="l">Low battery</div></div>
-    <div class="kpi"><div class="n ${off?'bad':'ok'}">${off}</div><div class="l">No gateway</div></div>`;
+    <div class="kpi"><div class="n ${off?'bad':'ok'}">${off}</div><div class="l">No gateway</div></div>${soon?`
+    <div class="kpi"><div class="n warn">${soon}</div><div class="l">Battery due in 3 weeks</div></div>`:''}${silent?`
+    <div class="kpi" title="TTLock has records it never sent: check the callback URL in the TTLock developer console"><div class="n bad">!</div><div class="l">TTLock callback silent since ${esc(new Date(f.callback.lastAt).toLocaleString())}</div></div>`:''}`;
 }
 async function unlock(id,btn){
   btn.textContent='…';
@@ -499,7 +510,7 @@ $('#a-verify').addEventListener('click',async()=>{
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
 });
-const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)',lock_alarm:'Lock alarms (tamper, forced, keypad locked)',door_left_open:'Door left open'};
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)',lock_alarm:'Lock alarms (tamper, forced, keypad locked)',door_left_open:'Door left open',battery_low:'Lock batteries (low or running out)',callback_silent:'TTLock callback stopped'};
 async function loadAlerts(){
   const r=await api('/api/alerts');
   $('#alerts-box').hidden=!r.ok;

@@ -13,6 +13,15 @@ const OPERATORS = JSON.stringify([
   { id: 'op_m2', name: 'Manager Two', role: 'r_manager', tokenSha256: sha256Hex('m2-token') },
 ]);
 
+// These tests count deliveries; the demo fleet's genuinely low battery
+// (Cleaner Cupboard, 15%) would add a battery_low alert to the first
+// maintenance run. Battery alerts are tested in lock-health.api.test.js.
+async function bootQuiet(env) {
+  const api = await boot(env);
+  await api.server.store.sql.batch([{ sql: "UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.batteryCheckedAt', ?)", params: [new Date().toISOString()] }]);
+  return api;
+}
+
 /** A local "Slack/Teams" that records what it receives. */
 async function receiver(t, status = 200) {
   const got = [];
@@ -39,7 +48,7 @@ test('message formats: Slack text, Teams Workflows adaptive card, JSON', () => {
 
 test('alerts: webhook sealed + owner-only; approval requests, overdue removals (per-tenant SLA) and first revoke failures reach the channel once', async t => {
   const hook = await receiver(t);
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', PUBLIC_URL: 'https://accessx.example', RECONCILE_INTERVAL_MIN: '0' });
+  const api = await bootQuiet({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', PUBLIC_URL: 'https://accessx.example', RECONCILE_INTERVAL_MIN: '0' });
   t.after(api.close);
 
   assert.equal((await api.call('PUT', '/api/alerts', { ...M1, body: { webhookUrl: hook.url } })).status, 403, 'managers cannot redirect alerts');
@@ -93,7 +102,7 @@ test('alerts: webhook sealed + owner-only; approval requests, overdue removals (
 
 test('a revoke that fails alerts once; a dead webhook never fails the change', async t => {
   const hook = await receiver(t, 500);
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  const api = await bootQuiet({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
   t.after(api.close);
   await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'teams' } });
   const issued = await api.call('POST', '/api/passcode', { ...OWNER, body: { lockId: 9002, userId: 'u2' } });
@@ -144,7 +153,7 @@ async function requestApproval(api) {
 
 test('undelivered alerts are retried with backoff by the scheduled maintenance, same id each time', async t => {
   const hook = await scripted(t, [500, 503, 200]);
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  const api = await bootQuiet({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
   t.after(api.close);
   await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'json' } });
   await requestApproval(api);
@@ -182,7 +191,7 @@ test('undelivered alerts are retried with backoff by the scheduled maintenance, 
 test('a 4xx is not retried; the 8th failure is given up and audited; removing the channel clears its queue', async t => {
   const gone = await scripted(t, [404]);
   const dead = await scripted(t, [500]);
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  const api = await bootQuiet({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
   t.after(api.close);
 
   await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: gone.url } });
@@ -214,7 +223,7 @@ test('a 4xx is not retried; the 8th failure is given up and audited; removing th
 
 test('email alerts through Resend or Postmark: recipients validated, never audited; retries keep the idempotency key', async t => {
   const resend = await scripted(t, [200, 502, 200]);
-  const api = await boot({
+  const api = await bootQuiet({
     ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0', PUBLIC_URL: 'https://accessx.example',
     EMAIL_PROVIDER: 'resend', EMAIL_API_KEY: 're_test_key', EMAIL_FROM: 'AccessX <alerts@accessx.example>', EMAIL_API_BASE: resend.base,
   });
@@ -263,7 +272,7 @@ test('email alerts through Resend or Postmark: recipients validated, never audit
 
 test('Postmark request shape; email recipients need a configured provider; bad provider config fails at start', async t => {
   const pm = await scripted(t, [200]);
-  const api = await boot({
+  const api = await bootQuiet({
     ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, RECONCILE_INTERVAL_MIN: '0',
     EMAIL_PROVIDER: 'postmark', EMAIL_API_KEY: 'pm-server-token', EMAIL_FROM: 'alerts@accessx.example', EMAIL_API_BASE: pm.base,
   });
@@ -277,7 +286,7 @@ test('Postmark request shape; email recipients need a configured provider; bad p
   assert.equal(m.body.MessageStream, 'outbound');
   assert.match(m.body.TextBody, /AccessX test alert/);
 
-  const plain = await boot({ ADMIN_TOKEN: 'owner-token', SECRETS_KEY, RECONCILE_INTERVAL_MIN: '0' });
+  const plain = await bootQuiet({ ADMIN_TOKEN: 'owner-token', SECRETS_KEY, RECONCILE_INTERVAL_MIN: '0' });
   t.after(plain.close);
   const r = await plain.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['a@x.example'] } });
   assert.equal(r.status, 400);
@@ -293,7 +302,7 @@ test('TTLock refusing the account alerts the owners once (vendor_needs_reconnect
   const cloud = demoFixture();
   const base = await cloud.listen(0);
   const hook = await scripted(t, [200]);
-  const api = await boot({
+  const api = await bootQuiet({
     ADMIN_TOKEN: 'owner-token', SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0',
     TTLOCK_API_BASE: base, TTLOCK_CLIENT_ID: 'platform-app', TTLOCK_CLIENT_SECRET: 'platform-secret',
   });
@@ -311,7 +320,7 @@ test('TTLock refusing the account alerts the owners once (vendor_needs_reconnect
 // ---- Daily summary (digest) -----------------------------------------------------------
 test('daily summary: non-urgent events wait and go out as one message at the local hour; security events cannot wait', async t => {
   const hook = await scripted(t, [200]);
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  const api = await bootQuiet({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
   t.after(api.close);
   await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'json' } });
   for (const bad of [{ events: ['break_glass'], hour: 8, timeZone: 'Europe/London' }, { events: ['approval_requested'], hour: 24, timeZone: 'Europe/London' }, { events: ['approval_requested'], hour: 8, timeZone: 'Mars/Olympus' }]) {

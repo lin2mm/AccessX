@@ -11,6 +11,10 @@
  *   lock_alarm          a lock reported tamper, a forced opening or a keypad
  *                       locked after repeated wrong codes
  *   door_left_open      (opt-in) a door sensor reported the door left open
+ *   battery_low         a lock's battery is low, or its trend reaches empty
+ *                       within 3 weeks (lock-health-core.js)
+ *   callback_silent     TTLock stopped calling back: records exist in the
+ *                       cloud that never reached us (alarms/arrivals quiet)
  *
  * Formats: Slack incoming webhook ({text}), Microsoft Teams Workflows
  * ("Post to a channel when a webhook request is received": an Adaptive Card
@@ -43,7 +47,7 @@ const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { checkWebhookUrl } = require('./audit-ops');
 const policy = require('./policy-core');
 
-const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived', 'lock_alarm', 'door_left_open'];
+const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived', 'lock_alarm', 'door_left_open', 'battery_low', 'callback_silent'];
 // Informational, and they name people: channels get these only when an owner turns them on.
 const OPT_IN_EVENTS = ['visitor_arrived', 'door_left_open'];
 const DEFAULT_EVENTS = EVENTS.filter(e => !OPT_IN_EVENTS.includes(e));
@@ -57,13 +61,14 @@ const effectiveEvents = a => (a.events
 const FORMATS = ['slack', 'teams', 'json'];
 // Non-urgent events that may wait for the daily summary. Never: break_glass,
 // revoke_failed, vendor_needs_reconnect (someone must act now).
-const DIGEST_EVENTS = ['approval_requested', 'removal_overdue', 'visitor_arrived', 'door_left_open'];
+const DIGEST_EVENTS = ['approval_requested', 'removal_overdue', 'visitor_arrived', 'door_left_open', 'battery_low'];
 const DIGEST_MAX_LINES = 40;
 const EVENT_TITLES = {
   approval_requested: 'Approvals requested', removal_overdue: 'Codes still on offline locks',
   revoke_failed: 'Revocations failed', break_glass: 'Break-glass sign-ins',
   vendor_needs_reconnect: 'TTLock accounts to reconnect', visitor_arrived: 'Visitors arrived',
   lock_alarm: 'Lock alarms', door_left_open: 'Doors left open',
+  battery_low: 'Lock batteries', callback_silent: 'TTLock callback silent',
 };
 
 /** Next occurrence of `hour`:00 in `timeZone` strictly after `nowMs` (DST-safe). */

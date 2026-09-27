@@ -15,6 +15,7 @@ const policy = require('./policy-core');
 const creds = require('./credentials-core');
 const visitors = require('./visitors-core');
 const lockEvents = require('./lock-events-core');
+const health = require('./lock-health-core');
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -1312,8 +1313,131 @@ function createApi({
           params: [new Date().toISOString(), tenantId, new Date(Date.now() - 60e3).toISOString()] }]).catch(() => {});
       }
     }
+    // Battery readings ride along on callback records (the lock's level at that moment;
+    // the lowest reading of the day is kept: a battery only drains, a list value can be stale).
+    const levels = new Map();
+    for (const r of list) {
+      const lvl = health.level(r && r.electricQuantity);
+      const id = Number(r && r.lockId);
+      if (lvl !== null && Number.isSafeInteger(id)) levels.set(id, lvl);
+    }
+    for (const [lockId, lvl] of levels) {
+      for (const tenantId of await tenantsForLock(lockId)) await recordBatteries(tenantId, [{ lockId, level: lvl }]).catch(error => log('battery reading failed', tenantId, error));
+    }
     return { status: 200, body: { ok: true, records: list.length, matched: matches.length, recorded, alarms } };
   }
+
+  // --- lock health: battery trends, a silent TTLock callback (lock-health-core.js) ------
+  async function recordBatteries(tenantId, readings, day = health.dayOf(Date.now())) {
+    const ok = readings.map(r => ({ lockId: Number(r.lockId), level: health.level(r.level) })).filter(r => Number.isSafeInteger(r.lockId) && r.level !== null);
+    if (!ok.length) return 0;
+    await store.sql.batch(ok.map(r => ({ sql: 'INSERT INTO lock_battery (tenant_id, lock_id, day, level) VALUES (?, ?, ?, ?) ON CONFLICT (tenant_id, lock_id, day) DO UPDATE SET level = MIN(level, excluded.level)', params: [tenantId, r.lockId, day, r.level] })));
+    return ok.length;
+  }
+  // Operational markers in tenants.settings (not configuration: no audit).
+  const setMarker = (tenantId, key, value) => store.sql.batch([{ sql: `UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.${key}', ?) WHERE id = ?`, params: [value, tenantId] }]);
+  const BATTERY_EVERY_MS = 6 * 36e5;
+  async function batteryForecasts(tenantId, locks, now = Date.now()) {
+    const rows = await store.sql.all('SELECT lock_id, day, level FROM lock_battery WHERE tenant_id = ? AND day >= ? ORDER BY day', [tenantId, health.dayOf(now - 90 * 864e5)]);
+    const byLock = new Map();
+    for (const r of rows) { const id = Number(r.lock_id); if (!byLock.has(id)) byLock.set(id, []); byLock.get(id).push({ day: r.day, level: Number(r.level) }); }
+    return new Map(locks.map(l => [Number(l.lockId), health.forecast(byLock.get(Number(l.lockId)) || [], now)]));
+  }
+  const batteryLine = (l, f) => `${l.lockAlias || l.lockId} — ${f.level}%${f.daysLeft !== null ? `, about ${f.daysLeft} day${f.daysLeft === 1 ? '' : 's'} left${f.slopePerDay !== null ? ` (${-f.slopePerDay}%/day)` : ''}` : ''}${l.hasGateway ? '' : ' · no gateway: level as of the last app sync'}`;
+
+  async function checkBatteries(tenantId, locks, now = Date.now()) {
+    await recordBatteries(tenantId, locks.map(l => ({ lockId: l.lockId, level: l.electricQuantity })), health.dayOf(now));
+    await store.sql.batch([{ sql: 'DELETE FROM lock_battery WHERE tenant_id = ? AND day < ?', params: [tenantId, health.dayOf(now - health.KEEP_DAYS * 864e5)] }]);
+    const forecasts = await batteryForecasts(tenantId, locks, now);
+    const prev = new Map((await store.sql.all('SELECT * FROM lock_health WHERE tenant_id = ?', [tenantId]))
+      .map(r => [Number(r.lock_id), { band: r.battery_band, alertedAt: r.battery_alerted_at, replacedOn: r.replaced_on }]));
+    const due = [];
+    const writes = [];
+    const upsert = (lockId, band, alertedAt, replacedOn) => writes.push({
+      sql: 'INSERT INTO lock_health (tenant_id, lock_id, battery_band, battery_alerted_at, replaced_on) VALUES (?, ?, ?, ?, ?) ON CONFLICT (tenant_id, lock_id) DO UPDATE SET battery_band = excluded.battery_band, battery_alerted_at = excluded.battery_alerted_at, replaced_on = excluded.replaced_on',
+      params: [tenantId, lockId, band, alertedAt, replacedOn],
+    });
+    for (const l of locks) {
+      const id = Number(l.lockId);
+      const f = forecasts.get(id);
+      const p = prev.get(id) || null;
+      const d = health.batteryDecision(p, f, now);
+      if (d.alert) { due.push({ l, f }); upsert(id, f.band, new Date(now).toISOString(), f.replacedOn || (p && p.replacedOn) || null); }
+      // A new battery (or a reading back above the bands): announce again next time it runs low.
+      else if (d.state === 'replaced' || d.state === 'reset') upsert(id, 'ok', null, f.replacedOn || (p && p.replacedOn) || null);
+    }
+    if (writes.length) await store.sql.batch(writes);
+    if (due.length && alerts) {
+      const worst = due.some(x => x.f.band === 'critical') ? 'critical' : due.some(x => x.f.band === 'low') ? 'low' : 'forecast';
+      due.sort((a, b) => a.f.level - b.f.level);
+      await alerts.send(tenantId, 'battery_low', {
+        title: due.length === 1 ? `Lock battery: ${due[0].l.lockAlias || due[0].l.lockId} at ${due[0].f.level}%` : `${due.length} locks need new batteries`,
+        text: `${worst === 'critical' ? 'Replace now — a flat lock only opens with the emergency power contact or a mechanical key.' : worst === 'low' ? 'Plan a battery visit this week.' : 'At the current rate these reach 10% within three weeks.'}\n${due.map(x => `· ${batteryLine(x.l, x.f)}`).join('\n')}`,
+        facts: due.slice(0, 10).map(x => [x.l.lockAlias || String(x.l.lockId), `${x.f.level}%${x.f.emptyOn ? ` · ~${x.f.emptyOn}` : ''}`]),
+        path: '/#doors',
+      });
+    }
+    return due.length;
+  }
+
+  /** TTLock's callback went quiet: are there records in the cloud it never sent us? */
+  async function checkCallback(tenantId, locks, settings, now = Date.now()) {
+    const gateway = locks.filter(l => l.hasGateway);
+    const snap = await store.tenant(tenantId).snapshot();
+    const timeZone = snap.sites.length ? policy.siteTimeZone(snap, snap.sites[0].id) : 'UTC';
+    const lastAt = settings.ttlockCallbackAt;
+    if (!health.callbackNeedsCheck({ lastAt, alertedFor: settings.callbackSilentFor, checkedAt: settings.callbackCheckedAt, gatewayDoors: gateway.length, timeZone }, now)) return null;
+    await setMarker(tenantId, 'callbackCheckedAt', new Date(now).toISOString());
+    const vendor = await resolveVendor(tenantId);
+    const missed = [];
+    const doors = [];
+    for (const l of gateway.slice(0, 5)) {
+      const recs = health.missedRecords((await vendor.records(l.lockId)).map(r => ({ ...r, lockId: Number(l.lockId) })), lastAt);
+      if (recs.length) { missed.push(...recs); doors.push(l.lockAlias || String(l.lockId)); }
+    }
+    if (!missed.length) return { callbackQuiet: true }; // the doors were simply idle (a holiday)
+    await setMarker(tenantId, 'callbackSilentFor', lastAt);
+    // Catch up on what the callback would have told us (alarms are flagged as late).
+    for (const m of await matchArrivals(missed, { tenantId })) await recordArrival(tenantId, { ...m, source: 'records' }).catch(error => log('arrival backfill failed', tenantId, error));
+    for (const a of lockEvents.alarmCandidates(missed)) await recordAlarm(tenantId, { ...a, source: 'records' }).catch(error => log('alarm backfill failed', tenantId, error));
+    await store.tenant(tenantId).unit().audit('ttlock.callback_silent', `no TTLock callback since ${lastAt}; ${missed.length} record(s) on ${doors.length} door(s) were not delivered`, 'system').commit();
+    if (alerts) {
+      await alerts.send(tenantId, 'callback_silent', {
+        title: 'TTLock stopped calling back',
+        text: `TTLock has not called AccessX since ${lastAt}, but it holds ${missed.length} newer record(s) from ${doors.join(', ')}. Until this is fixed, lock alarms and visitor arrivals arrive only through the ~15-minute polling (visitors on site) or not at all. Check the callback URL in the TTLock developer console (one URL per app: another integration may have replaced it).`,
+        facts: [['Last callback', lastAt], ['Records not delivered', String(missed.length)], ['Doors', doors.join(', ')]],
+        path: '/#visitors',
+      });
+    }
+    return { callbackSilent: missed.length };
+  }
+
+  async function checkLockHealth(tenantId, now = Date.now()) {
+    const settings = (await store.tenantSettings(tenantId)) || {};
+    const recent = (key, ms) => settings[key] && now - Date.parse(settings[key]) < ms;
+    const batteryDue = !recent('batteryCheckedAt', BATTERY_EVERY_MS);
+    const callbackMaybe = Boolean(ttlockNotifySecret && settings.ttlockCallbackAt && settings.callbackSilentFor !== settings.ttlockCallbackAt && !recent('callbackCheckedAt', 36e5));
+    if (!batteryDue && !callbackMaybe) return null;
+    const locks = await (await resolveVendor(tenantId)).listLocks();
+    const out = {};
+    if (batteryDue) {
+      await setMarker(tenantId, 'batteryCheckedAt', new Date(now).toISOString());
+      const n = await checkBatteries(tenantId, locks, now);
+      if (n) out.batteryAlerts = n;
+    }
+    if (callbackMaybe) Object.assign(out, (await checkCallback(tenantId, locks, settings, now)) || {});
+    return out;
+  }
+
+  route('GET', /^\/api\/doors\/health$/, async ctx => {
+    const locks = (await ctx.vendor.listLocks()).filter(l => ctx.scope.lock(l.lockId));
+    const forecasts = await batteryForecasts(ctx.tenantId, locks);
+    const s = (await store.tenantSettings(ctx.tenantId)) || {};
+    return {
+      locks: locks.map(l => ({ lockId: l.lockId, lockAlias: l.lockAlias, hasGateway: Boolean(l.hasGateway), ...forecasts.get(Number(l.lockId)) })),
+      callback: { configured: Boolean(ttlockNotifySecret), lastAt: s.ttlockCallbackAt || null, silent: Boolean(s.ttlockCallbackAt && s.callbackSilentFor === s.ttlockCallbackAt) },
+    };
+  });
 
   /** Fallback without the callback: read recent records of doors with a visitor on site now. */
   async function pollArrivals(tenantId) {
@@ -2279,6 +2403,12 @@ function createApi({
       ]);
     } catch (error) {
       log(`maintenance ${tenantId} visitor retention failed`, error);
+    }
+    try {
+      const h = await checkLockHealth(tenantId);
+      if (h && Object.keys(h).length) Object.assign(out, h);
+    } catch (error) {
+      log(`maintenance ${tenantId} lock health failed`, error);
     }
     try {
       // Snapshot-cache change log: keep the newest rows; caches further behind reload in full.

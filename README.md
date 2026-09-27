@@ -199,6 +199,16 @@ Operators (people who administer the system) are separate from door users.
   requests, overdue removals and arrivals can wait for one message a day at
   a local hour; break-glass, failed revocations and TTLock disconnections are
   always sent at once. Erasing a visitor also deletes their waiting alerts.
+- **Lock health** — one battery reading per lock per day (lock list and
+  callback records); a trend line since the last battery change warns about
+  three weeks before a lock reaches 10%, and at 20% / 10%. Alerts only
+  escalate (at most three per battery, weekly while critical), grouped into
+  one message, and may go in the daily summary. **Silent callback**: TTLock
+  takes one callback URL per app, and when it stops calling, alarms and
+  arrivals go quiet with no error. After 8 business hours (Mon–Fri 08–18 at
+  the site) without a callback, AccessX reads the gateway doors' records;
+  records TTLock never sent raise one `callback_silent` alert (and are
+  back-filled), no records (a holiday) raise nothing.
 - **Lock alarms** — with the TTLock callback, a tamper alarm, a forced
   opening or a keypad locked after repeated wrong codes alerts at once
   (`lock_alarm`, on by default, never batched; at most once per door and kind

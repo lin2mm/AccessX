@@ -95,7 +95,8 @@ test('owners who saved their event list before lock_alarm existed still get it; 
   await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'json' } });
   // Simulate a list saved by the previous version (no eventsSeen).
   await api.server.store.sql.batch([{ sql: "UPDATE tenants SET settings = json_set(settings, '$.alerts.events', json(?)) WHERE id = 't_default'", params: [JSON.stringify(['break_glass'])] }]);
-  assert.deepEqual((await api.call('GET', '/api/alerts', OWNER)).body.alerts.events, ['break_glass', 'lock_alarm']);
+  // ...and every default-on event added since (battery, silent callback).
+  assert.deepEqual((await api.call('GET', '/api/alerts', OWNER)).body.alerts.events, ['break_glass', 'lock_alarm', 'battery_low', 'callback_silent']);
   await notify(api, [alarm(9001, 29, Date.now() - 60e3)]);
   assert.equal(hook.got.length, 1);
   assert.match(hook.got[0].title, /opened without a credential/);

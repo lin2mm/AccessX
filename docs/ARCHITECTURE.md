@@ -480,6 +480,28 @@ and a fake TTLock that rotates refresh tokens.
 - Recorded once (CAS on `arrived_at IS NULL`); cancelled/checked-out visits
   and unlocks outside the window are ignored.
 
+### Lock health (battery trend, silent callback)
+
+- `lock-health-core.js` is pure; `checkLockHealth` runs in the tenant's
+  maintenance (inside its write queue). Battery: at most every 6 h the lock
+  list levels are upserted into `lock_battery` (tenant, lock, day), plus any
+  `electricQuantity` on callback records; 120 days kept. A least-squares
+  slope over the samples since the last jump of ≥ 15 points (a new battery)
+  gives days to 10%. Bands ok → forecast (≤ 21 days) → low (≤ 20%) →
+  critical (≤ 10%); `lock_health` stores the band last announced, so alerts
+  only escalate, reset on a new battery, and repeat weekly while critical.
+  Doors without a gateway report the level of their last app sync (flagged).
+- Silent callback: `ttlockCallbackAt` (set by the callback) is compared with
+  business hours at the tenant's first site. Past 8 business hours, at most
+  hourly, up to 5 gateway doors' records are read; records newer than the
+  last callback prove TTLock is not calling. One alert per silence
+  (`callbackSilentFor` = the `ttlockCallbackAt` it was raised for, so the
+  next callback starts a new episode), audited `ttlock.callback_silent`, and
+  the missed records are run through arrival matching and alarm detection
+  (flagged late). No records → the doors were idle → nothing.
+- `GET /api/doors/health` (door.read, site-scoped): forecasts per door and
+  the callback state for the dashboard.
+
 ### Lock alarms
 
 - Same TTLock records, other record types: 29 forced opening, 44 tamper,
