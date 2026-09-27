@@ -12,7 +12,9 @@
     {
       "binding": "DB",
       "database_name": "accessx-demo",
-      "database_id": "local-accessx-demo",
+      // No database_id on purpose (R23): `npm run deploy` (scripts/cf-deploy.js) finds this
+      // database by name in the Cloudflare account, creates it if missing, applies the
+      // migrations, then deploys. Local dev (`wrangler dev --local`) needs no id.
       "migrations_dir": "migrations"
     }
   ],
@@ -30,9 +32,10 @@
   ],
   // Reconcile credentials against policy every 15 minutes (worker.js scheduled()).
   "triggers": { "crons": ["*/15 * * * *"] },
-  "vars": {
-    "AUTH_OPEN_READS": "1"
-  },
+  // Variables and secrets are set in the Cloudflare dashboard (Settings > Variables & Secrets)
+  // and survive Git deploys. Nothing here turns anonymous reads on: a public demo sets
+  // AUTH_OPEN_READS=1 in the dashboard; local tests get it from .dev.vars (support/dev-vars.js).
+  "keep_vars": true,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

@@ -178,6 +178,13 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
   return out;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** JSON with line and block comments and trailing commas (wrangler.jsonc). Throws on bad JSON. */
+function parseJsonc(text) {
+  const clean = String(text).replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, s) => s || '');
+  return JSON.parse(clean.replace(/,(\s*[}\]])/g, '$1'));
+}
+
 /**
  * Cloudflare deployment file (wrangler.jsonc, comments allowed). CLI only.
  */
@@ -187,13 +194,17 @@ function checkWrangler(text, { production = true } = {}) {
   const bad = production ? 'error' : 'warn';
   let w;
   try {
-    // strip // and /* */ comments outside strings
-    const clean = String(text).replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, s) => s || '');
-    w = JSON.parse(clean.replace(/,(\s*[}\]])/g, '$1'));
+    w = parseJsonc(text);
   } catch (error) { add('error', 'wrangler', `wrangler.jsonc does not parse: ${error.message}`); return { findings: out, vars: {} }; }
   const db = ((w.d1_databases || [])[0]) || {};
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(db.database_id || ''))) add(bad, 'wrangler.d1', `D1 database_id is "${db.database_id || ''}", not a real database`, 'npx wrangler d1 create <name>, copy the id');
+  // R23: no id = `npm run deploy` (scripts/cf-deploy.js) finds or creates the database by name
+  // and migrates it before deploying. A non-UUID id is a placeholder that can never deploy.
+  if (!db.database_name) add(bad, 'wrangler.d1', 'no D1 database configured');
+  else if (db.database_id === undefined || db.database_id === '') add('ok', 'wrangler.d1', `D1 ${db.database_name}: found or created by name at deploy (npm run deploy)`);
+  else if (!UUID.test(String(db.database_id))) add(bad, 'wrangler.d1', `D1 database_id is "${db.database_id}", not a real database`, 'remove database_id (npm run deploy finds the database by name) or paste the real id');
   else add('ok', 'wrangler.d1', `D1 ${db.database_name} (${db.database_id.slice(0, 8)}…)`);
+  if ((w.vars || {}).AUTH_OPEN_READS === '1') add(bad, 'wrangler.vars', 'wrangler.jsonc deploys AUTH_OPEN_READS=1: every Git deploy turns anonymous reads on', 'remove it from "vars"; set it in the dashboard only for a public demo');
+  if (!w.keep_vars) add('warn', 'wrangler.keep_vars', 'without "keep_vars": true each deploy removes variables set in the dashboard', '"keep_vars": true');
   const rl = new Set((w.ratelimits || []).map(r => r.name));
   const missRl = ['RL_NOTIFY', 'RL_PUBLIC'].filter(n => !rl.has(n));
   if (missRl.length) add(bad, 'wrangler.ratelimits', `rate-limit bindings missing: ${missRl.join(', ')}`);
@@ -216,4 +227,4 @@ const summary = findings => ({
   ready: !findings.some(f => f.level === 'error'),
 });
 
-module.exports = { checkConfig, checkWrangler, resolveOpenReads, summary };
+module.exports = { checkConfig, checkWrangler, resolveOpenReads, summary, parseJsonc, UUID };

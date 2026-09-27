@@ -7,3 +7,5 @@ node_modules/
 !.env.example
 data/runtime/
 backups/
+# written by npm run deploy (scripts/cf-deploy.js): wrangler.jsonc plus the resolved D1 id
+wrangler.deploy.jsonc

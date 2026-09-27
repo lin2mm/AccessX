@@ -21,6 +21,7 @@ const operators = [
 ];
 const vars = {
   ADMIN_TOKEN: 'owner-token',
+  AUTH_OPEN_READS: '1', // the smoke test checks the public demo mode; wrangler.jsonc keeps it off (R23)
   PLATFORM_TOKEN: 'platform-token',
   OPERATORS: JSON.stringify(operators),
   SECRETS_KEY: crypto.randomBytes(32).toString('base64'),

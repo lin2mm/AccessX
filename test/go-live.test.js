@@ -84,11 +84,16 @@ test('open reads: explicit opt-in only, and refused when real locks are configur
   assert.deepEqual(resolveOpenReads({ AUTH_OPEN_READS: '0' }, { demoDefault: true }), { open: false, refused: false });
 });
 
-test('doctor: wrangler.jsonc as shipped is a demo, and the checks see it', () => {
-  const shipped = checkWrangler(fs.readFileSync(path.join(__dirname, '..', 'wrangler.jsonc'), 'utf8'));
-  assert.equal(byId(shipped.findings, 'wrangler.d1')[0].level, 'error'); // placeholder database id
+test('doctor: wrangler.jsonc as shipped deploys from Git (R23), and the checks see the old demo traps', () => {
+  const text = fs.readFileSync(path.join(__dirname, '..', 'wrangler.jsonc'), 'utf8');
+  const shipped = checkWrangler(text);
+  assert.equal(byId(shipped.findings, 'wrangler.d1')[0].level, 'ok'); // no id: resolved by name at deploy
   assert.equal(byId(shipped.findings, 'wrangler.crons')[0].level, 'ok');
-  assert.equal(shipped.vars.AUTH_OPEN_READS, '1');
+  assert.equal(shipped.vars.AUTH_OPEN_READS, undefined);
+  // the pre-R23 file: placeholder id + anonymous reads + no keep_vars
+  const old = checkWrangler(text.replace('"database_name": "accessx-demo",', '"database_name": "accessx-demo", "database_id": "local-accessx-demo",')
+    .replace('"keep_vars": true,', '"vars": { "AUTH_OPEN_READS": "1" },'));
+  assert.deepEqual(old.findings.filter(x => x.level !== 'ok').map(x => `${x.level} ${x.id}`).sort(), ['error wrangler.d1', 'error wrangler.vars', 'warn wrangler.keep_vars']);
   const bare = checkWrangler('{ // comment\n "d1_databases": [{"database_name":"x","database_id":"0b7c1c7e-1111-4222-8333-944445555666"}], }');
   const ids = bare.findings.filter(x => x.level === 'error').map(x => x.id);
   assert.deepEqual(ids.sort(), ['wrangler.assets', 'wrangler.crons', 'wrangler.do', 'wrangler.ratelimits']);
