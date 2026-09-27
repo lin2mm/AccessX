@@ -112,6 +112,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `NUKI_API_BASE`, `NUKI_POLL_MS` | optional | Nuki tenants connect with their own Nuki Web API token (no platform app). `NUKI_API_BASE` overrides `https://api.nuki.io` (tests only); `NUKI_POLL_MS` is the interval for confirming a new code (default 1500) ([docs/25-NUKI.md](docs/25-NUKI.md)). |
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
+| `FRAME_ANCESTORS` | iframes only, Node | Pages may only be framed by their own origin (`frame-ancestors 'self'`, `X-Frame-Options`; R22, against clickjacking of Approve / Open door). For an intended embedding: space-separated origins, e.g. `https://intranet.example.com`; `npm run doctor` fails on `*`. On Cloudflare edit `public/_headers` instead. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (public demo). Explicit opt-in on the Worker; on Node the default only in demo mode. **Ignored whenever `TTLOCK_CLIENT_ID` is set** (R14). Production: `0`. |
 | `SIGNUP_ENABLED` | SaaS, optional | `1` opens `/signup`: company + email → emailed link (24 h, once) → new empty tenant and its owner key ([docs/21-SIGNUP.md](docs/21-SIGNUP.md)). Needs email and `PUBLIC_URL`. `SIGNUP_DAILY_LIMIT` (default 50 per 24 h), `SIGNUP_TERMS_URL` (https). |
 | `CALENDAR_INBOUND_DOMAIN` | calendar, optional | Mail domain routed to the Worker's `email()` handler (Cloudflare Email Routing catch-all), e.g. `in.doors.example.com`. Also needs `PUBLIC_URL` and `EMAIL_PROVIDER` ([docs/23-CALENDAR.md](docs/23-CALENDAR.md)). |
@@ -160,7 +161,7 @@ Operators (people who administer the system) are separate from door users.
 - **Browser sign-in:** the UI exchanges a token for an **HttpOnly session
   cookie** (`POST /api/auth/login`; 12 h absolute, 60 min idle). No token is
   kept in the page; writes need the `X-CSRF-Token` returned at login.
-  `COOKIE_SAMESITE=None` only if the app must run inside another site's iframe.
+  `COOKIE_SAMESITE=None` (and `FRAME_ANCESTORS`) only if the app must run inside another site's iframe.
 - **Single sign-on (OIDC):** owners configure `PUT /api/sso {issuer,
   clientId, clientSecret?, domains}` (Entra ID, Okta, Google…; redirect URI
   `https://<host>/api/auth/sso/callback`) and invite operators by email
@@ -371,6 +372,10 @@ Operators (people who administer the system) are separate from door users.
   (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM`, optional `IDP` env vars; see `support/worker-smoke.js`).
   With `MAIL_PORT=8799` (and `EMAIL_API_BASE=http://127.0.0.1:8799`, `SIGNUP_ENABLED=1` in `.dev.vars`)
   it also runs a signup on D1. Fails on any new `[ERROR]` line in the wrangler log (`WRANGLER_LOG` to point at it).
+  **`bash support/smoke-fresh.sh`** does all of it on a brand-new local D1 and a fresh `wrangler dev`, then stops it
+  (`node support/dev-vars.js` writes the matching `.dev.vars` with test tokens). After a sandbox or machine reset,
+  `bash support/agent-recover.sh` realigns the checkout with the pushed branch without touching the work tree
+  ([docs/92-AUTONOMY.md](docs/92-AUTONOMY.md)).
 - `POST /api/platform/tenants/:id/demo-reset` `{"confirm":":id"}` — put a demo tenant back to the sample data
   (refused for tenants with TTLock or billing; audit chain kept).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after

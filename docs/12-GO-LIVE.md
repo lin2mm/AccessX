@@ -187,6 +187,21 @@ Write the date and result in section 6.
 - The R2 export is not encrypted by AccessX (only by R2 at rest), and it is
   not a consistent snapshot (see section 4). A copy outside Cloudflare is still
   a monthly manual step.
+  **What a leaked copy exposes (R22 review):** personal data in plain text (names,
+  emails and phone numbers of people and visitors), the audit trail, door and
+  schedule layout. **Not** usable door codes (only hints and keyed fingerprints),
+  not operator or link tokens (SHA-256 only), not TTLock/Nuki tokens or approval
+  codes (sealed with `SECRETS_KEY`, which is not in the dump). So a leak is a privacy
+  incident (in Australia: assess under the Notifiable Data Breaches scheme), not a
+  way to open doors.
+  **Until then:** keep the bucket private (no `r2.dev` URL, no public custom
+  domain), give R2 API tokens to people only when needed and scoped to this bucket.
+  **Next step, in the deployment week:** R2 server-side encryption with a customer key
+  (SSE-C: the Workers binding takes `ssecKey` on `put`/`get`), key as a Worker
+  secret with an offline copy. It was not built in R22 because the local emulator
+  does not support SSE-C, so it could not be tested, and a mistake there means
+  unreadable backups at the worst moment. Build it against the real bucket and
+  repeat the restore drill (section 4) with the key.
 - Codes set at the keypad in admin mode, or deleted over Bluetooth without a
   sync, are invisible to the passcode sweep (R18): it reads the vendor cloud.
 - A status page for tenants.

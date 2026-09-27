@@ -45,7 +45,9 @@
 | [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) | 自动化安全门、外部渗透测试范围、限流 | 安全、测试方 |
 | [40-BILLING.md](40-BILLING.md) | Stripe 计费：计划、实现、运维 | 商业、开发 |
 | [90-ROUNDS.md](90-ROUNDS.md) | 每轮做了什么（总表） | 所有人 |
-| [91-ROADMAP.md](91-ROADMAP.md) | 后续路线图：轮次、用时、结束时间、结论 | 所有人 |
+| [91-ROADMAP.md](91-ROADMAP.md) | 后续路线图：轮次、用时、结束时间、结论；试点支持模式 | 所有人 |
+| [92-AUTONOMY.md](92-AUTONOMY.md) | 自主运行记录：遇到的环境 / GitHub / 部署报错、自建规范（哪些已写成脚本或测试）、自评、必须有人的节点 | 所有人 |
+| [../CHANGELOG.md](../CHANGELOG.md) | 变更日志：R1–R22，`v1.0-pilot` | 所有人 |
 | [rounds/](rounds/) | 每轮报告（从 R13 起） | 所有人 |
 
 ## 3. 旧文件名对照（R13 改名）
