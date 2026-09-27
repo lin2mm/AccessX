@@ -103,7 +103,7 @@ function atDoor(iso,lockId,{dateOnly=false}={}){
   const d=new Date(iso);if(Number.isNaN(d.getTime()))return String(iso||'');
   const tz=doorTz(lockId);
   const opts=dateOnly?{timeZone:tz,dateStyle:'medium'}:{timeZone:tz,dateStyle:'medium',timeStyle:'short',hourCycle:'h23'};
-  return new Intl.DateTimeFormat('en-GB',opts).format(d)+(dateOnly?'':' '+tzAbbr(d,tz));
+  return new Intl.DateTimeFormat(window.axLocale||'en-GB',opts).format(d)+(dateOnly?'':' '+tzAbbr(d,tz));
 }
 function tzNote(lockId){
   const tz=doorTz(lockId),now=new Date();
@@ -186,7 +186,7 @@ async function loadHealth(){
     <div class="kpi"><div class="n ${low?'warn':'ok'}">${low}</div><div class="l">Low battery</div></div>
     <div class="kpi"><div class="n ${off?'bad':'ok'}">${off}</div><div class="l">No gateway</div></div>${soon?`
     <div class="kpi"><div class="n warn">${soon}</div><div class="l">Battery due in 3 weeks</div></div>`:''}${silent?`
-    <div class="kpi" title="TTLock has records it never sent: check the callback URL in the TTLock developer console"><div class="n bad">!</div><div class="l">TTLock callback silent since ${esc(new Date(f.callback.lastAt).toLocaleString())}</div></div>`:''}`;
+    <div class="kpi" title="TTLock has records it never sent: check the callback URL in the TTLock developer console"><div class="n bad">!</div><div class="l">TTLock callback silent since ${esc(new Date(f.callback.lastAt).toLocaleString(window.axLocale))}</div></div>`:''}`;
 }
 async function unlock(id,btn){
   btn.textContent='…';
@@ -220,7 +220,7 @@ $('#people').addEventListener('click',async e=>{
   if(!r.ok){b.textContent=r._status===401?'Sign in':r._status===403?'Outside your sites':'Failed';return;}
   await loadPeople();
   if(r._status===202){
-    $('#people-msg').textContent=`Sent for approval: reinstating reaches a sensitive door, so a second operator must approve (request ${r.approval.id}, expires ${new Date(r.approval.expiresAt).toLocaleString()}).`;
+    $('#people-msg').textContent=`Sent for approval: reinstating reaches a sensitive door, so a second operator must approve (request ${r.approval.id}, expires ${new Date(r.approval.expiresAt).toLocaleString(window.axLocale)}).`;
     loadApprovals();loadAudit();return;
   }
   const rc=r.reconcile;
@@ -474,8 +474,8 @@ async function loadRules(){
   const ungrouped=DOORS.map(d=>Number(d.lockId)).filter(id=>!grouped.has(id));
   const moveSel=(lock,from,siteId)=>{
     const targets=R.dg.filter(g=>g.id!==from&&(!from||g.siteId===siteId||all)&&!(g.lockIds||[]).map(Number).includes(lock));
-    return `<select class="sm" data-move="${lock}" data-from="${esc(from||'')}" aria-label="Move ${esc(doorName(lock))}"><option value="">${from?'Move…':'Add to…'}</option>${
-      targets.map(g=>`<option value="${esc(g.id)}">${from?'to ':''}${esc(g.name)}${g.siteId!==siteId?` (${esc(siteName(g.siteId))})`:''}</option>`).join('')}${from?'<option value="-">Take out of this group</option>':''}</select>`;
+    return `<select class="sm" data-move="${lock}" data-from="${esc(from||'')}" aria-label="${window.axLang==='zh'?'移动 ':'Move '}${esc(doorName(lock))}"><option value="">${from?'Move…':'Add to…'}</option>${
+      targets.map(g=>`<option value="${esc(g.id)}">${from?(window.axLang==='zh'?'移到 ':'to '):''}${esc(g.name)}${g.siteId!==siteId?` (${esc(siteName(g.siteId))})`:''}</option>`).join('')}${from?'<option value="-">Take out of this group</option>':''}</select>`;
   };
   const chip=(lock,from,siteId)=>`<span class="chip" style="display:inline-flex;gap:6px;align-items:center;margin:2px">${esc(doorName(lock))}${m?moveSel(lock,from,siteId):''}</span>`;
   const rows=[...R.dg].sort((x,y)=>siteName(x.siteId).localeCompare(siteName(y.siteId))||x.name.localeCompare(y.name));
@@ -634,14 +634,14 @@ async function loadApprovals(){
   const pretty=t=>esc(t).replace(/\buser (\w+)/g,(m,id)=>who(id)?`user ${esc(who(id))}`:m);
   $('#appr-list').innerHTML=list.length?`<table><tr><th>Request</th><th>Requested by</th><th>Expires</th><th></th></tr>`+
     list.map(a=>`<tr><td>${pretty(a.summary)}<div class="meta">doors ${a.locks.map(Number).join(', ')}</div></td>
-    <td>${esc(a.requestedBy)}<div class="meta">${esc(new Date(a.requestedAt).toLocaleString())}</div></td>
-    <td class="meta">${esc(new Date(a.expiresAt).toLocaleString())}</td>
+    <td>${esc(a.requestedBy)}<div class="meta">${esc(new Date(a.requestedAt).toLocaleString(window.axLocale))}</div></td>
+    <td class="meta">${esc(new Date(a.expiresAt).toLocaleString(window.axLocale))}</td>
     <td>${a.canDecide?`<button class="btn sm" type="button" data-appr="approve" data-id="${esc(a.id)}">Approve</button> <button class="btn2 sm" type="button" data-appr="reject" data-id="${esc(a.id)}">Reject</button>`:''}
     ${a.canCancel?`<button class="btn2 sm" type="button" data-appr="cancel" data-id="${esc(a.id)}">Cancel</button>`:''}
     ${!a.canDecide&&!a.canCancel?'<span class="meta">needs someone else</span>':''}</td></tr>`).join('')+'</table>'
     :'<div class="meta">Nothing waiting.</div>';
   $('#appr-ready').innerHTML=ready.length?`<div class="meta" style="margin:12px 0 6px"><b>Codes approved for you</b> — only you can see them, once. Uncollected codes are discarded 72 h after approval.</div><table>`+
-    ready.map(a=>`<tr><td>${pretty(a.summary)}<div class="meta">approved by ${esc(a.decidedBy)} · ${esc(new Date(a.decidedAt).toLocaleString())}</div></td>
+    ready.map(a=>`<tr><td>${pretty(a.summary)}<div class="meta">approved by ${esc(a.decidedBy)} · ${esc(new Date(a.decidedAt).toLocaleString(window.axLocale))}</div></td>
     <td><button class="btn sm" type="button" data-collect="${esc(a.id)}">Show code (once)</button></td></tr>`).join('')+'</table>':'';
 }
 $('#appr-ready').addEventListener('click',async e=>{
@@ -684,7 +684,7 @@ async function issuePasscode(acknowledge=false){
   }
   if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
   if(r._status===202){
-    out.innerHTML=`<div class="res n"><b>Sent for approval</b><div style="margin-top:5px">${esc(r.message)}</div><div class="meta" style="margin-top:4px">Request ${esc(r.approval.id)} · expires ${esc(new Date(r.approval.expiresAt).toLocaleString())}</div></div>`;
+    out.innerHTML=`<div class="res n"><b>Sent for approval</b><div style="margin-top:5px">${esc(r.message)}</div><div class="meta" style="margin-top:4px">Request ${esc(r.approval.id)} · expires ${esc(new Date(r.approval.expiresAt).toLocaleString(window.axLocale))}</div></div>`;
     loadApprovals();loadAudit();return;
   }
   const c=r.credential;
@@ -723,7 +723,7 @@ async function loadRecords(){
   const id=$('#r-door').value;if(!id)return;
   const r=await api('/api/records/'+encodeURIComponent(id));
   $('#recs').innerHTML=`<tr><th>When</th><th>Who</th><th>Method</th><th></th></tr>`+
-    (r.records||[]).map(x=>`<tr><td>${esc(new Date(x.lockDate).toLocaleString())}</td>
+    (r.records||[]).map(x=>`<tr><td>${esc(new Date(x.lockDate).toLocaleString(window.axLocale))}</td>
     <td>${esc(x.username||'—')}</td><td>${esc(x.typeLabel)}</td>
     <td>${x.success?'<span class="tag g">ok</span>':'<span class="tag r">failed</span>'}</td></tr>`).join('');
 }
@@ -732,9 +732,9 @@ async function loadAudit(){
   const r=await api('/api/audit?limit=25');
   if(!r.ok){$('#alog').innerHTML=`<tr><td class="empty">${esc(errText(r))}</td></tr>`;return;}
   $('#alog').innerHTML=`<tr><th>#</th><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr>`+
-    (r.log||[]).map(x=>`<tr><td class="meta">${Number(x.seq)||''}</td><td>${esc(new Date(x.ts).toLocaleString())}</td>
+    (r.log||[]).map(x=>`<tr><td class="meta">${Number(x.seq)||''}</td><td>${esc(new Date(x.ts).toLocaleString(window.axLocale))}</td>
     <td>${esc(x.actor)}</td><td><span class="chip">${esc(x.action)}</span></td>
-    <td style="color:var(--txt3)">${esc((x.detail||'').slice(0,90))}</td></tr>`).join('');
+    <td translate="no" style="color:var(--txt3)">${esc((x.detail||'').slice(0,90))}</td></tr>`).join('');
 }
 $('#a-verify').addEventListener('click',async()=>{
   const r=await api('/api/audit/verify');
@@ -749,12 +749,12 @@ async function loadAlerts(){
   $('#alerts-box').hidden=!r.ok;
   if(!r.ok)return;
   const a=r.alerts;
-  const when=d=>`${new Date(d.at).toLocaleString()}: ${d.status}`;
+  const when=d=>`${new Date(d.at).toLocaleString(window.axLocale)}: ${d.status}`;
   $('#alerts-state').textContent=(a.host?`Webhook: ${a.host} as ${a.format}`:'No webhook.')+
     (a.emails.length?` · email to ${a.emails.length} recipient${a.emails.length>1?'s':''} (${a.emailProvider})`:'')+
     ` · removal target ${a.slaHours} h`+(a.lastDelivery?` · last webhook delivery ${when(a.lastDelivery)}`:'')+
     (a.lastEmailDelivery?` · last email ${when(a.lastEmailDelivery)}`:'')+
-    (a.retrying&&a.retrying.count?` · ${a.retrying.count} waiting for retry (next ${new Date(a.retrying.nextAt).toLocaleTimeString()})`:'')+
+    (a.retrying&&a.retrying.count?` · ${a.retrying.count} waiting for retry (next ${new Date(a.retrying.nextAt).toLocaleTimeString(window.axLocale)})`:'')+
     (a.secretsKeyConfigured?'':' · SECRETS_KEY is not set on the server, so a webhook cannot be stored');
   $('#al-sla').value=a.slaHours;
   $('#al-format').value=a.format||'';
@@ -766,7 +766,7 @@ async function loadAlerts(){
   $('#al-dg-hour').innerHTML=Array.from({length:24},(_,h)=>`<option value="${h}" ${h===dg.hour?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('');
   $('#al-dg-tz').value=dg.timeZone;
   const dp=a.digestPending||{};
-  $('#al-dg-state').textContent=a.digest?`${dp.count||0} waiting · next summary ${dp.nextAt?(()=>{try{return new Date(dp.nextAt).toLocaleString('en-GB',{timeZone:a.digest.timeZone,dateStyle:'medium',timeStyle:'short'})+' '+tzAbbr(new Date(dp.nextAt),a.digest.timeZone);}catch{return dp.nextAt;}})():'—'}. Break-glass, failed revocations and TTLock disconnections are always sent at once.`
+  $('#al-dg-state').textContent=a.digest?`${dp.count||0} waiting · next summary ${dp.nextAt?(()=>{try{return new Date(dp.nextAt).toLocaleString(window.axLocale||'en-GB',{timeZone:a.digest.timeZone,dateStyle:'medium',timeStyle:'short'})+' '+tzAbbr(new Date(dp.nextAt),a.digest.timeZone);}catch{return dp.nextAt;}})():'—'}. Break-glass, failed revocations and TTLock disconnections are always sent at once.`
     :'Off: every alert is sent as it happens. Break-glass, failed revocations and TTLock disconnections are always sent at once.';
   $('#al-events').innerHTML=a.availableEvents.map(e=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;font-weight:normal"><input type="checkbox" data-alev="${esc(e)}" ${a.events.includes(e)?'checked':''}>${esc(ALERT_LABELS[e]||e)}</label>`).join('');
 }
@@ -799,7 +799,7 @@ async function loadAnchors(){
   const el=$('#a-anchor-state');
   if(!r.ok){el.textContent=r._status===403?'Anchors need all-site audit access.':errText(r);return;}
   const a=(r.anchors||[])[0], st=r.settings||{};
-  const parts=[a?`Last anchor #${a.seq} · ${new Date(a.createdAt).toLocaleString()} · ${a.signature?'signed':'unsigned'} · ${a.deliveredTo?`${a.deliveredTo}: ${a.deliveryStatus}`:'kept in AccessX only'}`:'No anchor yet.'];
+  const parts=[a?`Last anchor #${a.seq} · ${new Date(a.createdAt).toLocaleString(window.axLocale)} · ${a.signature?'signed':'unsigned'} · ${a.deliveredTo?`${a.deliveredTo}: ${a.deliveryStatus}`:'kept in AccessX only'}`:'No anchor yet.'];
   parts.push(st.retentionDays?`Retention ${st.retentionDays} days (purged only below an anchor delivered outside AccessX).`:'Retention: keep everything.');
   if(r.checkpoint)parts.push(`Entries up to #${r.checkpoint.seq} purged by policy.`);
   if(!st.anchorWebhookHost)parts.push('Tip: send anchors to a webhook you control, so a rewrite of history can be proven.');
@@ -894,7 +894,7 @@ async function loadVisitors(){
     $('#vs-arrivals').textContent=!a.enabled?'Arrival detection is off: SECRETS_KEY is not set on the server.'
       :a.callback?'Arrivals: reported by TTLock within seconds (record callback), doors with a gateway.'
       :'Arrivals: checked every scheduled run (about 15 min) on doors with a gateway. Set TTLOCK_NOTIFY_SECRET and the TTLock callback URL for instant notice.';
-    if(a.callback)$('#vs-arrivals').textContent+=a.lastCallbackAt?` Last message from TTLock: ${new Date(a.lastCallbackAt).toLocaleString()}.`:' No message from TTLock yet: check the callback URL in the TTLock developer console.';
+    if(a.callback)$('#vs-arrivals').textContent+=a.lastCallbackAt?` Last message from TTLock: ${new Date(a.lastCallbackAt).toLocaleString(window.axLocale)}.`:' No message from TTLock yet: check the callback URL in the TTLock developer console.';
     $('#vs-arrivals').textContent+=s.checkoutLinks?' Visitors get a self check-out link with their code.':' Set PUBLIC_URL to send visitors a self check-out link.';
     $('#vs-sms').hidden=!s.smsAvailable;
     if(s.smsUsage)$('#vs-sms-usage').textContent=`Text messages this month (${s.smsUsage.period}): ${s.smsUsage.sent}${s.smsUsage.cap?` of ${s.smsUsage.cap}`:''} · ${s.smsUsage.segments} billed segment${s.smsUsage.segments===1?'':'s'}`;}
@@ -1040,7 +1040,7 @@ async function loadWalkins(){
   $('#walk-list').innerHTML=`<table><tr><th>Visitor</th><th>Asked for</th><th>Signed in</th><th></th></tr>${list.map(w=>`<tr>
     <td><b>${esc(w.name)}</b>${fresh.includes(w.id)?' <span class="tag o">new</span>':''}<div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
     <td>${w.hostName?esc(w.hostName)+(w.hostNotified==='delivered'?' <span class="tag g">told by email</span>':''):'<span class="meta">not matched: ask the visitor</span>'}</td>
-    <td>${esc(new Date(w.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))}<div class="meta">${esc(w.siteName||'')}${w.noticeAccepted?' · notice accepted':''}</div></td>
+    <td>${esc(new Date(w.createdAt).toLocaleTimeString(window.axLocale||[], {hour:'2-digit',minute:'2-digit'}))}<div class="meta">${esc(w.siteName||'')}${w.noticeAccepted?' · notice accepted':''}</div></td>
     <td style="white-space:nowrap"><button class="btn sm" data-wact="issue" data-wid="${esc(w.id)}">Issue code</button> <button class="btn2 sm" data-wact="dismiss" data-wid="${esc(w.id)}">Dismiss</button></td></tr>`).join('')}</table>`;
   VIS.walkins=list;
 }
@@ -1070,7 +1070,7 @@ async function loadKiosks(){
   if(!$('#kiosk-site').options.length)$('#kiosk-site').innerHTML=r.sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
   const act=r.kiosks.filter(k=>!k.revokedAt);
   $('#kiosk-list').innerHTML=act.length?`<table><tr><th>Kiosk</th><th>Site</th><th>Last seen</th><th></th></tr>${act.map(k=>`<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.siteName||k.siteId)}</td>
-    <td>${k.lastSeenAt?esc(new Date(k.lastSeenAt).toLocaleString()):'<span class="meta">not opened yet</span>'}</td>
+    <td>${k.lastSeenAt?esc(new Date(k.lastSeenAt).toLocaleString(window.axLocale)):'<span class="meta">not opened yet</span>'}</td>
     <td><button class="btn2 sm" data-kact="revoke" data-kid="${esc(k.id)}">Switch off</button></td></tr>`).join('')}</table>`:'<div class="meta">No kiosks yet.</div>';
 }
 $('#kiosk-list').addEventListener('click',async e=>{
@@ -1118,8 +1118,8 @@ async function loadCalendar(){
     }
   }
   $('#cal-drafts').innerHTML=r.drafts.length?`<table><tr><th>Received</th><th>Meeting</th><th>Host</th><th>Guests</th><th>State</th></tr>${r.drafts.map(d=>{const st=CAL_STATUS[d.status]||[d.status,''];return `<tr>
-    <td>${esc(new Date(d.createdAt).toLocaleString([], {dateStyle:'short',timeStyle:'short'}))}</td>
-    <td>${d.startAt?`<b>${esc(d.summary||'untitled')}</b><div class="meta">${esc(new Date(d.startAt).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}))}${d.recurring?' · recurring (first only)':''}${d.tzAssumed?' · time zone assumed':''}</div>`:'<span class="meta">—</span>'}</td>
+    <td>${esc(new Date(d.createdAt).toLocaleString(window.axLocale||[], {dateStyle:'short',timeStyle:'short'}))}</td>
+    <td>${d.startAt?`<b>${esc(d.summary||'untitled')}</b><div class="meta">${esc(new Date(d.startAt).toLocaleString(window.axLocale||[], {dateStyle:'medium',timeStyle:'short'}))}${d.recurring?' · recurring (first only)':''}${d.tzAssumed?' · time zone assumed':''}</div>`:'<span class="meta">—</span>'}</td>
     <td>${esc(d.hostName||'—')}</td>
     <td>${d.erased?'<span class="meta">erased</span>':esc(d.guests.map(g=>g.name||g.email).join(', ')||'—')}</td>
     <td><span class="tag ${st[1]}">${esc(st[0])}</span>${d.reason?`<div class="meta">${esc(d.reason)}</div>`:''}${d.status==='pending'&&d.hostNotified&&d.hostNotified!=='delivered'?'<div class="meta">host email not sent</div>':''}</td></tr>`;}).join('')}</table>`:'<div class="meta">No invitations received yet.</div>';

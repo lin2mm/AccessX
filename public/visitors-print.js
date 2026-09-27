@@ -2,7 +2,7 @@
  * Uses the operator's browser session; every value goes through esc(). */
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const time = t => (t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—');
+const time = t => (t ? new Date(t).toLocaleTimeString(window.axLocale||[], { hour: '2-digit', minute: '2-digit' }) : '—');
 const get = url => fetch(url, { credentials: 'same-origin', cache: 'no-store' }).then(r => r.json().then(b => ({ ok: r.ok, status: r.status, ...b }))).catch(() => ({ ok: false, error: 'No connection' }));
 let data = null;
 
@@ -29,7 +29,7 @@ function render() {
     ])}
     <h2>Expected today, not signed in (${expected.length})</h2>
     ${table(['Visitor', 'Host', 'From', 'Site'], expected.map(v => [who(v), esc(v.hostName || ''), esc(time(v.startAt)), esc(v.siteName || '')]))}`;
-  $('#sub').textContent = `${data.tenant || ''} · printed ${new Date().toLocaleString()} by ${data.me || ''}`;
+  $('#sub').textContent = `${data.tenant || ''} · printed ${new Date().toLocaleString(window.axLocale)} by ${data.me || ''}`;
 }
 
 async function load() {

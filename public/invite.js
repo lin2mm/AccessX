@@ -15,7 +15,7 @@
   // Local wall-clock strings ("2026-10-02T09:00"): step whole hours (TTLock codes run on hours).
   const toMs = s => Date.parse(`${s}:00Z`);
   const fromMs = ms => new Date(ms).toISOString().slice(0, 16);
-  const pretty = s => new Date(toMs(s)).toLocaleString(undefined, { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const pretty = s => new Date(toMs(s)).toLocaleString(window.axLocale, { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   call({ action: 'status' }).then(s => {
     if (!s.ok) return fail(s.error);
     const opts = [];
