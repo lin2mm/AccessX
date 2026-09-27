@@ -175,3 +175,33 @@ test('a tenant on Nuki: connect with an API token, issue and revoke codes, sweep
   assert.equal(back.body.account.switchedAccount, true);
   assert.equal(back.body.account.status, 'connected');
 });
+
+test('offline Nuki lock: a revoked code waits as pending removal, and the reconciler deletes it once the lock is back online', async () => {
+  const reconciler = require('../reconcile-core');
+  const cloud = nukiFixture();
+  const v = vendorOn(cloud);
+  const out = await v.createPasscode({ lockId: 9003, name: 'Tom', startAt: soon(1), endAt: soon(48) });
+  const snap = {
+    sites: [{ id: 's1', name: 'Riverside', timezone: 'Europe/London' }], doorGroups: [], userGroups: [], schedules: [], assignments: [], holidays: [],
+    users: [{ id: 'u4', name: 'Tom', groupIds: [], suspended: true }],
+    credentials: [{ id: 'c1', type: 'passcode', userId: 'u4', lockId: 9003, status: 'active', endAt: soon(48), vendorRef: out.keyboardPwdId }],
+  };
+  const uow = () => { const calls = []; return { calls, update(c, id, patch) { calls.push({ id, ...patch }); return this; }, audit() { return this; } }; };
+
+  cloud.state.locks[9003].serverState = 4; // the bridge lost Wi-Fi
+  v.invalidate();
+  let u = uow();
+  let res = await reconciler.execute(reconciler.plan(snap, await v.listLocks()), { vendor: v, uow: u, snapshot: snap });
+  assert.equal(res.summary.pendingRemoval, 1);
+  assert.equal(u.calls[0].status, 'pending_removal');
+  assert.equal(cloud.auths(9003).length, 1, 'still on the lock');
+
+  snap.credentials[0] = { ...snap.credentials[0], status: 'pending_removal', revokedAt: new Date().toISOString(), revokeReason: 'suspended' };
+  cloud.state.locks[9003].serverState = 0; // back online
+  v.invalidate();
+  u = uow();
+  res = await reconciler.execute(reconciler.plan(snap, await v.listLocks()), { vendor: v, uow: u, snapshot: snap });
+  assert.equal(res.summary.revoked, 1, JSON.stringify(res));
+  assert.equal(u.calls[0].status, 'revoked');
+  assert.equal(cloud.auths(9003).length, 0, 'deleted on Nuki without anyone visiting');
+});

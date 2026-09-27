@@ -40,6 +40,7 @@
 | [22-KIOSK.md](22-KIOSK.md) | 前台平板：访客自助签到 / 临时访客 / 签退、手机二维码、到访须知、打印名单；注册页 Turnstile 人机验证 | 前台、产品、开发 |
 | [23-CALENDAR.md](23-CALENDAR.md) | 日历邀请 → 访客预登记：Cloudflare Email Routing 设置、组织者确认、改期/取消、安全模型 | 管理员、前台、开发 |
 | [24-ACCESS-REVIEW.md](24-ACCESS-REVIEW.md) | 访问复核（经理季度确认、一键移除、到期处理）、锁上密码对账、数据保留一览、批量访客邀请 | 管理员、审计、开发 |
+| [25-NUKI.md](25-NUKI.md) | 第二家锁厂 Nuki：用 API 令牌连接、与 TTLock 的对应关系、Nuki 做不到的事（界面上也会显示）、第一家真实 Nuki 站点前的检查 | 管理员、实施、开发 |
 | [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) | 自动化安全门、外部渗透测试范围、限流 | 安全、测试方 |
 | [40-BILLING.md](40-BILLING.md) | Stripe 计费：计划、实现、运维 | 商业、开发 |
 | [90-ROUNDS.md](90-ROUNDS.md) | 每轮做了什么（总表） | 所有人 |

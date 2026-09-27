@@ -5,8 +5,8 @@ server and Cloudflare Worker run the **same API core** (`api-core.js`) over the
 same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). The
 default tenant runs on demo locks; a tenant that connects its own TTLock
 account (owner: People → Operators & sign-in; needs `TTLOCK_CLIENT_ID` /
-`TTLOCK_CLIENT_SECRET`)
-controls its real locks on either runtime.
+`TTLOCK_CLIENT_SECRET`), or its own **Nuki** account with a Nuki Web API token
+(see [docs/25-NUKI.md](docs/25-NUKI.md)), controls its real locks on either runtime.
 
 **Docs:** [docs/00-INDEX.md](docs/00-INDEX.md) lists every document and the
 naming scheme; [docs/90-ROUNDS.md](docs/90-ROUNDS.md) is the change history by
@@ -18,6 +18,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/22-KIOSK.md](docs/22-KIOSK.md) for the front-desk tablet (visitor check-in, walk-ins, notice, printable list) and Turnstile,
 [docs/23-CALENDAR.md](docs/23-CALENDAR.md) for calendar invitations → visitor pre-registration (off unless `CALENDAR_INBOUND_DOMAIN` is set),
 [docs/24-ACCESS-REVIEW.md](docs/24-ACCESS-REVIEW.md) for access reviews, the passcode sweep, data retention and bulk invitations,
+[docs/25-NUKI.md](docs/25-NUKI.md) for Nuki as a second lock vendor (API token, limits, checks before the first real site),
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
@@ -43,7 +44,7 @@ in memory for the current page only. Do not put the token in source control.
 
 The hosted build serves the PWA as static assets, the API from a Worker, and
 state from D1 (one Durable Object per tenant serialises writes). The default
-tenant uses demo locks; tenants that connect a TTLock account use real ones.
+tenant uses demo locks; tenants that connect a TTLock or Nuki account use real ones.
 
 1. Install dependencies and log Wrangler in:
 
@@ -107,6 +108,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
 | `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts, visitors' self check-out links and visitor invitations; without it those links are left out and the redirect URI follows the request host. |
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
+| `NUKI_API_BASE`, `NUKI_POLL_MS` | optional | Nuki tenants connect with their own Nuki Web API token (no platform app). `NUKI_API_BASE` overrides `https://api.nuki.io` (tests only); `NUKI_POLL_MS` is the interval for confirming a new code (default 1500) ([docs/25-NUKI.md](docs/25-NUKI.md)). |
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (public demo). Explicit opt-in on the Worker; on Node the default only in demo mode. **Ignored whenever `TTLOCK_CLIENT_ID` is set** (R14). Production: `0`. |
