@@ -80,7 +80,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | Variable | Needed for | Notes |
 |---|---|---|
 | `ADMIN_TOKEN` | production | Owner token of the default tenant. Without it (and `OPERATORS`) the app runs as an open demo. |
-| `OPERATORS` | optional | JSON list of seeded operators (`id`, `role`, `sites`, `token`). |
+| `OPERATORS` | optional | JSON list of seeded operators: `id`, `name`, `role`, `siteIds` (omit or `["*"]` = all sites), `tokenSha256` (SHA-256 hex of the token; plaintext tokens are refused). |
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
@@ -206,6 +206,15 @@ Operators (people who administer the system) are separate from door users.
   requests, overdue removals and arrivals can wait for one message a day at
   a local hour; break-glass, failed revocations and TTLock disconnections are
   always sent at once. Erasing a visitor also deletes their waiting alerts.
+- **Rules editor** — Access → *Access rules* (add/remove who can open what,
+  when), *Door groups* (move doors between groups, rename, mark sensitive,
+  create/delete) and *Holidays*; People → new people groups and schedules.
+  Door groups change through `PATCH /api/doorGroups/:id` (`name`,
+  `lockIds`, `sensitive`; the site is fixed). Adding a sensitive door,
+  removing a door from a sensitive group or un-marking a group waits for a
+  second operator; narrowing an ordinary group is immediate and reconciles
+  codes. A site-scoped operator can only put doors of their own sites into a
+  group.
 - **Office setup pack** — the owner's *Get started* card lists what is left
   (TTLock, door groups, rules, sensitive doors, people, SCIM, SSO, alerts,
   callback, visitors) and builds an office from the connected fleet in one

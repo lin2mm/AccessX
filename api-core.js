@@ -544,6 +544,7 @@ function createApi({
       if (!ctx.scope.canWrite(coll, clean)) {
         throw outOfScope(coll === 'users' ? 'every groupId must belong to one of your sites' : `creating ${coll} here needs all-site scope`);
       }
+      if (coll === 'doorGroups') requireLocksInScope(ctx, clean.lockIds);
       let gate = null;
       if (coll === 'assignments') {
         gate = await fourEyes(ctx, (snap.doorGroups.find(g => g.id === clean.doorGroupId) || {}).lockIds, `assignment: user group ${clean.userGroupId} -> door group ${clean.doorGroupId}`);
@@ -591,6 +592,57 @@ function createApi({
       return { reconcile };
     });
   }
+
+  /**
+   * A site-scoped operator may only put doors into door groups that are
+   * already theirs. Door-group membership is what places a door in a site, so
+   * without this a gym admin could file the office front door under the gym
+   * and grant it to their own people.
+   */
+  function requireLocksInScope(ctx, lockIds) {
+    if (ctx.scope.all) return;
+    const foreign = (lockIds || []).filter(id => !ctx.scope.lock(id));
+    if (foreign.length) throw outOfScope(`door(s) ${foreign.join(', ')} are not in your sites; only an all-site operator can add them to a door group`);
+  }
+
+  // Edit a door group: rename, add/remove doors, mark (un)sensitive. The site
+  // cannot change (create a new group instead). Four-eyes applies to every
+  // change that widens access to a sensitive door or removes its protection;
+  // narrowing an ordinary group is immediate and triggers a reconcile.
+  route('PATCH', /^\/api\/doorGroups\/([^/]+)$/, async (ctx, [id]) => {
+    const snap = await ctx.snap();
+    const item = snap.doorGroups.find(x => x.id === id);
+    if (!item || !ctx.scope.filter('doorGroups', [item]).length) throw new HttpError(404, 'not found');
+    if (!ctx.scope.canWrite('doorGroups', item)) throw outOfScope(`${id} is outside your sites`);
+    const b = ctx.body || {};
+    const unknown = Object.keys(b).filter(k => !['name', 'lockIds', 'sensitive'].includes(k));
+    if (unknown.length) throw new HttpError(400, `only name, lockIds and sensitive can change (${unknown.join(', ')}); to move a group to another site, create a new one`);
+    const next = validate('doorGroups', {
+      name: 'name' in b ? b.name : item.name, siteId: item.siteId,
+      lockIds: 'lockIds' in b ? b.lockIds : item.lockIds, sensitive: 'sensitive' in b ? b.sensitive : Boolean(item.sensitive),
+    }, snap);
+    next.sensitive = Boolean(next.sensitive);
+    const before = new Set((item.lockIds || []).map(Number));
+    const after = new Set(next.lockIds);
+    const added = next.lockIds.filter(l => !before.has(l));
+    const removed = [...before].filter(l => !after.has(l));
+    requireLocksInScope(ctx, added);
+    const wasSensitive = Boolean(item.sensitive);
+    const changes = [];
+    if (next.name !== item.name) changes.push(`name "${item.name}" -> "${next.name}"`);
+    if (added.length) changes.push(`+doors ${added.join(',')}`);
+    if (removed.length) changes.push(`-doors ${removed.join(',')}`);
+    if (next.sensitive !== wasSensitive) changes.push(next.sensitive ? 'marked sensitive' : 'no longer sensitive');
+    if (!changes.length) return { item, message: 'Nothing changed.' };
+    const gateLocks = [...added, ...(wasSensitive ? removed : []), ...(wasSensitive && !next.sensitive ? next.lockIds : [])];
+    const gate = await fourEyes(ctx, gateLocks, `door group "${item.name}": ${changes.join('; ')}`);
+    if (gate) return gate;
+    const updated = { ...item, name: next.name, lockIds: next.lockIds, sensitive: next.sensitive };
+    await ctx.t.unit().update('doorGroups', id, { name: next.name, lockIds: next.lockIds, sensitive: next.sensitive })
+      .audit('doorGroups.update', `${id}: ${changes.join('; ')}` + (ctx.approval ? ` (approval ${ctx.approval.id} by ${ctx.approval.approvedBy})` : ''), ctx.actor).commit();
+    const reconcile = removed.length ? await reconcileAfter(ctx, {}) : undefined;
+    return { item: updated, reconcile };
+  });
 
   // --- credentials -----------------------------------------------------
   route('POST', /^\/api\/passcode$/, async ctx => {

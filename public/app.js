@@ -370,13 +370,143 @@ async function loadRevocation(){
     :`<div class="meta">Nothing open. ${Number(r.credentials)||0} credentials of ${r.triggers??'—'} leavers were removed in this window.</div>`;
 }
 
+/* ---- rules editor: rules, door groups, holidays, people groups, schedules ---- */
+const canRules=()=>Boolean(ME&&(ME.perms||[]).some(p=>p==='*'||p==='rule.manage'));
+const allScope=()=>Boolean(ME&&(ME.siteIds||[]).includes('*'));
+const patch=(u,data)=>api(u,{method:'PATCH',body:JSON.stringify(data||{})});
+const del=u=>api(u,{method:'DELETE'});
+const waiting=r=>r._status===202;
+const outcome=(r,done)=>waiting(r)?`<span class="tag o">waiting for approval</span> ${esc(r.message||'A second operator must approve this.')} See Activity → Waiting for a second person.`
+  :r.ok?`<span class="tag g">saved</span> ${esc(done)}`
+  :`<span class="tag r">not saved</span> ${esc(r.referencedBy?`still used by ${r.referencedBy.length} rule(s) or people: remove those first`:errText(r))}`;
+const WEEKDAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+let RULES={a:[],ug:[],dg:[],s:[],sites:[],h:[]};
+const nameIn=(arr,id,fallback)=>(arr.find(x=>x.id===id)||{}).name||fallback;
+const doorName=id=>(DOORS.find(d=>Number(d.lockId)===Number(id))||{}).lockAlias||`Lock ${Number(id)}`;
+const afterRuleChange=()=>Promise.all([loadRules(),loadPeople(),loadCompile(),loadSetup()]).catch(()=>{});
+
 async function loadRules(){
-  const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
-  const n=(arr,id)=>((arr||[]).find(x=>x.id===id)||{}).name||'24/7';
-  $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th></tr>`+
-    (a.assignments||[]).map(r=>`<tr><td>${esc(n(ug.userGroups,r.userGroupId))}</td>
-    <td>${esc(n(dg.doorGroups,r.doorGroupId))}${((dg.doorGroups||[]).find(x=>x.id===r.doorGroupId)||{}).sensitive?' <span class="tag r">sensitive · 4-eyes</span>':''}</td><td>${esc(n(s.schedules,r.scheduleId))}</td></tr>`).join('')+`</table>`;
+  const [a,ug,dg,s,st,h]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules'),api('/api/sites'),api('/api/holidays')]);
+  RULES={a:a.assignments||[],ug:ug.userGroups||[],dg:dg.doorGroups||[],s:s.schedules||[],sites:st.sites||[],h:h.holidays||[]};
+  const m=canRules(), all=allScope(), R=RULES;
+  const siteName=id=>id?nameIn(R.sites,id,id):'All sites';
+  // Rules
+  $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th>${m?'<th></th>':''}</tr>`+
+    R.a.map(r=>{const g=R.dg.find(x=>x.id===r.doorGroupId)||{};return `<tr><td>${esc(nameIn(R.ug,r.userGroupId,r.userGroupId))}</td>
+    <td>${esc(g.name||r.doorGroupId)}${g.sensitive?' <span class="tag r">sensitive · 4-eyes</span>':''}</td><td>${esc(nameIn(R.s,r.scheduleId,'24/7'))}</td>
+    ${m?`<td><button class="btn2 sm" type="button" data-del-rule="${esc(r.id)}">Remove</button></td>`:''}</tr>`;}).join('')+
+    (R.a.length?'':`<tr><td colspan="4" class="meta">No rules yet: nobody can open anything.</td></tr>`)+`</table>`;
+  const opt=(arr,label=x=>x.name)=>arr.map(x=>`<option value="${esc(x.id)}">${esc(label(x))}</option>`).join('');
+  $('#rule-add').hidden=!m;
+  if(m){
+    $('#ra-ug').innerHTML=opt(R.ug,x=>x.siteId?`${x.name} (${siteName(x.siteId)})`:x.name);
+    $('#ra-dg').innerHTML=opt(R.dg,x=>`${x.name} (${siteName(x.siteId)})${x.sensitive?' · sensitive':''}`);
+    $('#ra-sch').innerHTML='<option value="">24/7</option>'+opt(R.s);
+  }
+  // Door groups (grouped by site); doors not in any group listed last.
+  const grouped=new Set(R.dg.flatMap(g=>g.lockIds||[]).map(Number));
+  const ungrouped=DOORS.map(d=>Number(d.lockId)).filter(id=>!grouped.has(id));
+  const moveSel=(lock,from,siteId)=>{
+    const targets=R.dg.filter(g=>g.id!==from&&(!from||g.siteId===siteId||all)&&!(g.lockIds||[]).map(Number).includes(lock));
+    return `<select class="sm" data-move="${lock}" data-from="${esc(from||'')}" aria-label="Move ${esc(doorName(lock))}"><option value="">${from?'Move…':'Add to…'}</option>${
+      targets.map(g=>`<option value="${esc(g.id)}">${from?'to ':''}${esc(g.name)}${g.siteId!==siteId?` (${esc(siteName(g.siteId))})`:''}</option>`).join('')}${from?'<option value="-">Take out of this group</option>':''}</select>`;
+  };
+  const chip=(lock,from,siteId)=>`<span class="chip" style="display:inline-flex;gap:6px;align-items:center;margin:2px">${esc(doorName(lock))}${m?moveSel(lock,from,siteId):''}</span>`;
+  const rows=[...R.dg].sort((x,y)=>siteName(x.siteId).localeCompare(siteName(y.siteId))||x.name.localeCompare(y.name));
+  $('#dgroups').innerHTML=`<table><tr><th>Site</th><th>Door group</th><th>Doors</th></tr>`+rows.map(g=>`<tr>
+    <td>${esc(siteName(g.siteId))}</td>
+    <td><b>${esc(g.name)}</b> ${g.sensitive?'<span class="tag r">sensitive</span>':''}
+      ${m?`<div style="margin-top:4px"><button class="btn2 sm" type="button" data-dg-rename="${esc(g.id)}">Rename</button>
+      <button class="btn2 sm" type="button" data-dg-sens="${esc(g.id)}">${g.sensitive?'Unmark sensitive':'Mark sensitive'}</button>
+      <button class="btn2 sm" type="button" data-dg-del="${esc(g.id)}">Delete</button></div>`:''}</td>
+    <td>${(g.lockIds||[]).map(l=>chip(Number(l),g.id,g.siteId)).join('')||'<span class="meta">no doors</span>'}</td></tr>`).join('')+
+    (ungrouped.length?`<tr><td class="meta">—</td><td><b>Not in any group</b><div class="meta">Nobody can open these through a rule.</div></td><td>${ungrouped.map(l=>chip(l,'',null)).join('')}</td></tr>`:'')+`</table>`;
+  $('#dg-add').hidden=!m;
+  const siteOpts=(allowAll)=>(allowAll?'<option value="">All sites</option>':'')+opt(R.sites.filter(x=>all||(ME.siteIds||[]).includes(x.id)));
+  if(m)$('#dg-site').innerHTML=siteOpts(false);
+  // Holidays
+  const hs=[...R.h].sort((x,y)=>String(x.date).localeCompare(String(y.date)));
+  const today=new Date().toISOString().slice(0,10);
+  $('#holidays').innerHTML=hs.length?`<table><tr><th>Date</th><th>Name</th><th>Where</th>${m?'<th></th>':''}</tr>${hs.map(x=>`<tr${x.date<today?' class="meta"':''}>
+    <td>${esc(x.date)}</td><td>${esc(x.name||'')}</td><td>${esc(siteName(x.siteId))}</td>${m?`<td><button class="btn2 sm" type="button" data-hol-del="${esc(x.id)}">Remove</button></td>`:''}</tr>`).join('')}</table>`
+    :'<div class="meta">No holidays yet.</div>';
+  $('#hol-add').hidden=!m;
+  if(m)$('#hol-site').innerHTML=siteOpts(all);
+  // People groups and schedules (People view)
+  $('#ug-add').hidden=!m;
+  if(m)$('#ug-site').innerHTML=siteOpts(all);
+  $('#sch-add').hidden=!(m&&all);
+  if(m&&all&&!$('#sch-days').innerHTML)$('#sch-days').innerHTML=WEEKDAYS.map((d,i)=>`<label><input type="checkbox" value="${i+1}"${i<5?' checked':''}> ${d}</label>`).join('');
 }
+async function moveDoor(lock,from,to){
+  const g=id=>RULES.dg.find(x=>x.id===id);
+  const say=h=>{$('#dg-msg').innerHTML=h;};
+  if(to){
+    const t=g(to);
+    const r=await patch('/api/doorGroups/'+encodeURIComponent(to),{lockIds:[...(t.lockIds||[]),lock]});
+    if(!r.ok||waiting(r)){say(outcome(r,'')+(waiting(r)&&from?` ${esc(doorName(lock))} stays in “${esc(g(from).name)}” until then; take it out afterwards.`:''));await afterRuleChange();return;}
+  }
+  if(from){
+    const f=g(from);
+    const r=await patch('/api/doorGroups/'+encodeURIComponent(from),{lockIds:(f.lockIds||[]).map(Number).filter(x=>x!==lock)});
+    if(!r.ok||waiting(r)){say((to?`<span class="tag g">added</span> to “${esc(g(to).name)}”. `:'')+outcome(r,''));await afterRuleChange();return;}
+  }
+  say(outcome({ok:true},to&&from?`${doorName(lock)} moved from “${g(from).name}” to “${g(to).name}”.`:to?`${doorName(lock)} added to “${g(to).name}”.`:`${doorName(lock)} taken out of “${g(from).name}”.`));
+  await afterRuleChange();
+}
+document.addEventListener('change',e=>{
+  const sel=e.target.closest&&e.target.closest('select[data-move]');
+  if(!sel||!sel.value)return;
+  const to=sel.value==='-'?'':sel.value;
+  sel.disabled=true;
+  moveDoor(Number(sel.dataset.move),sel.dataset.from||'',to);
+});
+document.addEventListener('click',async e=>{
+  const b=e.target.closest&&e.target.closest('button[data-del-rule],button[data-dg-rename],button[data-dg-sens],button[data-dg-del],button[data-hol-del]');
+  if(!b)return;
+  const g=id=>RULES.dg.find(x=>x.id===id)||{};
+  let r,msg,box;
+  if(b.dataset.delRule){
+    const a=RULES.a.find(x=>x.id===b.dataset.delRule)||{};
+    if(!confirm(`Remove: ${nameIn(RULES.ug,a.userGroupId,'?')} can open ${g(a.doorGroupId).name||'?'}? Their codes for those doors are removed.`))return;
+    r=await del('/api/assignments/'+encodeURIComponent(b.dataset.delRule));msg='Rule removed; codes are being taken off the doors.';box='#rules-msg';
+  }else if(b.dataset.dgRename){
+    const name=prompt('New name for the door group',g(b.dataset.dgRename).name||'');
+    if(!name||!name.trim())return;
+    r=await patch('/api/doorGroups/'+encodeURIComponent(b.dataset.dgRename),{name:name.trim()});msg='Renamed.';box='#dg-msg';
+  }else if(b.dataset.dgSens){
+    const x=g(b.dataset.dgSens);
+    if(x.sensitive&&!confirm(`Remove the four-eyes protection from “${x.name}”? A second operator must approve.`))return;
+    r=await patch('/api/doorGroups/'+encodeURIComponent(x.id),{sensitive:!x.sensitive});msg=x.sensitive?'No longer sensitive.':'Marked sensitive: new access to these doors now needs a second operator.';box='#dg-msg';
+  }else if(b.dataset.dgDel){
+    if(!confirm(`Delete the door group “${g(b.dataset.dgDel).name}”?`))return;
+    r=await del('/api/doorGroups/'+encodeURIComponent(b.dataset.dgDel));msg='Door group deleted.';box='#dg-msg';
+  }else{
+    const h=RULES.h.find(x=>x.id===b.dataset.holDel)||{};
+    if(!confirm(`Remove the holiday ${h.date}${h.name?` (${h.name})`:''}? Doors on “closed on holidays” schedules open that day.`))return;
+    r=await del('/api/holidays/'+encodeURIComponent(b.dataset.holDel));msg='Holiday removed.';box='#hol-msg';
+  }
+  $(box).innerHTML=outcome(r,msg);
+  await afterRuleChange();
+});
+const onCreate=(form,box,build,url,done)=>$(form).addEventListener('submit',async e=>{
+  e.preventDefault();
+  const body=build();if(!body)return;
+  const r=await post(url,body);
+  $(box).innerHTML=outcome(r,done(body));
+  if(r.ok&&!waiting(r))e.target.reset();
+  await afterRuleChange();
+});
+onCreate('#rule-add','#rules-msg',()=>({userGroupId:$('#ra-ug').value,doorGroupId:$('#ra-dg').value,...($('#ra-sch').value?{scheduleId:$('#ra-sch').value}:{})}),'/api/assignments',
+  b=>`${nameIn(RULES.ug,b.userGroupId,'')} can open ${nameIn(RULES.dg,b.doorGroupId,'')} (${nameIn(RULES.s,b.scheduleId,'24/7')}). Codes follow for people in the group.`);
+onCreate('#dg-add','#dg-msg',()=>({name:$('#dg-name').value.trim(),siteId:$('#dg-site').value,sensitive:$('#dg-sens').checked}),'/api/doorGroups',b=>`“${b.name}” created. Add doors with “Add to…” or “Move…”.`);
+onCreate('#hol-add','#hol-msg',()=>({date:$('#hol-date').value,...($('#hol-name').value.trim()?{name:$('#hol-name').value.trim()}:{}),...($('#hol-site').value?{siteId:$('#hol-site').value}:{})}),'/api/holidays',b=>`${b.date} added.`);
+onCreate('#ug-add','#ug-msg',()=>({name:$('#ug-name').value.trim(),...($('#ug-site').value?{siteId:$('#ug-site').value}:{})}),'/api/userGroups',b=>`“${b.name}” created. Give it doors under Access → Access rules.`);
+onCreate('#sch-add','#sch-msg',()=>{
+  const days=$$('#sch-days input:checked').map(i=>Number(i.value));
+  if(!days.length){$('#sch-msg').innerHTML='<span class="tag r">not saved</span> Pick at least one day.';return null;}
+  return {name:$('#sch-name').value.trim(),denyOnHolidays:$('#sch-hol').checked,windows:[{days,from:$('#sch-from').value,to:$('#sch-to').value}]};
+},'/api/schedules',b=>`“${b.name}” created.`);
 async function evaluate(){
   const r=await post('/api/evaluate',{userId:$('#e-user').value,lockId:$('#e-door').value,localTime:$('#e-when').value});
   if(!r.ok){$('#e-res').textContent=errText(r);return;}

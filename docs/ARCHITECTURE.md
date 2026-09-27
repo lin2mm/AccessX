@@ -494,6 +494,21 @@ and a fake TTLock that rotates refresh tokens.
   (development only) turn this off. DNS names resolving to private addresses
   are a known gap on Node only (docs/SECURITY-TESTING.md).
 
+### Editing door groups
+
+- Door-group membership is what places a door in a site
+  (`policy.siteForLock`), so it is also what scopes site operators. Creating
+  or editing a door group therefore requires every *added* door to be in the
+  operator's scope already (`requireLocksInScope`); otherwise a site admin
+  with `rule.manage` (a custom role) could file another site's door under
+  their site and grant it to their own people.
+- `PATCH /api/doorGroups/:id` computes added and removed doors and gates on:
+  added sensitive doors; removed doors when the group is sensitive; all its
+  doors when `sensitive` goes true → false. The approval replays the same
+  PATCH. One audit entry `doorGroups.update` lists the changes.
+- The UI moves a door as two PATCHes, add first, remove second: if the add
+  waits for approval, the door stays where it was.
+
 ### Office setup pack
 
 - `onboarding-core.js` is pure: `plan(locks, snapshot, {timeZone, hours})`.

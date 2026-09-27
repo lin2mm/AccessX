@@ -35,19 +35,19 @@ hours, **Preview**, check the tables, **Apply**. Per site it creates:
 | Secure rooms (**sensitive**) | server, comms, IT, electrical, safe, records, lab | nobody yet |
 
 Defaults: office hours Mon–Fri 07:00–19:00, cleaning Mon–Fri 18:00–22:00,
-both closed on holidays (add them with `POST /api/holidays {date, name}`;
-there is no holidays screen yet). Every item is
+both closed on holidays (add them under Access → Holidays). Every item is
 audited; doors already in a group are never touched, so running it again is
 safe. Afterwards:
 
-- **Secure rooms**: create a small people group (e.g. "IT"), add the
-  people, and assign it to Secure rooms:
-  `POST /api/assignments {userGroupId, doorGroupId, scheduleId}`. That change
-  waits for a second owner or manager to approve (four-eyes, shown under
-  Activity → Waiting for a second person).
-- Anything misfiled (a "Store" that staff use): the rules screen is
-  read-only today; change door groups through the API (`/api/doorGroups`)
-  or re-run the setup on a fresh tenant during the pilot.
+- **Secure rooms**: create a small people group (e.g. "IT") under People →
+  User groups, add the people, then Access → Access rules → *Add rule*:
+  IT can open Secure rooms. That change waits for a second owner to approve
+  (four-eyes, shown under Activity → Waiting for a second person).
+- Anything misfiled (a "Store" that staff use): Access → Door groups → the
+  door's *Move…* menu. The door is added to the new group before it leaves
+  the old one, so nobody is locked out in between.
+- Other hours (a late shift): People → Schedules → *New schedule*, then a
+  rule that uses it.
 
 ## 3. Operators and single sign-on
 

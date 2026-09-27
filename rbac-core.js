@@ -135,7 +135,7 @@ function resolvePermission(method, pathname) {
   const collection = path.match(/^\/api\/([^/]+)(?:\/[^/]+)?$/);
   if (collection && COLLECTION_PERMS[collection[1]]) {
     if (m === 'GET' && !path.slice(5).includes('/')) return { perm: 'report.read', source: 'collection' };
-    if (m === 'POST' || m === 'DELETE') return { perm: COLLECTION_PERMS[collection[1]], source: 'collection' };
+    if (m === 'POST' || m === 'DELETE' || (m === 'PATCH' && collection[1] === 'doorGroups' && path.slice(5).includes('/'))) return { perm: COLLECTION_PERMS[collection[1]], source: 'collection' };
   }
   // Fail closed: an unlisted route is owner-only. The coverage gate
   // (test/rbac-coverage.test.js) makes sure no real route ends up here.
