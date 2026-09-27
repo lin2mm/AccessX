@@ -176,6 +176,13 @@ function createNukiVendor(nuki, {
           listLocks: true, unlock: true, passcodes: true, listPasscodes: true, records: true, recordsMax: 50, gateways: true,
           cyclicVerified: false, keypadRequired: true, arrivalsFromRecords: false, alarmsFromRecords: false, asyncWrites: true,
         },
+        limits: [
+          'Codes need a Nuki Keypad paired to the lock; a lock without one can only be opened from the app.',
+          'Arrivals are not detected from Nuki logs (they do not say which code was typed): visits are not marked "arrived" automatically.',
+          'Lock alarms (tamper, wrong codes) are not read from Nuki.',
+          'Only the last 50 events per lock are available.',
+          'Changes are confirmed by re-reading Nuki (a few seconds). An offline lock cannot get new codes, and removing a code waits until it is back online.',
+        ],
         health: { vendor: 'nuki', ok: true, mode: label },
       };
     },

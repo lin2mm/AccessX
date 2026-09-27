@@ -450,17 +450,20 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         </div>
       </div>
       <div id="vendor-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
-        <b>Lock vendor account (TTLock)</b>
+        <b>Lock vendor account</b>
         <div id="vendor-state" class="meta" style="margin:4px 0 8px"></div>
         <form id="vendor-form" class="grid c3" style="align-items:end">
-          <label>Region<select id="v-region"><option value="eu">EU (euapi.ttlock.com)</option><option value="cn">China (api.sciener.com)</option></select></label>
-          <label>TTLock account<input id="v-user" required maxlength="100" autocomplete="off" placeholder="a dedicated admin account, not a personal one"></label>
-          <label>Password<input id="v-pass" type="password" required maxlength="200" autocomplete="new-password" placeholder="used once, never stored"></label>
-          <label>Own app client ID (optional)<input id="v-cid" autocomplete="off" placeholder="leave empty to use the platform app"></label>
-          <label>Own app client secret<input id="v-csec" type="password" autocomplete="new-password"></label>
+          <label>Vendor<select id="v-kind"><option value="ttlock">TTLock</option><option value="nuki">Nuki</option></select></label>
+          <label class="v-ttlock">Region<select id="v-region"><option value="eu">EU (euapi.ttlock.com)</option><option value="cn">China (api.sciener.com)</option></select></label>
+          <label class="v-ttlock">TTLock account<input id="v-user" maxlength="100" autocomplete="off" placeholder="a dedicated admin account, not a personal one"></label>
+          <label class="v-ttlock">Password<input id="v-pass" type="password" maxlength="200" autocomplete="new-password" placeholder="used once, never stored"></label>
+          <label class="v-ttlock">Own app client ID (optional)<input id="v-cid" autocomplete="off" placeholder="leave empty to use the platform app"></label>
+          <label class="v-ttlock">Own app client secret<input id="v-csec" type="password" autocomplete="new-password"></label>
+          <label class="v-nuki" hidden>Nuki Web API token<input id="v-nuki-token" type="password" maxlength="500" autocomplete="new-password" placeholder="Nuki Web → API → Generate API token"></label>
           <div><button class="btn sm" type="submit">Connect</button> <button class="btn2 sm" type="button" id="vendor-remove">Disconnect</button></div>
           <div id="vendor-msg" class="meta"></div>
         </form>
+        <div id="vendor-limits" class="meta" hidden style="margin-top:8px"></div>
       </div>
       <div id="alerts-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
         <h3 style="margin:0">Alerts to Slack / Teams / email</h3>

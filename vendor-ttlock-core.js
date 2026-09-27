@@ -137,7 +137,12 @@ function createCloudVendor(tt, { label = 'TTLock cloud', region = 'eu', cacheMs 
     async info() {
       return {
         active: 'ttlock', available: ['ttlock', 'demo'],
-        capabilities: { listLocks: true, unlock: true, passcodes: true, records: true, recordsMaxDays: 180, gateways: true, cyclicVerified: false },
+        capabilities: { listLocks: true, unlock: true, passcodes: true, listPasscodes: true, records: true, recordsMaxDays: 180, gateways: true, cyclicVerified: false, keypadRequired: false, arrivalsFromRecords: true, alarmsFromRecords: true, asyncWrites: false },
+        // What an operator must know about this vendor, in words (shown on the vendor card).
+        limits: [
+          'Code validity is in whole hours; a period code must be used once within 24 hours of its start or the lock refuses it.',
+          'Remote opening and remote code removal need a TTLock gateway near the door; without one, removal waits for someone on site.',
+        ],
         health: { vendor: 'ttlock', ok: true, mode: label },
       };
     },

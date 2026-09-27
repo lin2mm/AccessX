@@ -278,25 +278,40 @@ async function loadAdmin(){
   $('#vendor-box').hidden=!va.ok;
   if(va.ok){
     const a=va.account;
+    const vname=a.kind==='nuki'?'Nuki':'TTLock';
     $('#vendor-state').innerHTML=a.connected
-      ?`${a.status==='connected'?'<span class="tag g">connected</span>':'<span class="tag r">reconnect required</span>'} ${esc(a.account)} · ${esc(a.region)} · ${Number(a.lockCount)||0} locks · ${a.usesPlatformApp?'platform app':'own app'} · token valid until ${esc(String(a.tokenExpiresAt).slice(0,10))}${a.lastError?' · '+esc(a.lastError):''}`
+      ?`${a.status==='connected'?'<span class="tag g">connected</span>':'<span class="tag r">reconnect required</span>'} ${vname} · ${esc(a.account)} · ${a.kind==='nuki'?'API token (does not expire; changing the Nuki Web password destroys it)':`${esc(a.region)} · ${a.usesPlatformApp?'platform app':'own app'} · token valid until ${esc(String(a.tokenExpiresAt).slice(0,10))}`} · ${Number(a.lockCount)||0} locks${a.lastError?' · '+esc(a.lastError):''}`
       :`Not connected — this account uses ${DOORS.length?'the demo fleet':'no locks'}.${a.secretsKeyConfigured?'':' <span class="tag o">server has no SECRETS_KEY</span>'}${a.platformAppConfigured?'':' <span class="tag o">no platform TTLock app: enter your own client ID/secret</span>'}`;
-    if(a.connected){$('#v-user').value=a.account;$('#v-region').value=a.region;}
+    if(a.connected){$('#v-kind').value=a.kind||'ttlock';if(a.kind!=='nuki'){$('#v-user').value=a.account;$('#v-region').value=a.region;}}
+    showVendorKind();
     $('#vendor-remove').hidden=!a.connected;
+    // What this vendor cannot do, in words, so nobody expects a feature it lacks.
+    const vi=await api('/api/vendor');
+    const limits=vi.ok&&Array.isArray(vi.limits)?vi.limits:[];
+    $('#vendor-limits').hidden=!limits.length;
+    $('#vendor-limits').innerHTML=limits.length?`<b>Limits of ${vi.active==='nuki'?'Nuki':vi.active==='ttlock'?'TTLock':esc(vi.active)}</b><ul style="margin:4px 0 0 18px;padding:0">${limits.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'';
   }
 }
+function showVendorKind(){
+  const nuki=$('#v-kind').value==='nuki';
+  $$('#vendor-form .v-ttlock').forEach(x=>{x.hidden=nuki;});
+  $$('#vendor-form .v-nuki').forEach(x=>{x.hidden=!nuki;});
+  $('#v-user').required=!nuki;$('#v-pass').required=!nuki;$('#v-nuki-token').required=nuki;
+}
+$('#v-kind').addEventListener('change',showVendorKind);
 $('#vendor-form').addEventListener('submit',async e=>{
   e.preventDefault();
-  const body={region:$('#v-region').value,username:$('#v-user').value.trim(),password:$('#v-pass').value};
-  if($('#v-cid').value||$('#v-csec').value){body.clientId=$('#v-cid').value.trim();body.clientSecret=$('#v-csec').value;}
-  $('#vendor-msg').textContent='Connecting to TTLock…';
+  const nuki=$('#v-kind').value==='nuki';
+  const body=nuki?{kind:'nuki',apiToken:$('#v-nuki-token').value.trim()}:{kind:'ttlock',region:$('#v-region').value,username:$('#v-user').value.trim(),password:$('#v-pass').value};
+  if(!nuki&&($('#v-cid').value||$('#v-csec').value)){body.clientId=$('#v-cid').value.trim();body.clientSecret=$('#v-csec').value;}
+  $('#vendor-msg').textContent=nuki?'Connecting to Nuki…':'Connecting to TTLock…';
   const r=await api('/api/vendor-account',{method:'PUT',body:JSON.stringify(body)});
-  $('#v-pass').value='';$('#v-csec').value='';
-  $('#vendor-msg').textContent=r.ok?`Connected: ${Number(r.account.lockCount)} locks. The password was used once and discarded.`:errText(r);
+  $('#v-pass').value='';$('#v-csec').value='';$('#v-nuki-token').value='';
+  $('#vendor-msg').textContent=r.ok?`Connected: ${Number(r.account.lockCount)} locks. ${nuki?'The API token is stored encrypted.':'The password was used once and discarded.'}${r.account.switchedAccount?' A different account than before: codes issued on the old locks are being reconciled.':''}`:errText(r);
   if(r.ok){loadMode();loadDoors();loadHealth();loadAdmin();loadAudit();}
 });
 $('#vendor-remove').addEventListener('click',async()=>{
-  if(!confirm('Disconnect the TTLock account? Doors from that account disappear from AccessX; codes already on the locks keep working until removed.'))return;
+  if(!confirm('Disconnect the lock vendor account? Doors from that account disappear from AccessX; codes already on the locks keep working until removed.'))return;
   const r=await api('/api/vendor-account',{method:'DELETE'});
   $('#vendor-msg').textContent=r.ok?'Disconnected.':errText(r);
   loadMode();loadDoors();loadHealth();loadAdmin();loadAudit();
