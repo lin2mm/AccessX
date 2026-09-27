@@ -337,3 +337,13 @@ test('calendar is off without CALENDAR_INBOUND_DOMAIN (and says what is missing)
   assert.equal((await api.call('PUT', '/api/calendar', { ...OWNER, body: { doorSets: [{ siteId: 'site_river', lockIds: [9001] }] } })).status, 400);
   assert.equal((await inbound(api, 'cal-aaaaaaaaaaaaaaaa@in.doors.example', 'x')).body.accepted, false);
 });
+
+test('doctor: calendar needs email and PUBLIC_URL, a bare domain, and a long inbound secret', () => {
+  const { checkConfig } = require('../doctor-core');
+  const base = { ADMIN_TOKEN: 'owner-token', SECRETS_KEY: Buffer.alloc(32, 7).toString('base64'), PUBLIC_URL: 'https://doors.example' };
+  const f = env => checkConfig({ ...base, ...env }, { production: true }).filter(x => /^CALENDAR/.test(x.id)).map(x => `${x.level}:${x.id}`);
+  assert.deepEqual(f({}), []);
+  assert.deepEqual(f({ CALENDAR_INBOUND_DOMAIN: DOMAIN }), ['error:CALENDAR_INBOUND_DOMAIN']);
+  assert.deepEqual(f({ CALENDAR_INBOUND_DOMAIN: DOMAIN, EMAIL_PROVIDER: 'resend' }), ['ok:CALENDAR_INBOUND_DOMAIN']);
+  assert.deepEqual(f({ CALENDAR_INBOUND_DOMAIN: 'https://in.doors.example', EMAIL_PROVIDER: 'resend', CALENDAR_INBOUND_SECRET: 'short' }), ['error:CALENDAR_INBOUND_DOMAIN', 'error:CALENDAR_INBOUND_SECRET']);
+});

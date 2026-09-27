@@ -337,6 +337,47 @@ check('front-desk kiosk on D1: pair, phone pass, check-in (host told), walk-in �
   assert.equal((await k({ kiosk: key, action: 'info' })).status, 401);
   assert.equal((await k({ pass: info.body.pass, action: 'info' })).status, 401);
 });
+check('calendar invitation on D1: email() handler → draft → organiser confirms → visitor invitation', async () => {
+  const put = await call('PUT', '/api/calendar', OWNER, { doorSets: [{ siteId: 'site_river', lockIds: [9001] }] });
+  if (put.status === 400 && /CALENDAR_INBOUND_DOMAIN/.test(JSON.stringify(put.body))) { console.log('     (skipped: CALENDAR_INBOUND_DOMAIN not set in .dev.vars)'); return; }
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const address = put.body.inbox.address;
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(Date.now() + 3 * 864e5)).map(x => [x.type, x.value]));
+  const day = `${p.year}${p.month}${p.day}`;
+  const guest = `cal-${Date.now().toString(36)}@guest.example`;
+  const ics = ['BEGIN:VCALENDAR', 'METHOD:REQUEST', 'BEGIN:VEVENT', `DTSTART;TZID=Europe/London:${day}T100000`, `DTEND;TZID=Europe/London:${day}T110000`,
+    'ORGANIZER;CN=Sarah Kelly:mailto:sarah@acme.co.uk', `UID:smoke-${Date.now()}@google.com`, `ATTENDEE;CN=Smoke Guest:mailto:${guest}`, `ATTENDEE:mailto:${address}`,
+    'SUMMARY:Smoke meeting', 'SEQUENCE:0', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+  const mime = [`From: Sarah Kelly <sarah@acme.co.uk>`, `To: ${address}`, 'Subject: Invitation: Smoke meeting', `Message-ID: <${Date.now()}@smoke.example>`, `Date: ${new Date().toUTCString()}`,
+    'MIME-Version: 1.0', 'Content-Type: text/calendar; charset="UTF-8"; method=REQUEST', '', ics, ''].join('\r\n');
+  const before = mail.length;
+  // The real email() handler, through wrangler's local email endpoint (older wrangler: /cdn-cgi/handler/email).
+  let via = null;
+  for (const path of ['/cdn-cgi/local/email', '/cdn-cgi/handler/email']) {
+    const r = await fetch(`${BASE}${path}?from=${encodeURIComponent('sarah@acme.co.uk')}&to=${encodeURIComponent(address)}`, { method: 'POST', body: mime });
+    if (r.status < 400) { via = path; break; }
+  }
+  if (!via) {
+    assert.ok(process.env.CALENDAR_SECRET, 'no local email endpoint: set CALENDAR_SECRET for the HTTP inbound route');
+    const r = await fetch(`${BASE}/api/inbound/calendar`, { method: 'POST', headers: { authorization: `Bearer ${process.env.CALENDAR_SECRET}`, 'x-envelope-to': address }, body: mime });
+    assert.equal(r.status, 202);
+    via = '/api/inbound/calendar';
+  }
+  for (let i = 0; i < 40 && mail.length === before; i++) await new Promise(r => setTimeout(r, 100));
+  assert.equal(mail.length, before + 1, `organiser emailed (via ${via})`);
+  assert.deepEqual(mail[before].to, ['sarah@acme.co.uk']);
+  const token = (mail[before].text.match(/calendar#t=([A-Za-z0-9_-]+)/) || [])[1];
+  assert.ok(token);
+  const conf = b => raw('POST', '/api/calendar-confirm', { body: { token, ...b } });
+  const info = await conf({ action: 'info' });
+  assert.equal(info.status, 200, JSON.stringify(info.body));
+  const ok = await conf({ action: 'confirm', siteId: 'site_river', guests: [guest] });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.deepEqual(ok.body.sent, [{ email: guest }]);
+  const invites = await call('GET', '/api/visit-invites', OWNER);
+  assert.ok(invites.body.invites.some(x => x.status === 'open' && x.createdBy === 'owner'), JSON.stringify(invites.body.invites.slice(0, 2)));
+  console.log(`     (delivered via ${via})`);
+});
 check('demo reset through the tenant Durable Object restores the seed and keeps the audit chain', async () => {
   const before = (await call('GET', '/api/audit/verify', OWNER)).body.verification;
   assert.equal((await call('POST', '/api/platform/tenants/t_default/demo-reset', PLATFORM, {})).status, 400);

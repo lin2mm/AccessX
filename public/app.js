@@ -882,7 +882,7 @@ async function loadVisitors(){
     $('#vs-arrivals').textContent+=s.checkoutLinks?' Visitors get a self check-out link with their code.':' Set PUBLIC_URL to send visitors a self check-out link.';
     $('#vs-sms').hidden=!s.smsAvailable;
     if(s.smsUsage)$('#vs-sms-usage').textContent=`Text messages this month (${s.smsUsage.period}): ${s.smsUsage.sent}${s.smsUsage.cap?` of ${s.smsUsage.cap}`:''} · ${s.smsUsage.segments} billed segment${s.smsUsage.segments===1?'':'s'}`;}
-  loadInvites();loadWalkins();loadKiosks();
+  loadInvites();loadWalkins();loadKiosks();loadCalendar();
   const DELIVERY={emailed:'code emailed',email_failed:'email failed',texted:'code texted',sms_failed:'text failed'};
   const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
@@ -1000,9 +1000,13 @@ async function loadWalkins(){
   const r=await api('/api/walkins');
   const list=r.ok?r.walkins:[];
   $('#walk-card').hidden=!list.length;
+  // New since the last look: highlight them, and count them in a background tab's title.
+  const seen=VIS.walkinsSeen;VIS.walkinsSeen=new Set(list.map(w=>w.id));
+  const fresh=seen?list.filter(w=>!seen.has(w.id)).map(w=>w.id):[];
+  if(fresh.length&&document.visibilityState!=='visible'){VIS.walkinsUnseen=(VIS.walkinsUnseen||0)+fresh.length;document.title=`(${VIS.walkinsUnseen}) walk-in · ${BASE_TITLE}`;}
   if(!list.length)return;
   $('#walk-list').innerHTML=`<table><tr><th>Visitor</th><th>Asked for</th><th>Signed in</th><th></th></tr>${list.map(w=>`<tr>
-    <td><b>${esc(w.name)}</b><div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
+    <td><b>${esc(w.name)}</b>${fresh.includes(w.id)?' <span class="tag o">new</span>':''}<div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
     <td>${w.hostName?esc(w.hostName)+(w.hostNotified==='delivered'?' <span class="tag g">told by email</span>':''):'<span class="meta">not matched: ask the visitor</span>'}</td>
     <td>${esc(new Date(w.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))}<div class="meta">${esc(w.siteName||'')}${w.noticeAccepted?' · notice accepted':''}</div></td>
     <td style="white-space:nowrap"><button class="btn sm" data-wact="issue" data-wid="${esc(w.id)}">Issue code</button> <button class="btn2 sm" data-wact="dismiss" data-wid="${esc(w.id)}">Dismiss</button></td></tr>`).join('')}</table>`;
@@ -1058,5 +1062,55 @@ $('#kiosk-form').addEventListener('submit',async e=>{
   $('#kiosk-name').value='';
   loadKiosks();loadAudit();
 });
+// --- R17: calendar invitations (docs/23-CALENDAR.md) ---
+const CAL_STATUS={pending:['waiting for the host','o'],confirmed:['invitations sent','g'],declined:['host said not needed',''],cancelled:['meeting cancelled',''],superseded:['replaced by a newer version',''],expired:['not confirmed in time',''],unusable:['not used','r']};
+async function loadCalendar(){
+  const r=await api('/api/calendar');
+  $('#cal-card').hidden=!r.ok;
+  if(!r.ok)return;
+  const owner=ME&&ME.role==='r_owner';
+  if(!r.available){$('#cal-state').innerHTML=`<div class="meta">Not available on this server: set ${esc(r.missing.join(', '))} (see docs/23-CALENDAR.md).</div>`;$('#cal-form').hidden=true;}
+  else{
+    $('#cal-state').innerHTML=r.inbox?`<div class="res ${r.inbox.enabled?'y':'n'}">Calendar address: <b id="cal-addr">${esc(r.inbox.address)}</b> <button class="btn2 sm" type="button" id="cal-copy">Copy</button>${r.inbox.enabled?'':' · <b>switched off</b>'}</div>`
+      :`<div class="meta">${owner?'Choose the visitor doors for each office, then save to get the address.':'An owner can switch this on.'}</div>`;
+    const copy=$('#cal-copy');if(copy)copy.onclick=()=>navigator.clipboard&&navigator.clipboard.writeText(r.inbox.address).then(()=>{copy.textContent='Copied';});
+    $('#cal-form').hidden=!owner;
+    $('#cal-rotate').hidden=!r.inbox;
+    if(owner&&!$('#cal-form').contains(document.activeElement)){
+      const chosen=Object.fromEntries(((r.inbox&&r.inbox.doorSets)||[]).map(d=>[d.siteId,d.lockIds.map(String)]));
+      $('#cal-on').checked=!r.inbox||r.inbox.enabled;
+      $('#cal-sets').innerHTML=r.sites.map(s=>{
+        const doors=visDoors().filter(d=>d.siteId===s.id);
+        return `<div style="margin-top:6px"><b>${esc(s.name)}</b><div class="checks">${doors.map(d=>`<label class="${d.sensitive?'off':''}"><input type="checkbox" data-cal-site="${esc(s.id)}" value="${esc(d.lockId)}" ${d.sensitive?'disabled':''} ${!d.sensitive&&(chosen[s.id]||[]).includes(String(d.lockId))?'checked':''}> ${esc(d.lockAlias||d.lockId)}${d.sensitive?' <span class="meta">sensitive</span>':''}</label>`).join('')||'<span class="meta">no doors</span>'}</div></div>`;
+      }).join('');
+    }
+  }
+  $('#cal-drafts').innerHTML=r.drafts.length?`<table><tr><th>Received</th><th>Meeting</th><th>Host</th><th>Guests</th><th>State</th></tr>${r.drafts.map(d=>{const st=CAL_STATUS[d.status]||[d.status,''];return `<tr>
+    <td>${esc(new Date(d.createdAt).toLocaleString([], {dateStyle:'short',timeStyle:'short'}))}</td>
+    <td>${d.startAt?`<b>${esc(d.summary||'untitled')}</b><div class="meta">${esc(new Date(d.startAt).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}))}${d.recurring?' · recurring (first only)':''}${d.tzAssumed?' · time zone assumed':''}</div>`:'<span class="meta">—</span>'}</td>
+    <td>${esc(d.hostName||'—')}</td>
+    <td>${d.erased?'<span class="meta">erased</span>':esc(d.guests.map(g=>g.name||g.email).join(', ')||'—')}</td>
+    <td><span class="tag ${st[1]}">${esc(st[0])}</span>${d.reason?`<div class="meta">${esc(d.reason)}</div>`:''}${d.status==='pending'&&d.hostNotified&&d.hostNotified!=='delivered'?'<div class="meta">host email not sent</div>':''}</td></tr>`;}).join('')}</table>`:'<div class="meta">No invitations received yet.</div>';
+}
+$('#cal-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const sets={};
+  $$('#cal-sets input[data-cal-site]:checked').forEach(i=>{(sets[i.dataset.calSite]||=[]).push(Number(i.value));});
+  const body={enabled:$('#cal-on').checked,doorSets:Object.entries(sets).map(([siteId,lockIds])=>({siteId,lockIds}))};
+  const r=await api('/api/calendar',{method:'PUT',body:JSON.stringify(body)});
+  $('#cal-res').innerHTML=r.ok?'<div class="res y">Saved. Invitations use your approval: if you stop being an owner, an owner needs to save this again.</div>':`<div class="res n">${esc(errText(r))}</div>`;
+  loadCalendar();loadAudit();
+});
+$('#cal-rotate').addEventListener('click',async()=>{
+  if(!confirm('Make a new calendar address? The old one stops working at once: hosts must use the new one.'))return;
+  const r=await post('/api/calendar/rotate',{});
+  if(!r.ok)alert(errText(r));
+  loadCalendar();loadAudit();
+});
+// Reception: new walk-ins appear without a reload (every 20 s while the Visitors page is open);
+// a background tab shows the count in its title.
+const BASE_TITLE=document.title;
+setInterval(()=>{if(document.visibilityState==='visible'||VIS.walkinsSeen){if($('#v-visitors').classList.contains('on'))loadWalkins();}},20000);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){document.title=BASE_TITLE;VIS.walkinsUnseen=0;}});
 init();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});

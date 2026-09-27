@@ -134,6 +134,14 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
       if (!has('TURNSTILE_SITE_KEY') && !has('TURNSTILE_SECRET_KEY')) add('warn', 'TURNSTILE_SITE_KEY', 'signup has no human check: scripted signups are only slowed by the rate limits', 'TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY (Cloudflare dashboard → Turnstile, free)');
     }
   }
+  // Calendar invitations → visitor pre-registration (R17).
+  if (has('CALENDAR_INBOUND_DOMAIN')) {
+    const miss = [!has('EMAIL_PROVIDER') && 'EMAIL_PROVIDER', !has('PUBLIC_URL') && 'PUBLIC_URL'].filter(Boolean);
+    if (miss.length) add('error', 'CALENDAR_INBOUND_DOMAIN', `calendar invitations stay off without ${miss.join(' and ')} (the organiser confirms by an emailed link)`);
+    else if (val('CALENDAR_INBOUND_DOMAIN') && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(val('CALENDAR_INBOUND_DOMAIN') || '')) add(bad, 'CALENDAR_INBOUND_DOMAIN', 'CALENDAR_INBOUND_DOMAIN must be a bare domain such as in.doors.example.com');
+    else add('ok', 'CALENDAR_INBOUND_DOMAIN', `calendar invitations to cal-…@${val('CALENDAR_INBOUND_DOMAIN') || '(domain)'} (Cloudflare Email Routing → this Worker)`);
+  }
+  if (has('CALENDAR_INBOUND_SECRET') && String(val('CALENDAR_INBOUND_SECRET') || 'x'.repeat(32)).length < 24) add(bad, 'CALENDAR_INBOUND_SECRET', 'CALENDAR_INBOUND_SECRET is short: use openssl rand -hex 24');
   // Cloudflare Turnstile on the signup page (R16): both keys or neither.
   if (has('TURNSTILE_SITE_KEY') !== has('TURNSTILE_SECRET_KEY')) add('error', 'TURNSTILE_SECRET_KEY', 'Turnstile needs both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY: with one of them the human check stays off');
   else if (has('TURNSTILE_SITE_KEY')) {
