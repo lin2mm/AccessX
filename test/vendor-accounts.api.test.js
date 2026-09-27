@@ -121,6 +121,7 @@ test('token lifecycle: expired → refreshed once and shared; revoked at TTLock 
   const denied = await api.call('POST', '/api/doors/9001/unlock', { ...owner, body: { reason: 'delivery at the front' } });
   assert.equal(denied.status, 503);
   assert.equal(denied.body.reason, 'needs_reconnect');
+  assert.equal(denied.headers.get('retry-after'), null, 'retrying cannot fix this; an owner must reconnect');
   const status = (await api.call('GET', '/api/vendor-account', owner)).body.account;
   assert.equal(status.status, 'needs_reconnect');
   assert.equal((await api.call('GET', '/api/doors', owner)).status, 503, 'no silent empty fleet');
@@ -219,4 +220,34 @@ test('winner slower than the grace window: the loser fails one request, the winn
   assert.ok((await pA).length);
   assert.equal((await store.sql.first('SELECT status FROM vendor_accounts')).status, 'connected', 'A\'s save restored the account');
   assert.equal((await api.call('GET', '/api/vendor-account', owner)).body.account.status, 'connected');
+});
+
+test('TTLock down or rate-limiting: 503 unavailable with Retry-After (never a 500); a leaver is still suspended', async t => {
+  const { api, cloud, owner } = await setup(t);
+  await api.call('PUT', '/api/vendor-account', { ...owner, body: RIVERSIDE });
+  assert.equal((await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2' } })).status, 200);
+
+  cloud.state.rateLimitNext = 5;
+  const limited = await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2' } });
+  assert.equal(limited.status, 503, JSON.stringify(limited.body) + JSON.stringify(cloud.state.calls.slice(-3).map(c => c.path)));
+  assert.equal(limited.body.reason, 'unavailable');
+  assert.match(limited.body.error, /call limit/);
+  assert.equal(limited.headers.get('retry-after'), '30');
+  cloud.state.rateLimitNext = 0;
+
+  await cloud.close(); // TTLock unreachable
+  const down = await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2' } });
+  assert.equal(down.status, 503, JSON.stringify(down.body));
+  assert.equal(down.body.reason, 'unavailable');
+  assert.match(down.body.error, /network error/);
+  assert.equal(down.headers.get('retry-after'), '30');
+  assert.equal((await api.call('GET', '/api/vendor-account', owner)).body.account.status, 'connected', 'an outage is not a broken account');
+
+  // Suspension is recorded; the code is not claimed as removed, it is retried by the reconciler.
+  const s = await api.call('POST', '/api/users/u2/suspend', owner);
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.equal(s.body.reconcile.revoked, 0);
+  assert.equal(s.body.reconcile.failed, 1);
+  const cred = (await api.call('GET', '/api/credentials', owner)).body.credentials.find(c => c.userId === 'u2');
+  assert.equal(cred.status, 'active', 'still on the lock until TTLock confirms the delete');
 });

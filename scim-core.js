@@ -435,7 +435,8 @@ function createScim({ uid, reconcile = async () => {}, log = () => {} }) {
       throw new ScimError(405, `${method} is not supported on ${sub}`);
     } catch (error) {
       if (error instanceof ScimError) return ok(error.status, errorBody(error.status, error.message, error.scimType));
-      if (error && error.status === 409) return ok(409, errorBody(409, 'conflicting change, please retry'));
+      // A lost race (only possible without the per-tenant write queue): tell the directory when to retry.
+      if (error && error.status === 409) return ok(409, errorBody(409, 'conflicting change, please retry'), { 'retry-after': '2' });
       if (error && /UNIQUE constraint/i.test(String(error.message))) return ok(409, errorBody(409, 'userName already exists', 'uniqueness'));
       log('scim error', error);
       return ok(500, errorBody(500, 'internal error'));

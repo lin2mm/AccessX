@@ -63,6 +63,43 @@ operations are intentionally not enabled in the Worker.
 Do not enable public writes. For live lock data, this prototype still needs a
 separate production security review.
 
+## Configuration
+
+Node reads these from the environment; the Worker from `wrangler.jsonc` vars
+and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
+
+| Variable | Needed for | Notes |
+|---|---|---|
+| `ADMIN_TOKEN` | production | Owner token of the default tenant. Without it (and `OPERATORS`) the app runs as an open demo. |
+| `OPERATORS` | optional | JSON list of seeded operators (`id`, `role`, `sites`, `token`). |
+| `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
+| `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
+| `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
+| `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI and for links in alerts; without it links are left out and the redirect URI follows the request host. |
+| `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
+| `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
+| `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
+| `ALLOW_HTTP_WEBHOOKS` | local testing | `1` allows `http://` alert and anchor webhooks. **Never in production**: webhook URLs carry secrets. |
+| `ALLOW_HTTP_ISSUERS` / `MOCK_IDP` | local testing | Allow `http://` OIDC issuers / mount a fake IdP. Never in production. |
+| `DOH_URL` | SSO domain verification | DNS-over-HTTPS resolver for the TXT check (default Cloudflare). |
+| `DATA_DIR`, `PORT` | Node | SQLite location and HTTP port. |
+| `RECONCILE_INTERVAL_MIN` | Node | Reconciler period (default 15, `0` = off). The Worker uses the cron trigger in `wrangler.jsonc`. |
+| `WRITE_QUEUE_MAX` | Node | Per-tenant write queue depth before 503 (default 256). |
+
+### Rotating SECRETS_KEY
+
+1. Generate a key and deploy with `SECRETS_KEY="<new>,<old>"`. Everything
+   keeps working; new secrets are sealed with the new key.
+2. `POST /api/platform/secrets/reseal` (platform token) re-encrypts every
+   stored secret: TTLock tokens, SSO client secrets, alert webhooks, waiting
+   passcodes. It is idempotent and never overwrites a value that changed
+   meanwhile.
+3. `GET /api/platform/secrets` must show `"onOldKeys": 0` (run the re-seal
+   again if not), then deploy with `SECRETS_KEY="<new>"`.
+
+A key that was removed too early is reported by name (`sealed with key …,
+which is not in SECRETS_KEY`); put it back in the ring and re-seal.
+
 ## Authentication and roles
 
 Operators (people who administer the system) are separate from door users.

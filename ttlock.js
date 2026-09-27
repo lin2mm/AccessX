@@ -45,9 +45,13 @@ function apiBase(region, override) {
  * POST /oauth2/token. NOTE the snake_case client_id / client_secret: the
  * OAuth endpoint differs from the v3 API (which takes clientId).
  */
+/** A hung TTLock must not hang the request (and, in a Durable Object, the tenant's write queue). */
+const TIMEOUT_MS = 15000;
+const timeoutSignal = () => (typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT_MS) : undefined);
+
 async function oauthToken({ base, fetch, clientId, clientSecret, form }) {
   const body = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, ...form });
-  const r = await fetch(`${base}/oauth2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  const r = await fetch(`${base}/oauth2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, signal: timeoutSignal() });
   let j;
   try { j = await r.json(); } catch { throw new TTLockError('/oauth2/token', 90000, `HTTP ${r.status}, not JSON`); }
   if (j.errcode || !j.access_token) throw new TTLockError('/oauth2/token', j.errcode || 1, j.errmsg || j.error_description || j.error || 'no access_token');
@@ -107,8 +111,8 @@ class TTLock {
     );
     const url = method === 'GET' ? `${this.base}${path}?${qs}` : `${this.base}${path}`;
     const init = method === 'GET'
-      ? { method }
-      : { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: qs };
+      ? { method, signal: timeoutSignal() }
+      : { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: qs, signal: timeoutSignal() };
     const r = await this.fetch(url, init);
     let j;
     try { j = await r.json(); } catch { throw new TTLockError(path, 90000, `HTTP ${r.status}, not JSON`); }

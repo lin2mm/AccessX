@@ -150,7 +150,7 @@ function createVendorAccounts({
       if (r.status === 'needs_reconnect') throw new VendorUnavailableError('the TTLock account must be reconnected by an owner', { reason: 'needs_reconnect' });
       if (!mem || mem.sealed !== r.sealed) {
         let t;
-        try { t = await unseal(tenantId, r.sealed); } catch { throw new VendorUnavailableError('stored TTLock tokens cannot be decrypted (was SECRETS_KEY changed?)', { reason: 'needs_reconnect' }); }
+        try { t = await unseal(tenantId, r.sealed); } catch (error) { throw new VendorUnavailableError(`stored TTLock tokens cannot be decrypted: ${error.message}`, { reason: 'needs_reconnect' }); }
         mem = { sealed: r.sealed, ...t, expiresAt: Date.parse(r.token_expires_at) };
       }
       return r;
@@ -183,10 +183,24 @@ function createVendorAccounts({
       const sealed = await seal(tenantId, { accessToken: t.accessToken, refreshToken: t.refreshToken || mem.refreshToken, clientSecret: mem.clientSecret });
       const at = new Date(now()).toISOString();
       // Compare-and-swap on the sealed blob: never overwrite a newer token.
-      await store.tenant(tenantId).unit()
-        .raw("UPDATE vendor_accounts SET sealed = ?, token_expires_at = ?, status = 'connected', last_error = NULL, updated_at = ? WHERE tenant_id = ? AND sealed = ?",
-          [sealed, new Date(t.expiresAt).toISOString(), at, tenantId, r.sealed])
-        .audit('vendor.token_refreshed', `ttlock uid=${r.account_uid} expires=${new Date(t.expiresAt).toISOString().slice(0, 10)}`, 'system').commit();
+      let expect = r.sealed;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const u = store.tenant(tenantId).unit()
+          .raw("UPDATE vendor_accounts SET sealed = ?, token_expires_at = ?, status = 'connected', last_error = NULL, updated_at = ? WHERE tenant_id = ? AND sealed = ?",
+            [sealed, new Date(t.expiresAt).toISOString(), at, tenantId, expect]);
+        if (!attempt) u.audit('vendor.token_refreshed', `ttlock uid=${r.account_uid} expires=${new Date(t.expiresAt).toISOString().slice(0, 10)}`, 'system');
+        await u.commit();
+        const now2 = await row(tenantId);
+        if (!now2 || now2.sealed === sealed) break;
+        // The row changed under us. If it is the *old* pair re-sealed (SECRETS_KEY
+        // rotation), our refresh already consumed that refresh token: write ours
+        // over it or the account is dead at the next refresh. Anything else is
+        // genuinely newer (another refresh, a reconnect) and wins.
+        let stored;
+        try { stored = await unseal(tenantId, now2.sealed); } catch { break; }
+        if (stored.refreshToken !== mem.refreshToken) break;
+        expect = now2.sealed;
+      }
       await load();
     };
     // Single-flight inside this instance: parallel requests share one refresh.

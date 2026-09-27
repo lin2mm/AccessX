@@ -5,7 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 
 async function boot(env = {}) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'accessx-'));
+  // Pass DATA_DIR to restart on an existing database (e.g. with another
+  // SECRETS_KEY); that directory is then left in place on close().
+  const ownDir = !env.DATA_DIR;
+  const dataDir = env.DATA_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'accessx-'));
   const saved = { ...process.env };
   for (const key of ['ADMIN_TOKEN', 'AUTH_OPEN_READS', 'OPERATORS', 'TTLOCK_CLIENT_ID', 'PLATFORM_TOKEN']) delete process.env[key];
   Object.assign(process.env, { DATA_DIR: dataDir, ...env });
@@ -37,7 +40,7 @@ async function boot(env = {}) {
     dataDir,
     close: () => new Promise(resolve => server.close(() => {
       mod.store.sql.close();
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      if (ownDir) fs.rmSync(dataDir, { recursive: true, force: true });
       resolve();
     })),
   };

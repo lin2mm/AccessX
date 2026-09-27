@@ -21,6 +21,7 @@ const { operatorStatement } = require('./store/repo');
 const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
 const { createOidcClient, randomB64url } = require('./oidc-core');
 const { encryptSecret, decryptSecret } = require('./secrets-core');
+const { createSecretsRotation } = require('./secrets-rotation');
 const { revocationReport } = require('./reports-core');
 const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
 const { seedTenant } = require('./store/bootstrap');
@@ -1121,6 +1122,17 @@ function createApi({
     return { tenant: { id, name }, owner: { id: op.id, name: ownerName, token } };
   });
 
+  // --- platform: SECRETS_KEY rotation ------------------------------------
+  // Deployment-wide (all tenants), so platform-only. Prepend the new key to
+  // SECRETS_KEY ("new,old"), deploy, POST reseal, drop the old key once GET
+  // reports onOldKeys = 0.
+  const rotation = () => {
+    if (!secretsKey) throw new HttpError(503, 'SECRETS_KEY is not configured', { reason: 'secrets_key_missing' });
+    return createSecretsRotation({ store, secretsKey });
+  };
+  route('GET', /^\/api\/platform\/secrets$/, async () => rotation().status());
+  route('POST', /^\/api\/platform\/secrets\/reseal$/, async () => rotation().reseal({ actor: 'platform' }));
+
   /* ---------------------------------------------------------------- */
   /* Copilot (deterministic router; the tools are what an LLM would call) */
   /* ---------------------------------------------------------------- */
@@ -1433,10 +1445,14 @@ function createApi({
       if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
       if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
       if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError')) return { status: error.status, body: { ok: false, error: error.message } };
-      if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' } };
+      if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' }, headers: { 'retry-after': '2' } };
       if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
       // Lock vendor unusable (token revoked, TTLock down): say why, never a 500 or an empty fleet.
-      if (error && error.status === 503) return { status: 503, body: { ok: false, error: error.message, reason: error.reason || 'unavailable' } };
+      // Transient (TTLock down, rate limit) → Retry-After; needs_reconnect / missing key need a human, not a retry.
+      if (error && error.status === 503) {
+        const reason = error.reason || 'unavailable';
+        return { status: 503, body: { ok: false, error: error.message, reason }, headers: reason === 'unavailable' ? { 'retry-after': '30' } : undefined };
+      }
       log('api error', error);
       return { status: 500, body: { ok: false, error: String((error && error.message) || error) } };
     }

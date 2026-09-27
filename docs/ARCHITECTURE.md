@@ -145,7 +145,12 @@ of the head hash held by someone else.
   a domain can be claimed by one tenant (**not DNS-verified yet**).
 - **Secrets** (`secrets-core.js`): AES-256-GCM with `SECRETS_KEY`, AAD =
   tenant + purpose, so ciphertexts cannot be moved between tenants.
-  Rotation = re-encrypt with a key id prefix (`v1.` today).
+  `SECRETS_KEY` is a keyring (`new,old`): ciphertexts are `v2.<kid>.…`
+  (kid = SHA-256 prefix of the key), legacy `v1.` values try each key.
+  `secrets-rotation.js` lists every sealed value and re-seals with
+  compare-and-set; a TTLock refresh that lands on a re-sealed copy of the
+  pair it just spent writes over it (otherwise the live refresh token would
+  be lost).
 - **SCIM** (`scim-core.js`): Users/Groups/discovery under `/scim/v2`,
   `r_provisioner` tokens only. The directory manages only people it created
   or adopted by email; `directory_status` is separate from the operator's
@@ -298,6 +303,18 @@ so throughput falls as a tenant grows (Node: 99 req/s at 300 people, 22 req/s
 at 2,000). The DO is the natural place for the next step — cache the snapshot
 in memory and invalidate it on its own commits — or targeted queries per
 route. Not needed for the 5–200-door target; revisit past ~10k people.
+
+## TTLock outages
+
+Every TTLock call has a 15 s timeout (a hung call would otherwise also hold
+the tenant's write queue in the Durable Object). Network errors, timeouts,
+gateway error pages and the call limit (30006) become `503` with
+`reason: "unavailable"` and `Retry-After: 30`; `needs_reconnect` and a missing
+`SECRETS_KEY` get no `Retry-After` because only a person can fix them.
+Suspensions and SCIM deactivations still succeed during an outage: the
+credential stays `active` (it is still on the lock), the failure is recorded,
+and the reconciler retries. A lost write race answers `409` with
+`Retry-After: 2` (SCIM included).
 
 ## TTLock token refresh across instances
 

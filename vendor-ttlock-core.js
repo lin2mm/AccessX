@@ -21,6 +21,18 @@ class NoGatewayError extends Error {
  * down, account disconnected). Surfaces as HTTP 503 with a reason the
  * owner can act on — never as a 500 or an empty door list.
  */
+/** Network failure, timeout, a gateway error page (not JSON) or TTLock's call limit: retry later. */
+function isTransient(error) {
+  if (!error) return false;
+  if (error.name === 'TimeoutError' || error.name === 'AbortError') return true;
+  if (error.name === 'TypeError' && /fetch/i.test(String(error.message))) return true; // Node "fetch failed", Workers "Network connection lost"
+  if (/network connection lost/i.test(String(error.message))) return true;
+  return error.errcode === 90000 || error.errcode === 30006;
+}
+const transientWhy = error => (error.errcode === 30006 ? 'call limit exceeded'
+  : error.errcode === 90000 ? 'bad gateway response'
+    : error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timed out' : 'network error');
+
 class VendorUnavailableError extends Error {
   constructor(message, { reason = 'unavailable', cause } = {}) {
     super(message);
@@ -72,6 +84,9 @@ function createCloudVendor(tt, { label = 'TTLock cloud', region = 'eu', cacheMs 
         if (onAuthFailure) await onAuthFailure(error);
         throw new VendorUnavailableError('TTLock rejected this account\'s authorization — an owner must reconnect the TTLock account', { reason: 'needs_reconnect', cause: error });
       }
+      if (isTransient(error)) {
+        throw new VendorUnavailableError(`TTLock is not reachable right now (${transientWhy(error)}); try again shortly`, { reason: 'unavailable', cause: error });
+      }
       throw error;
     }
   };
@@ -108,4 +123,4 @@ function createCloudVendor(tt, { label = 'TTLock cloud', region = 'eu', cacheMs 
   };
 }
 
-module.exports = { createCloudVendor, deletePasscodeIdempotent, NoGatewayError, VendorUnavailableError, mapLock };
+module.exports = { createCloudVendor, deletePasscodeIdempotent, NoGatewayError, VendorUnavailableError, mapLock, isTransient };

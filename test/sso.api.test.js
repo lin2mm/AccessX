@@ -49,7 +49,7 @@ test('SSO config: owner only, https enforced unless mock, secret sealed and neve
     assert.equal(ok.body.sso.hasClientSecret, true);
     assert.ok(!JSON.stringify(ok.body).includes('super-secret-value'));
     const stored = await ctx.server.store.tenantSettings('t_default');
-    assert.match(stored.sso.clientSecretEnc, /^v1\./);
+    assert.match(stored.sso.clientSecretEnc, /^v2\.[0-9a-f]{16}\./);
     assert.ok(!JSON.stringify(stored).includes('super-secret-value'), 'secret must be encrypted at rest');
     // Re-saving without a secret keeps the sealed one.
     const again = await ctx.call('PUT', '/api/sso', { token: OWNER, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'accessx-test', domains: ['riverside.example'] } });
