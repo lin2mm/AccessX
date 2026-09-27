@@ -137,7 +137,7 @@ function rowToVisit(r) {
 }
 
 /** Plain-text invitation with the codes. The codes are never stored; this is the only copy besides the screen. */
-function invitationEmail({ visit, hostName, siteName, doors, timeZone, tenantName }) {
+function invitationEmail({ visit, hostName, siteName, doors, timeZone, tenantName, checkoutUrl = null }) {
   const label = iso => policy.localParts(new Date(iso), timeZone).label;
   const long = Date.parse(visit.endAt) - Date.parse(visit.startAt) > 24 * HOUR;
   const lines = [
@@ -150,13 +150,14 @@ function invitationEmail({ visit, hostName, siteName, doors, timeZone, tenantNam
     ...(long ? [`Please use it for the first time by ${label(new Date(Date.parse(visit.startAt) + 24 * HOUR).toISOString())}; the lock cancels codes that are not used within 24 hours of their start.`] : []),
     'The code stops working automatically at the end time, or earlier if your visit is ended.',
     'Please do not share it.', '',
+    ...(checkoutUrl ? ['Leaving before the end time? Check out here and your code stops working:', checkoutUrl, ''] : []),
     '—', `${tenantName || 'AccessX'} · sent by AccessX`,
   ];
   return { subject: `Your door code for ${siteName || 'your visit'}`.slice(0, 200), text: lines.join('\n') };
 }
 
 /** SMS with the codes: short (one or two segments), no visitor name. */
-function invitationSms({ visit, siteName, doors, timeZone }) {
+function invitationSms({ visit, siteName, doors, timeZone, checkoutUrl = null }) {
   const label = iso => policy.localParts(new Date(iso), timeZone).label.replace(/ [A-Za-z_]+\/[A-Za-z_/]+$/, '');
   const long = Date.parse(visit.endAt) - Date.parse(visit.startAt) > 24 * HOUR;
   return [
@@ -164,6 +165,7 @@ function invitationSms({ visit, siteName, doors, timeZone }) {
     `valid ${label(visit.startAt)} to ${label(visit.endAt)} (local time).`,
     long ? `Use it first by ${label(new Date(Date.parse(visit.startAt) + 24 * HOUR).toISOString())}.` : '',
     'Enter it on the keypad, then the unlock key. Do not share.',
+    checkoutUrl ? `Leaving? ${checkoutUrl}` : '',
   ].filter(Boolean).join(' ');
 }
 

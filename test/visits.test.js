@@ -300,7 +300,7 @@ test('arrival: the first unlock with the visitor\'s code (TTLock callback) is re
   const mail = await provider(t, [200]);
   const { api } = await setup(t, { TTLOCK_NOTIFY_SECRET: NOTIFY, EMAIL_PROVIDER: 'resend', EMAIL_API_KEY: 're_k', EMAIL_FROM: 'desk@accessx.example', EMAIL_API_BASE: mail.base });
   const s = await api.call('GET', '/api/visits/settings', DESK);
-  assert.deepEqual(s.body.arrivals, { enabled: true, callback: true });
+  assert.deepEqual(s.body.arrivals, { enabled: true, callback: true, lastCallbackAt: null });
   const r = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ lockIds: [9001, 9003] }) });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const id = r.body.visit.id;
@@ -484,4 +484,108 @@ test('erasing a visitor deletes their arrival alert while it waits for the daily
   assert.ok((await rows())[0].message.includes(MARKER));
   await api.call('POST', `/api/visits/${v.body.visit.id}/erase`, { ...DESK, body: {} });
   assert.equal((await rows()).length, 0, 'the name left with the visit');
+});
+
+// ---- self check-out link ---------------------------------------------------------------
+const checkoutCall = (api, token, action) => fetch(`${api.base}/api/visit-checkout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, action }) })
+  .then(async r => ({ status: r.status, body: await r.json() }));
+
+test('self check-out: a link in the message (token in the fragment, only its hash stored) ends the visit and removes the codes; one use; no names or codes shown', async t => {
+  const tw = await twilio(t, [201]);
+  const { api } = await setup(t, { ...TWILIO_ENV(tw.base), PUBLIC_URL: 'https://doors.example' });
+  const in6h = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(Date.now() + 6 * 36e5)).replace(' ', 'T');
+  const v = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true, lockIds: [9001, 9004], startLocal: undefined, endLocal: in6h, acknowledgeScheduleGap: true }) });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.match(v.body.checkoutUrl, /^https:\/\/doors\.example\/checkout\.html#[A-Za-z0-9_-]{24}$/);
+  const token = v.body.checkoutUrl.split('#')[1];
+  assert.ok(tw.got[0].form.Body.endsWith(`Leaving? ${v.body.checkoutUrl}`));
+  const row = await api.server.store.sql.first('SELECT checkout_token_hash FROM visits WHERE id = ?', [v.body.visit.id]);
+  assert.ok(row.checkout_token_hash && !row.checkout_token_hash.includes(token), 'hash only');
+
+  for (const bad of ['', 'short', `${token}x`, token.replace(/.$/, c => (c === 'A' ? 'B' : 'A'))]) assert.equal((await checkoutCall(api, bad, 'status')).status, 404, bad);
+  const st = await checkoutCall(api, token, 'status');
+  assert.equal(st.status, 200);
+  assert.equal(st.body.site, 'Riverside Office');
+  assert.deepEqual(st.body.doors, ['Main Entrance', 'Cleaner Cupboard']);
+  assert.ok(!JSON.stringify(st.body).includes(MARKER) && !JSON.stringify(st.body).includes('Sarah'), 'no names');
+  assert.ok(!v.body.codes.some(c => JSON.stringify(st.body).includes(c.code)), 'no codes');
+
+  const out = await checkoutCall(api, token, 'checkout');
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.deepEqual(out.body.pendingAtDoor, ['Cleaner Cupboard'], 'no gateway: reception removes it');
+  const list = (await api.call('GET', '/api/visits', OWNER)).body.visits.find(x => x.id === v.body.visit.id);
+  assert.equal(list.status, 'checked_out');
+  assert.deepEqual(list.codes.map(c => c.status).sort(), ['pending_removal', 'revoked']);
+  const log = (await api.call('GET', '/api/audit?action=visit.checkout', OWNER)).body.log[0];
+  assert.equal(log.actor, 'visitor');
+  assert.match(log.detail, /\(self check-out\)/);
+  assert.equal((await checkoutCall(api, token, 'checkout')).status, 404, 'one use');
+  assert.equal((await api.server.store.sql.first('SELECT checkout_token_hash FROM visits WHERE id = ?', [v.body.visit.id])).checkout_token_hash, null);
+});
+
+test('self check-out: no link without PUBLIC_URL; the link dies with cancel, erase and the end of the visit', async t => {
+  const plain = await setup(t, {});
+  const v0 = await plain.api.call('POST', '/api/visits', { ...DESK, body: visitBody({ checkoutLink: true }) });
+  assert.equal(v0.body.checkoutUrl, null);
+
+  const { api } = await setup(t, { PUBLIC_URL: 'https://doors.example' });
+  const mk = async () => { const r = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ checkoutLink: true }) }); return { id: r.body.visit.id, token: r.body.checkoutUrl.split('#')[1] }; };
+  const a = await mk();
+  await api.call('POST', `/api/visits/${a.id}/cancel`, { ...DESK, body: {} });
+  assert.equal((await checkoutCall(api, a.token, 'status')).status, 404);
+  const b = await mk();
+  await api.call('POST', `/api/visits/${b.id}/erase`, { ...DESK, body: {} });
+  assert.equal((await checkoutCall(api, b.token, 'status')).status, 404);
+  const c = await mk();
+  await api.server.store.sql.batch([{ sql: 'UPDATE visits SET start_at = ?, end_at = ? WHERE id = ?', params: [new Date(Date.now() - 5 * 36e5).toISOString(), new Date(Date.now() - 2 * 36e5).toISOString(), c.id] }]);
+  assert.equal((await checkoutCall(api, c.token, 'status')).status, 404, 'ended more than an hour ago');
+});
+
+// ---- SMS metering, cap, test message, platform usage -----------------------------------
+test('SMS usage is metered per tenant and month (messages and billed segments); the monthly cap stops texts, not visits', async t => {
+  const tw = await twilio(t, [201]);
+  const { api } = await setup(t, { ...TWILIO_ENV(tw.base), SMS_MONTHLY_CAP: '2', PLATFORM_TOKEN: 'platform-token' });
+  const PLATFORM = { token: 'platform-token' };
+  assert.equal((await api.call('POST', '/api/visits/sms-test', { ...DESK, body: { to: '+447700900123' } })).status, 403, 'owner only');
+  assert.equal((await api.call('POST', '/api/visits/sms-test', { ...OWNER, body: { to: '0770' } })).status, 400);
+  const st = await api.call('POST', '/api/visits/sms-test', { ...OWNER, body: { to: '+44 7700 900123' } });
+  assert.equal(st.body.delivery, 'delivered');
+  assert.match(tw.got[0].form.Body, /^AccessX test message for /);
+  assert.deepEqual({ ...st.body.smsUsage, period: undefined }, { period: undefined, sent: 1, segments: 1, cap: 2 });
+  assert.equal((await api.call('GET', '/api/audit?action=visits.sms_test', OWNER)).body.log[0].detail, 'delivered');
+
+  const v1 = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true, lockIds: [9001, 9003] }) });
+  assert.equal(v1.body.delivery, 'texted');
+  const v2 = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true }) });
+  assert.equal(v2.status, 200, 'the visit is created');
+  assert.equal(v2.body.delivery, 'sms_failed');
+  assert.ok(v2.body.warnings.some(w => /2 text messages are used up/.test(w)), JSON.stringify(v2.body.warnings));
+  assert.equal(tw.got.length, 2, 'not sent');
+
+  const s = (await api.call('GET', '/api/visits/settings', DESK)).body.smsUsage;
+  assert.equal(s.sent, 2);
+  assert.ok(s.segments >= 2);
+
+  assert.equal((await api.call('GET', '/api/platform/usage', OWNER)).status, 401, 'platform only');
+  const u = await api.call('GET', '/api/platform/usage', PLATFORM);
+  assert.equal(u.status, 200, JSON.stringify(u.body));
+  assert.deepEqual(u.body.tenants.find(x => x.tenantId === 't_default'), { tenantId: 't_default', name: u.body.tenants.find(x => x.tenantId === 't_default').name, sms: 2, smsSegments: s.segments, smsMonthlyCap: 2 });
+  assert.equal((await api.call('GET', '/api/platform/usage?period=2026-13', PLATFORM)).status, 400);
+  assert.equal((await api.call('PUT', '/api/platform/tenants/t_default/limits', { ...PLATFORM, body: { smsMonthlyCap: -1 } })).status, 400);
+  assert.equal((await api.call('PUT', '/api/platform/tenants/t_nope/limits', { ...PLATFORM, body: { smsMonthlyCap: 5 } })).status, 404);
+  assert.equal((await api.call('PUT', '/api/platform/tenants/t_default/limits', { ...PLATFORM, body: { smsMonthlyCap: 10 } })).status, 200);
+  assert.equal((await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true }) })).body.delivery, 'texted', 'raised by the platform');
+  assert.match((await api.call('GET', '/api/audit?action=tenant.limits', OWNER)).body.log[0].detail, /smsMonthlyCap=10/);
+});
+
+test('SMS segments: GSM-7 vs Unicode', () => {
+  const { segments } = require('../sms-core');
+  assert.equal(segments('a'.repeat(160)), 1);
+  assert.equal(segments('a'.repeat(161)), 2);
+  assert.equal(segments('a'.repeat(306)), 2);
+  assert.equal(segments('a'.repeat(307)), 3);
+  assert.equal(segments('€'.repeat(80)), 1, 'extension chars count double');
+  assert.equal(segments('€'.repeat(81)), 2);
+  assert.equal(segments('访'.repeat(70)), 1);
+  assert.equal(segments('访'.repeat(71)), 2);
 });

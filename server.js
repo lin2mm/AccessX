@@ -99,6 +99,8 @@ const api = createApi({
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
   ttlockNotifySecret: process.env.TTLOCK_NOTIFY_SECRET || '',
+  publicUrl: process.env.PUBLIC_URL || '',
+  smsMonthlyCap: Number(process.env.SMS_MONTHLY_CAP || 0),
   // The bundled mock IdP runs on plain http; real issuers must be https.
   allowHttpIssuers: process.env.MOCK_IDP === '1',
 });
@@ -131,6 +133,16 @@ app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, lim
   } catch (error) {
     console.error('ttlock notify failed', error);
     res.status(500).type('text/plain').send('error');
+  }
+});
+// Visitor self check-out: no login; the token (in the body) is the only credential.
+app.post('/api/visit-checkout', express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
+  try {
+    const out = await api.visitCheckoutPublic(req.body || {});
+    res.status(out.status).json(out.body);
+  } catch (error) {
+    console.error('visit checkout failed', error);
+    res.status(502).json({ ok: false, error: 'Check-out failed. Please try again, or see reception.' });
   }
 });
 app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));

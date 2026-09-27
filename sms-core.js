@@ -67,4 +67,18 @@ function createSms({ config = null, fetchFn } = {}) {
   };
 }
 
-module.exports = { createSms, smsConfigFromEnv, smsRequest, normalizePhone };
+// GSM 03.38 basic set (+ extension chars count double). Anything else → UCS-2.
+const GSM = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà';
+const GSM_EXT = '^{}\\[~]|€\f';
+/** Billable segments of a message: 160 / 153 per part (GSM-7), 70 / 67 (UCS-2). */
+function segments(text) {
+  const chars = [...String(text)];
+  if (chars.every(c => GSM.includes(c) || GSM_EXT.includes(c))) {
+    const len = chars.reduce((n, c) => n + (GSM_EXT.includes(c) ? 2 : 1), 0);
+    return len <= 160 ? 1 : Math.ceil(len / 153);
+  }
+  const units = String(text).length; // UTF-16 code units
+  return units <= 70 ? 1 : Math.ceil(units / 67);
+}
+
+module.exports = { createSms, smsConfigFromEnv, smsRequest, normalizePhone, segments };

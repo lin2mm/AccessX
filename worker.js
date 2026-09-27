@@ -42,7 +42,7 @@ async function appState(sql, key) {
  */
 let cached = null;
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -88,9 +88,9 @@ function apiFor(env) {
   });
   const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
   const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
-  const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
+  const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
   const sms = createSms({ config: smsConfigFromEnv(env) });
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -156,13 +156,33 @@ async function handleTtlockNotify(request, env, url) {
   const params = new URLSearchParams(text);
   const form = { records: params.getAll('records'), lockId: params.get('lockId') };
   const api = apiFor(env);
-  const dispatch = env.TENANT_WRITER ? async (tenantId, match) => {
+  const out = await api.ttlockNotify({ secret: decodeURIComponent(url.pathname.slice('/api/ttlock/notify/'.length)), form }, { dispatch: jobDispatcher(env) });
+  return new Response(out.status === 200 ? 'success' : 'not found', { status: out.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
+}
+
+/** Writes that arrive without a tenant session run in that tenant's Durable Object. */
+function jobDispatcher(env) {
+  return env.TENANT_WRITER ? async (tenantId, job) => {
     const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
-    const res = await stub.fetch(new Request('https://tenant-writer/__tenant/arrival', { method: 'POST', headers: { 'x-accessx-tenant': tenantId, 'content-type': 'application/json' }, body: JSON.stringify(match) }));
+    const res = await stub.fetch(new Request('https://tenant-writer/__tenant/job', { method: 'POST', headers: { 'x-accessx-tenant': tenantId, 'content-type': 'application/json' }, body: JSON.stringify(job) }));
     return res.json();
   } : null;
-  const out = await api.ttlockNotify({ secret: decodeURIComponent(url.pathname.slice('/api/ttlock/notify/'.length)), form }, { dispatch });
-  return new Response(out.status === 200 ? 'success' : 'not found', { status: out.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
+}
+
+/** Visitor self check-out (no login; the token in the body is the credential). */
+async function handleVisitCheckout(request, env) {
+  const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  const text = await request.text();
+  if (text.length > 4096) return json(413, { ok: false, error: 'too large' });
+  let body;
+  try { body = JSON.parse(text || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON' }); }
+  try {
+    const out = await apiFor(env).visitCheckoutPublic(body, { dispatch: jobDispatcher(env) });
+    return json(out.status, out.body);
+  } catch (error) {
+    console.error('visit checkout failed', error);
+    return json(502, { ok: false, error: 'Check-out failed. Please try again, or see reception.' });
+  }
 }
 
 /**
@@ -181,10 +201,11 @@ export class TenantWriter {
     // Scheduled work for this tenant (worker.js scheduled()). Only the front
     // Worker reaches a DO, and it forwards nothing but /api/* and /scim/*,
     // so this path cannot be called from outside.
-    if (new URL(request.url).pathname === '/__tenant/arrival') {
+    if (new URL(request.url).pathname === '/__tenant/job') {
+      // Arrival, lock alarm or visitor check-out for this tenant (see jobDispatcher).
       const tenantId = request.headers.get('x-accessx-tenant');
-      const match = await request.json();
-      const out = await this.queue.run('tenant', () => apiFor(this.env).recordArrival(tenantId, match));
+      const job = await request.json();
+      const out = await this.queue.run('tenant', () => apiFor(this.env).runTenantJob(tenantId, job));
       return Response.json(out);
     }
     if (new URL(request.url).pathname === '/__tenant/cron') {
@@ -212,6 +233,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
+    if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handleVisitCheckout(request, env);
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
     return env.ASSETS.fetch(request);
   },

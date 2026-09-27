@@ -71,6 +71,8 @@ const ROUTES = [
   ['POST', /^\/api\/tenants$/, PLATFORM],
   ['GET', /^\/api\/platform\/secrets$/, PLATFORM],
   ['POST', /^\/api\/platform\/secrets\/reseal$/, PLATFORM],
+  ['GET', /^\/api\/platform\/usage$/, PLATFORM],
+  ['PUT', /^\/api\/platform\/tenants\/[^/]+\/limits$/, PLATFORM],
   ['POST', /^\/api\/doors\/\d+\/unlock$/, 'door.unlock'],
   ['POST', /^\/api\/users\/[^/]+\/(suspend|unsuspend)$/, 'user.manage'],
   ['GET', /^\/api\/users\/[^/]+\/export$/, 'user.manage'],
@@ -86,6 +88,7 @@ const ROUTES = [
   ['POST', /^\/api\/visits$/, 'visitor.manage'],
   ['POST', /^\/api\/visits\/[^/]+\/(checkout|cancel|erase)$/, 'visitor.manage'],
   ['PUT', /^\/api\/visits\/settings$/, OWNER],
+  ['POST', /^\/api\/visits\/sms-test$/, OWNER],
   // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
   // the RBAC coverage gate fails for any route that falls through to the default.
   ['GET', /^\/api\/sso$/, OWNER], ['PUT', /^\/api\/sso$/, OWNER], ['DELETE', /^\/api\/sso$/, OWNER],

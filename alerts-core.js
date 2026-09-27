@@ -7,6 +7,10 @@
  *   break_glass         someone signed in with a token while SSO is enforced
  *   vendor_needs_reconnect  TTLock refused the account's tokens: revocations
  *                       stop until an owner reconnects
+ *   visitor_arrived     (opt-in, names a person) a visitor used their code
+ *   lock_alarm          a lock reported tamper, a forced opening or a keypad
+ *                       locked after repeated wrong codes
+ *   door_left_open      (opt-in) a door sensor reported the door left open
  *
  * Formats: Slack incoming webhook ({text}), Microsoft Teams Workflows
  * ("Post to a channel when a webhook request is received": an Adaptive Card
@@ -39,19 +43,27 @@ const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { checkWebhookUrl } = require('./audit-ops');
 const policy = require('./policy-core');
 
-const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived'];
+const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived', 'lock_alarm', 'door_left_open'];
 // Informational, and they name people: channels get these only when an owner turns them on.
-const OPT_IN_EVENTS = ['visitor_arrived'];
+const OPT_IN_EVENTS = ['visitor_arrived', 'door_left_open'];
 const DEFAULT_EVENTS = EVENTS.filter(e => !OPT_IN_EVENTS.includes(e));
+// Events that existed before owners' choices were recorded with `eventsSeen`.
+// A default-on event added later is enabled for an owner who saved a list
+// before it existed (they never had the chance to untick it).
+const LEGACY_SEEN = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived'];
+const effectiveEvents = a => (a.events
+  ? [...new Set([...a.events, ...DEFAULT_EVENTS.filter(e => !(a.eventsSeen || LEGACY_SEEN).includes(e))])].filter(e => EVENTS.includes(e))
+  : DEFAULT_EVENTS);
 const FORMATS = ['slack', 'teams', 'json'];
 // Non-urgent events that may wait for the daily summary. Never: break_glass,
 // revoke_failed, vendor_needs_reconnect (someone must act now).
-const DIGEST_EVENTS = ['approval_requested', 'removal_overdue', 'visitor_arrived'];
+const DIGEST_EVENTS = ['approval_requested', 'removal_overdue', 'visitor_arrived', 'door_left_open'];
 const DIGEST_MAX_LINES = 40;
 const EVENT_TITLES = {
   approval_requested: 'Approvals requested', removal_overdue: 'Codes still on offline locks',
   revoke_failed: 'Revocations failed', break_glass: 'Break-glass sign-ins',
   vendor_needs_reconnect: 'TTLock accounts to reconnect', visitor_arrived: 'Visitors arrived',
+  lock_alarm: 'Lock alarms', door_left_open: 'Doors left open',
 };
 
 /** Next occurrence of `hour`:00 in `timeZone` strictly after `nowMs` (DST-safe). */
@@ -142,7 +154,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     return {
       configured: Boolean(a.sealedUrl || (emailCfg && (a.emails || []).length)), format: a.format || null, host: a.host || null,
       emails: a.emails || [], emailAvailable: Boolean(emailCfg), emailProvider: emailCfg ? emailCfg.provider : null,
-      events: a.events || DEFAULT_EVENTS, slaHours: a.slaHours || DEFAULT_SLA_HOURS,
+      events: effectiveEvents(a), slaHours: a.slaHours || DEFAULT_SLA_HOURS,
       lastDelivery: a.lastDelivery || null, lastEmailDelivery: a.lastEmailDelivery || null,
       retrying: { count: outbox.n || 0, nextAt: outbox.next || null },
       digest: a.digest || null, digestEvents: DIGEST_EVENTS,
@@ -165,6 +177,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     if ('events' in body) {
       if (!Array.isArray(body.events) || body.events.some(e => !EVENTS.includes(e))) throw new AlertsError(400, `events must be a list drawn from ${EVENTS.join(', ')}`);
       next.events = [...new Set(body.events)];
+      next.eventsSeen = EVENTS;
     }
     if ('digest' in body) {
       const d = body.digest;
@@ -203,7 +216,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     await store.tenant(tenantId).unit()
       .raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...all, alerts: next }), tenantId])
       // Recipients are personal data: the audit carries their number only.
-      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${(next.events || DEFAULT_EVENTS).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}${next.digest ? ` digest=${next.digest.events.join(',')}@${String(next.digest.hour).padStart(2, '0')}:00 ${next.digest.timeZone}` : ''}`, actor)
+      .audit('alerts.settings', `webhook=${next.host || 'none'} format=${next.format || '-'} emails=${(next.emails || []).length} events=${effectiveEvents(next).join(',')} slaHours=${next.slaHours || DEFAULT_SLA_HOURS}${next.digest ? ` digest=${next.digest.events.join(',')}@${String(next.digest.hour).padStart(2, '0')}:00 ${next.digest.timeZone}` : ''}`, actor)
       .commit();
     return settings(tenantId);
   }
@@ -265,7 +278,7 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
       const a = await read(tenantId);
       const channels = channelsOf(a);
       if (!channels.length) return 'skipped: no channel';
-      if (!force && !internal && !(a.events || DEFAULT_EVENTS).includes(event)) return 'skipped: event disabled';
+      if (!force && !internal && !effectiveEvents(a).includes(event)) return 'skipped: event disabled';
       if (channels.includes('webhook') && !secretsKey) return 'skipped: SECRETS_KEY missing';
       const id = uid();
       const at = iso(now());

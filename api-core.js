@@ -14,6 +14,7 @@ const rbac = require('./rbac-core');
 const policy = require('./policy-core');
 const creds = require('./credentials-core');
 const visitors = require('./visitors-core');
+const lockEvents = require('./lock-events-core');
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -22,6 +23,7 @@ const { operatorStatement } = require('./store/repo');
 const { sessionCookie, clearSessionCookies, flowCookie, flowStateFrom } = require('./cookies');
 const { createOidcClient, randomB64url } = require('./oidc-core');
 const { encryptSecret, decryptSecret, codeMac, codeMacs } = require('./secrets-core');
+const { segments: smsSegments, normalizePhone } = require('./sms-core');
 const { createSecretsRotation } = require('./secrets-rotation');
 const { revocationReport } = require('./reports-core');
 const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
@@ -111,7 +113,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null,
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -639,6 +641,26 @@ function createApi({
   // review, reconcile, removal SLA and the revocation report cover them.
   const emailAvailable = () => Boolean(alerts && alerts.emailAvailable);
   const smsAvailable = () => Boolean(sms && sms.available);
+  // --- metered SMS (billing + monthly cap) ---
+  const period = () => new Date().toISOString().slice(0, 7);
+  async function smsUsage(tenantId) {
+    const rows = await store.sql.all("SELECT kind, n FROM usage_counters WHERE tenant_id = ? AND period = ? AND kind IN ('sms', 'sms_segments')", [tenantId, period()]);
+    const limits = (((await store.tenantSettings(tenantId)) || {}).limits) || {};
+    const cap = Number.isInteger(limits.smsMonthlyCap) ? limits.smsMonthlyCap : smsMonthlyCap;
+    const n = k => Number((rows.find(r => r.kind === k) || {}).n || 0);
+    return { period: period(), sent: n('sms'), segments: n('sms_segments'), cap: cap || null };
+  }
+  /** One metered text (never queued). → 'delivered' | 'failed: …' | 'limit: …' */
+  async function sendSms(tenantId, to, text) {
+    const use = await smsUsage(tenantId);
+    if (use.cap && use.sent >= use.cap) return `limit: this month's ${use.cap} text messages are used up`;
+    const result = await sms.send(to, text);
+    if (result === 'delivered') {
+      const up = 'INSERT INTO usage_counters (tenant_id, period, kind, n) VALUES (?, ?, ?, ?) ON CONFLICT (tenant_id, period, kind) DO UPDATE SET n = n + excluded.n';
+      await store.sql.batch([{ sql: up, params: [tenantId, use.period, 'sms', 1] }, { sql: up, params: [tenantId, use.period, 'sms_segments', smsSegments(text)] }]).catch(error => log('sms usage', tenantId, error));
+    }
+    return result;
+  }
   const doorName = (locks, id) => { const l = locks.find(x => Number(x.lockId) === Number(id)); return (l && l.lockAlias) || `Lock ${id}`; };
   const visitVisible = (ctx, v) => ctx.scope.all || v.lockIds.every(l => ctx.scope.lock(l));
   const visitView = (snap, v, now = Date.now()) => {
@@ -678,10 +700,29 @@ function createApi({
   });
 
   // Arrival detection needs SECRETS_KEY (code fingerprints); the TTLock callback is optional (else polling).
-  const arrivalInfo = () => ({ enabled: Boolean(secretsKey), callback: Boolean(ttlockNotifySecret) });
+  // lastCallbackAt: when TTLock last called back about one of this tenant's doors (pilot check).
+  const arrivalInfo = async tenantId => ({
+    enabled: Boolean(secretsKey), callback: Boolean(ttlockNotifySecret),
+    lastCallbackAt: (((await store.tenantSettings(tenantId)) || {}).ttlockCallbackAt) || null,
+  });
+  const deliveryInfo = async tenantId => ({
+    emailAvailable: emailAvailable(), smsAvailable: smsAvailable(), smsUsage: smsAvailable() ? await smsUsage(tenantId) : null,
+    checkoutLinks: Boolean(publicUrl), limits: visitors.LIMITS, arrivals: await arrivalInfo(tenantId),
+  });
   route('GET', /^\/api\/visits\/settings$/, async ctx => ({
-    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), smsAvailable: smsAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo(),
+    ...visitors.settingsOf((await ctx.snap()).settings), ...(await deliveryInfo(ctx.tenantId)),
   }));
+
+  // Pilot check: one metered text to a number the owner chooses.
+  route('POST', /^\/api\/visits\/sms-test$/, async ctx => {
+    if (!smsAvailable()) throw new HttpError(400, 'SMS is not configured on this server (SMS_PROVIDER, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, SMS_FROM)');
+    const to = normalizePhone(ctx.body && ctx.body.to);
+    if (!to) throw new HttpError(400, 'to must be an international number, e.g. +44 7700 900123');
+    const snap = await ctx.snap();
+    const result = await sendSms(ctx.tenantId, to, `AccessX test message for ${(snap.tenant && snap.tenant.name) || 'your account'}: visitor codes by text work.`);
+    await ctx.t.unit().audit('visits.sms_test', result === 'delivered' ? 'delivered' : result.slice(0, 120), ctx.actor).commit();
+    return { delivery: result, smsUsage: await smsUsage(ctx.tenantId) };
+  });
 
   route('PUT', /^\/api\/visits\/settings$/, async ctx => {
     const v = visitors.validateSettings(ctx.body || {});
@@ -690,7 +731,7 @@ function createApi({
     // json_set: only this key, a concurrent SSO/alerts change is never overwritten.
     await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.visitors', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
       .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays} notifyHost=${next.notifyHost}`, ctx.actor).commit();
-    return { ...next, emailAvailable: emailAvailable(), smsAvailable: smsAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo() };
+    return { ...next, ...(await deliveryInfo(ctx.tenantId)) };
   });
 
   route('POST', /^\/api\/visits$/, async ctx => {
@@ -758,6 +799,14 @@ function createApi({
 
     const codes = created.map(({ lockId, out }) => ({ lockId, door: doorName(locks, lockId), code: String(out.keyboardPwd) }));
     const warnings = [...plan.warnings];
+    // Self check-out link (needs PUBLIC_URL): only a hash is stored; the token is in the URL fragment,
+    // which browsers never send to a server (no access logs, no Referer).
+    let checkoutUrl = null;
+    if (publicUrl && (body.sendCode === true || body.sendSms === true || body.checkoutLink === true)) {
+      const token = randomB64url(18);
+      await store.sql.batch([{ sql: 'UPDATE visits SET checkout_token_hash = ? WHERE tenant_id = ? AND id = ?', params: [sha256Hex(`visit-checkout|${token}`), ctx.tenantId, id] }]);
+      checkoutUrl = `${publicUrl.replace(/\/+$/, '')}/checkout.html#${token}`;
+    }
     // Sent only AFTER the codes are recorded; never queued (a queue would store the code).
     const site = snap.sites.find(x => x.id === v.siteId);
     const doorsWithCodes = codes.map(c => ({ name: c.door, code: c.code }));
@@ -767,7 +816,7 @@ function createApi({
       if (!v.visitorEmail) warnings.push('no visitor email: hand the code over yourself');
       else if (!emailAvailable()) warnings.push('email is not configured on this server: hand the code over yourself');
       else {
-        const msg = visitors.invitationEmail({ visit: v, hostName: host.name || 'Your host', siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone, tenantName: snap.tenant && snap.tenant.name });
+        const msg = visitors.invitationEmail({ visit: v, hostName: host.name || 'Your host', siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone, tenantName: snap.tenant && snap.tenant.name, checkoutUrl });
         const result = await alerts.emailTo(v.visitorEmail, msg, `visit-${id}`);
         outcomes.push(result === 'delivered' ? 'emailed' : 'email_failed');
         events.push(result === 'delivered' ? ['visit.code_emailed', id] : ['visit.email_failed', `${id}: ${result}`]);
@@ -778,7 +827,7 @@ function createApi({
       if (!v.visitorPhone) warnings.push('no visitor phone: hand the code over yourself');
       else if (!smsAvailable()) warnings.push('SMS is not configured on this server: hand the code over yourself');
       else {
-        const result = await sms.send(v.visitorPhone, visitors.invitationSms({ visit: v, siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone }));
+        const result = await sendSms(ctx.tenantId, v.visitorPhone, visitors.invitationSms({ visit: v, siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone, checkoutUrl }));
         outcomes.push(result === 'delivered' ? 'texted' : 'sms_failed');
         events.push(result === 'delivered' ? ['visit.code_texted', id] : ['visit.sms_failed', `${id}: ${result}`]);
         if (result !== 'delivered') warnings.push(`the text message could not be sent (${result}): hand the code over yourself`);
@@ -792,30 +841,34 @@ function createApi({
     }
     const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null };
     // The codes are returned exactly once and never stored.
-    return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings };
+    return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings, checkoutUrl };
   });
 
-  route('POST', /^\/api\/visits\/([^/]+)\/(checkout|cancel)$/, async (ctx, [id, verb]) => {
-    const v = await loadVisit(ctx, id);
-    if (v.status !== 'scheduled') throw new HttpError(409, `visit is already ${v.status.replace('_', ' ')}`);
-    const snap = await ctx.snap();
-    const locks = await ctx.vendor.listLocks();
+  /**
+   * End a visit: delete its codes where the door has a gateway, mark the rest
+   * for removal at the lock. Shared by reception (route) and the visitor's own
+   * check-out link. Throws the vendor error after keeping what worked.
+   */
+  async function endVisit({ t, vendor, tenantId, actor }, v, verb) {
+    const id = v.id;
+    const snap = await t.snapshot();
+    const locks = await vendor.listLocks();
     const at = new Date().toISOString();
     const reason = verb === 'cancel' ? 'visit cancelled' : 'visitor checked out';
-    const uow = ctx.t.unit();
+    const uow = t.unit();
     const stillValid = [];
     let failure = null;
     for (const cred of snap.credentials.filter(c => c.visitId === id && c.status === 'active')) {
       const lock = locks.find(l => Number(l.lockId) === Number(cred.lockId));
       if (lock && lock.hasGateway) {
         try {
-          if (cred.vendorRef) await ctx.vendor.deletePasscode(cred.lockId, cred.vendorRef);
+          if (cred.vendorRef) await vendor.deletePasscode(cred.lockId, cred.vendorRef);
         } catch (error) { failure = failure || error; continue; }
-        uow.update('credentials', cred.id, { status: 'revoked', revokedAt: at, revokedBy: ctx.actor, revokeReason: reason })
-          .audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}`, ctx.actor);
+        uow.update('credentials', cred.id, { status: 'revoked', revokedAt: at, revokedBy: actor, revokeReason: reason })
+          .audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}`, actor);
       } else {
-        uow.update('credentials', cred.id, { status: 'pending_removal', revokedAt: at, revokedBy: ctx.actor, revokeReason: reason })
-          .audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}: no gateway, on-site removal required`, ctx.actor);
+        uow.update('credentials', cred.id, { status: 'pending_removal', revokedAt: at, revokedBy: actor, revokeReason: reason })
+          .audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}: no gateway, on-site removal required`, actor);
         stillValid.push({ credentialId: cred.id, lockId: cred.lockId, door: doorName(locks, cred.lockId), until: cred.endAt });
       }
     }
@@ -825,8 +878,15 @@ function createApi({
       throw failure;
     }
     const status = verb === 'cancel' ? 'cancelled' : 'checked_out';
-    await uow.raw("UPDATE visits SET status = ?, ended_at = ?, ended_by = ? WHERE tenant_id = ? AND id = ? AND status = 'scheduled'", [status, at, ctx.actor, ctx.tenantId, id])
-      .audit(`visit.${verb}`, `${id}${stillValid.length ? ` still valid on locks ${stillValid.map(s => s.lockId).join(',')} until removed on site` : ''}`, ctx.actor).commit();
+    await uow.raw("UPDATE visits SET status = ?, ended_at = ?, ended_by = ?, checkout_token_hash = NULL WHERE tenant_id = ? AND id = ? AND status = 'scheduled'", [status, at, actor, tenantId, id])
+      .audit(`visit.${verb}`, `${id}${actor === 'visitor' ? ' (self check-out)' : ''}${stillValid.length ? ` still valid on locks ${stillValid.map(s => s.lockId).join(',')} until removed on site` : ''}`, actor).commit();
+    return { status, at, stillValid };
+  }
+
+  route('POST', /^\/api\/visits\/([^/]+)\/(checkout|cancel)$/, async (ctx, [id, verb]) => {
+    const v = await loadVisit(ctx, id);
+    if (v.status !== 'scheduled') throw new HttpError(409, `visit is already ${v.status.replace('_', ' ')}`);
+    const { status, at, stillValid } = await endVisit({ t: ctx.t, vendor: ctx.vendor, tenantId: ctx.tenantId, actor: ctx.actor }, v, verb);
     const after = await ctx.t.snapshot();
     return {
       visit: visitView(after, { ...v, status, endedAt: at, endedBy: ctx.actor }),
@@ -835,12 +895,60 @@ function createApi({
     };
   });
 
+  // --- visitor self check-out (public, token-only) -------------------------------
+  const CHECKOUT_GRACE_MS = 3600e3;
+  const tokenHash = token => sha256Hex(`visit-checkout|${token}`);
+  const validToken = token => typeof token === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(token);
+
+  async function visitByToken(token) {
+    if (!validToken(token)) return null;
+    const row = await store.sql.first("SELECT * FROM visits WHERE checkout_token_hash = ? AND status = 'scheduled'", [tokenHash(token)]);
+    if (!row || Date.now() > Date.parse(row.end_at) + CHECKOUT_GRACE_MS) return null;
+    return row;
+  }
+
+  /** Inside the tenant's queue. Re-checks the token: the row may have changed since the lookup. */
+  async function visitorCheckout(tenantId, job) {
+    const row = await visitByToken(job.token);
+    if (!row || row.tenant_id !== tenantId) return { ok: false, gone: true };
+    const t = store.tenant(tenantId);
+    const out = await endVisit({ t, vendor: await resolveVendor(tenantId), tenantId, actor: 'visitor' }, visitors.rowToVisit(row), 'checkout');
+    return { ok: true, status: out.status, pendingAtDoor: out.stillValid.map(s => s.door) };
+  }
+
+  /**
+   * POST /api/visit-checkout {token, action: 'status' | 'checkout'} — no login.
+   * Can only end a visit (remove access), never show a code or a name.
+   */
+  async function visitCheckoutPublic(body, { dispatch = null } = {}) {
+    const gone = { status: 404, body: { ok: false, error: 'This link is no longer valid. If you are still on site, please see reception.' } };
+    const row = await visitByToken(body && body.token);
+    if (!row) return gone;
+    const tenantId = row.tenant_id;
+    if (body.action === 'checkout') {
+      const job = { type: 'checkout', token: body.token };
+      const r = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+      if (!r || !r.ok) return gone;
+      return { status: 200, body: { ok: true, checkedOut: true, pendingAtDoor: r.pendingAtDoor || [] } };
+    }
+    const snap = await store.tenant(tenantId).snapshot();
+    const v = visitors.rowToVisit(row);
+    const tz = policy.siteTimeZone(snap, v.siteId);
+    const site = snap.sites.find(x => x.id === v.siteId);
+    const locks = await (await resolveVendor(tenantId)).listLocks().catch(() => []);
+    const label = iso => policy.localParts(new Date(iso), tz).label;
+    return { status: 200, body: {
+      ok: true, site: site ? site.name : null, doors: v.lockIds.map(l => doorName(locks, l)),
+      from: label(v.startAt), until: label(v.endAt), arrived: Boolean(v.arrivedAt),
+    } };
+  }
+
   // Right to erasure: the visit (who/when/which doors, by id) stays; the person's details go.
   route('POST', /^\/api\/visits\/([^/]+)\/erase$/, async (ctx, [id]) => {
     const v = await loadVisit(ctx, id);
     if (v.erased) return { visit: visitView(await ctx.snap(), v) };
     const at = new Date().toISOString();
-    await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+    await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, checkout_token_hash = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
     if (alerts) await alerts.forget(ctx.tenantId, id);
     return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, visitorPhone: null, company: null, erased: true, erasedAt: at }) };
@@ -905,6 +1013,60 @@ function createApi({
     return out;
   }
 
+  // --- lock alarms ----------------------------------------------------------
+  /** Tenants whose door groups contain the lock (read-only; ownership is re-checked in the queue). */
+  async function tenantsForLock(lockId) {
+    const rows = await store.sql.all('SELECT DISTINCT tenant_id FROM door_groups WHERE EXISTS (SELECT 1 FROM json_each(door_groups.lock_ids) WHERE json_each.value = ?) LIMIT 20', [Number(lockId)]);
+    return rows.map(r => r.tenant_id);
+  }
+
+  /**
+   * Inside the tenant's write queue. The lock must be in the tenant's own TTLock
+   * fleet (a door group may name any number): otherwise another customer's
+   * alarm would leak. Stored once; announced at most once per lock and kind
+   * per 30 min; audited when announced (no personal data).
+   */
+  async function recordAlarm(tenantId, a) {
+    const type = lockEvents.KINDS[a.kind];
+    const lockId = Number(a.lockId);
+    const at = new Date(a.at).toISOString();
+    if (!type || !Number.isSafeInteger(lockId) || Number.isNaN(Date.parse(at))) return { recorded: false };
+    const locks = await (await resolveVendor(tenantId)).listLocks().catch(() => null);
+    const lock = (locks || []).find(l => Number(l.lockId) === lockId);
+    if (!lock) return { recorded: false, reason: 'not this tenant\'s lock' };
+    if (await store.sql.first('SELECT 1 AS x FROM lock_alarms WHERE tenant_id = ? AND lock_id = ? AND kind = ? AND record_at = ?', [tenantId, lockId, a.kind, at])) return { recorded: false, reason: 'duplicate' };
+    const recent = await store.sql.first('SELECT COUNT(*) AS n FROM lock_alarms WHERE tenant_id = ? AND lock_id = ? AND kind = ? AND alerted = 1 AND record_at > ? AND record_at <= ?',
+      [tenantId, lockId, a.kind, new Date(Date.parse(at) - lockEvents.THROTTLE_MS).toISOString(), at]);
+    const announce = !(recent && Number(recent.n));
+    const received = new Date().toISOString();
+    const late = Date.now() - Date.parse(at) > lockEvents.LATE_MS;
+    const source = a.source === 'records' ? 'records' : 'callback';
+    const u = store.tenant(tenantId).unit()
+      .raw('INSERT INTO lock_alarms (tenant_id, lock_id, kind, record_at, received_at, source, alerted) VALUES (?, ?, ?, ?, ?, ?, ?)', [tenantId, lockId, a.kind, at, received, source, announce ? 1 : 0]);
+    if (announce) u.audit('lock.alarm', `lock ${lockId} ${a.kind} at ${at} via ${source}${late ? ' (reported late)' : ''}`, 'system');
+    await u.commit();
+    const out = { recorded: true, announced: announce };
+    if (announce && alerts) {
+      const snap = await store.tenant(tenantId).snapshot();
+      const site = policy.siteForLock(snap, lockId);
+      const door = lock.lockAlias || String(lockId);
+      const tz = site ? policy.siteTimeZone(snap, site.id) : 'UTC';
+      out.alert = await alerts.send(tenantId, type.event, {
+        title: `${door}: ${type.label}`,
+        text: `${door}${site ? ` (${site.name})` : ''} reported: ${type.label}.${late ? ' Reported late: the lock has no gateway and uploaded its records when a phone synced.' : ''}${type.kind === 'keypad_locked' ? ' Someone entered several wrong codes.' : ''}`,
+        facts: [['Door', `${door} (${lockId})`], ['Time', policy.localParts(new Date(at), tz).label], ['Alarm', type.kind]], path: '/#log',
+      });
+    }
+    return out;
+  }
+
+  /** One write for a tenant, run in its queue (Node serialize / Worker Durable Object). */
+  async function runTenantJob(tenantId, job) {
+    if (job && job.type === 'alarm') return recordAlarm(tenantId, job);
+    if (job && job.type === 'checkout') return visitorCheckout(tenantId, job);
+    return recordArrival(tenantId, job);
+  }
+
   /**
    * TTLock "lock records notify" callback: POST <form> to /api/ttlock/notify/<secret>
    * with records=<JSON array>. One callback URL per TTLock developer app, so it
@@ -917,17 +1079,39 @@ function createApi({
     for (const chunk of [].concat((form && form.records) || [])) {
       try { list.push(...[].concat(typeof chunk === 'string' ? JSON.parse(chunk) : chunk)); } catch { /* not JSON: ignore */ }
     }
+    const run = (tenantId, job) => (dispatch ? dispatch(tenantId, job) : serialize(tenantId, () => runTenantJob(tenantId, job)));
     const matches = await matchArrivals(list);
     let recorded = 0;
     for (const m of matches) {
       try {
-        const r = dispatch ? await dispatch(m.tenantId, m) : await serialize(m.tenantId, () => recordArrival(m.tenantId, m));
+        const r = await run(m.tenantId, { ...m, type: 'arrival' });
         if (r && r.recorded) recorded++;
       } catch (error) {
         log('visitor arrival failed', m.tenantId, error);
       }
     }
-    return { status: 200, body: { ok: true, records: list.length, matched: matches.length, recorded } };
+    let alarms = 0;
+    const seen = new Set();
+    for (const a of lockEvents.alarmCandidates(list)) {
+      for (const tenantId of await tenantsForLock(a.lockId)) {
+        try {
+          const r = await run(tenantId, { ...a, type: 'alarm', source: 'callback' });
+          if (r && r.recorded) alarms++;
+        } catch (error) {
+          log('lock alarm failed', tenantId, error);
+        }
+      }
+    }
+    // Pilot diagnostics: when did this tenant last hear from TTLock? (No audit: not a change.)
+    for (const lockId of new Set(list.map(r => Number(r && r.lockId)).filter(Number.isSafeInteger))) {
+      for (const tenantId of await tenantsForLock(lockId)) {
+        if (seen.has(tenantId)) continue;
+        seen.add(tenantId);
+        await store.sql.batch([{ sql: "UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.ttlockCallbackAt', ?) WHERE id = ? AND COALESCE(json_extract(settings, '$.ttlockCallbackAt'), '') < ?",
+          params: [new Date().toISOString(), tenantId, new Date(Date.now() - 60e3).toISOString()] }]).catch(() => {});
+      }
+    }
+    return { status: 200, body: { ok: true, records: list.length, matched: matches.length, recorded, alarms } };
   }
 
   /** Fallback without the callback: read recent records of doors with a visitor on site now. */
@@ -947,6 +1131,8 @@ function createApi({
       for (const m of await matchArrivals(records, { tenantId })) {
         if ((await recordArrival(tenantId, { ...m, source: 'records' })).recorded) recorded++;
       }
+      // The records are here anyway: alarms on these doors too (all doors need the callback).
+      for (const a of lockEvents.alarmCandidates(records)) await recordAlarm(tenantId, { ...a, source: 'records' }).catch(error => log('lock alarm failed', tenantId, error));
     }
     return recorded;
   }
@@ -1491,6 +1677,34 @@ function createApi({
     return createSecretsRotation({ store, secretsKey });
   };
   route('GET', /^\/api\/platform\/secrets$/, async () => rotation().status());
+
+  // --- platform: metered usage (billing) and per-tenant limits -------------
+  route('GET', /^\/api\/platform\/usage$/, async ctx => {
+    const p = ctx.query.get('period') || period();
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) throw new HttpError(400, 'period must be YYYY-MM');
+    const rows = await store.sql.all('SELECT tenant_id, kind, n FROM usage_counters WHERE period = ?', [p]);
+    const tenants = await store.listTenants();
+    const out = [];
+    for (const t of tenants) {
+      const mine = rows.filter(r => r.tenant_id === t.id);
+      const limits = (((await store.tenantSettings(t.id)) || {}).limits) || {};
+      const n = k => Number((mine.find(r => r.kind === k) || {}).n || 0);
+      out.push({ tenantId: t.id, name: t.name, sms: n('sms'), smsSegments: n('sms_segments'), smsMonthlyCap: Number.isInteger(limits.smsMonthlyCap) ? limits.smsMonthlyCap : (smsMonthlyCap || null) });
+    }
+    return { period: p, tenants: out };
+  });
+  route('PUT', /^\/api\/platform\/tenants\/([^/]+)\/limits$/, async (ctx, [tenantId]) => {
+    if (!(await store.listTenants()).some(t => t.id === tenantId)) throw new HttpError(404, 'not found');
+    const cap = ctx.body ? ctx.body.smsMonthlyCap : undefined;
+    if (!(cap === null || (Number.isInteger(cap) && cap >= 0 && cap <= 1000000))) throw new HttpError(400, 'smsMonthlyCap must be a whole number (0 = no texts) or null (deployment default)');
+    const all = (await store.tenantSettings(tenantId)) || {};
+    const limits = { ...(all.limits || {}) };
+    if (cap === null) delete limits.smsMonthlyCap; else limits.smsMonthlyCap = cap;
+    await store.tenant(tenantId).unit()
+      .raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.limits', json(?)) WHERE id = ?", [JSON.stringify(limits), tenantId])
+      .audit('tenant.limits', `smsMonthlyCap=${cap === null ? 'default' : cap}`, 'platform').commit();
+    return { tenantId, limits };
+  });
   route('POST', /^\/api\/platform\/secrets\/reseal$/, async () => rotation().reseal({ actor: 'platform' }));
 
   /* ---------------------------------------------------------------- */
@@ -1853,7 +2067,7 @@ function createApi({
       const due = await store.sql.first('SELECT COUNT(*) AS n FROM visits WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [tenantId, cutoff]);
       if (due && Number(due.n)) {
         await store.tenant(tenantId).unit()
-          .raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [new Date().toISOString(), tenantId, cutoff])
+          .raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, checkout_token_hash = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [new Date().toISOString(), tenantId, cutoff])
           .audit('visits.erased', `${Number(due.n)} visit(s) ended more than ${retentionDays} days ago`, 'system').commit();
         out.visitsErased = Number(due.n);
       }
@@ -1888,7 +2102,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };
