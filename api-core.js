@@ -111,7 +111,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null,
+  secretsKey = '', ttlockNotifySecret = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -638,6 +638,7 @@ function createApi({
   // A visit's codes are ordinary credentials (visitId set, userId = host), so
   // review, reconcile, removal SLA and the revocation report cover them.
   const emailAvailable = () => Boolean(alerts && alerts.emailAvailable);
+  const smsAvailable = () => Boolean(sms && sms.available);
   const doorName = (locks, id) => { const l = locks.find(x => Number(x.lockId) === Number(id)); return (l && l.lockAlias) || `Lock ${id}`; };
   const visitVisible = (ctx, v) => ctx.scope.all || v.lockIds.every(l => ctx.scope.lock(l));
   const visitView = (snap, v, now = Date.now()) => {
@@ -666,7 +667,7 @@ function createApi({
       since ? [ctx.tenantId, since] : [ctx.tenantId]);
     return {
       visits: rows.map(visitors.rowToVisit).filter(v => visitVisible(ctx, v)).map(v => visitView(snap, v, now)),
-      settings: { ...visitors.settingsOf(snap.settings), emailAvailable: emailAvailable() },
+      settings: { ...visitors.settingsOf(snap.settings), emailAvailable: emailAvailable(), smsAvailable: smsAvailable() },
     };
   });
 
@@ -679,7 +680,7 @@ function createApi({
   // Arrival detection needs SECRETS_KEY (code fingerprints); the TTLock callback is optional (else polling).
   const arrivalInfo = () => ({ enabled: Boolean(secretsKey), callback: Boolean(ttlockNotifySecret) });
   route('GET', /^\/api\/visits\/settings$/, async ctx => ({
-    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo(),
+    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), smsAvailable: smsAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo(),
   }));
 
   route('PUT', /^\/api\/visits\/settings$/, async ctx => {
@@ -689,7 +690,7 @@ function createApi({
     // json_set: only this key, a concurrent SSO/alerts change is never overwritten.
     await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.visitors', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
       .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays} notifyHost=${next.notifyHost}`, ctx.actor).commit();
-    return { ...next, emailAvailable: emailAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo() };
+    return { ...next, emailAvailable: emailAvailable(), smsAvailable: smsAvailable(), limits: visitors.LIMITS, arrivals: arrivalInfo() };
   });
 
   route('POST', /^\/api\/visits$/, async ctx => {
@@ -738,8 +739,8 @@ function createApi({
       if (m) macs[lockId] = m;
     }
     const uow = ctx.t.unit().raw(
-      'INSERT INTO visits (tenant_id, id, visitor_name, visitor_email, company, host_user_id, site_id, lock_ids, start_at, end_at, status, delivery, created_by, created_at, code_macs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [ctx.tenantId, id, v.visitorName, v.visitorEmail, v.company, v.hostUserId, v.siteId, JSON.stringify(v.lockIds), v.startAt, v.endAt, 'scheduled', 'shown', ctx.actor, now, Object.keys(macs).length ? JSON.stringify(macs) : null]);
+      'INSERT INTO visits (tenant_id, id, visitor_name, visitor_email, visitor_phone, company, host_user_id, site_id, lock_ids, start_at, end_at, status, delivery, created_by, created_at, code_macs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, v.visitorName, v.visitorEmail, v.visitorPhone, v.company, v.hostUserId, v.siteId, JSON.stringify(v.lockIds), v.startAt, v.endAt, 'scheduled', 'shown', ctx.actor, now, Object.keys(macs).length ? JSON.stringify(macs) : null]);
     const entries = created.map(({ lockId, out }) => {
       const entry = creds.register({ credentials: [] }, {
         type: 'passcode', userId: v.hostUserId, lockId, siteId: v.siteId, startAt: v.startAt, endAt: v.endAt,
@@ -757,20 +758,37 @@ function createApi({
 
     const codes = created.map(({ lockId, out }) => ({ lockId, door: doorName(locks, lockId), code: String(out.keyboardPwd) }));
     const warnings = [...plan.warnings];
-    let delivery = 'shown';
+    // Sent only AFTER the codes are recorded; never queued (a queue would store the code).
+    const site = snap.sites.find(x => x.id === v.siteId);
+    const doorsWithCodes = codes.map(c => ({ name: c.door, code: c.code }));
+    const outcomes = [];
+    const events = [];
     if (body.sendCode === true) {
-      // Sent only AFTER the codes are recorded; never queued (a queue would store the code).
       if (!v.visitorEmail) warnings.push('no visitor email: hand the code over yourself');
       else if (!emailAvailable()) warnings.push('email is not configured on this server: hand the code over yourself');
       else {
-        const site = snap.sites.find(x => x.id === v.siteId);
-        const msg = visitors.invitationEmail({ visit: v, hostName: host.name || 'Your host', siteName: site ? site.name : null, doors: codes.map(c => ({ name: c.door, code: c.code })), timeZone: plan.timeZone, tenantName: snap.tenant && snap.tenant.name });
+        const msg = visitors.invitationEmail({ visit: v, hostName: host.name || 'Your host', siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone, tenantName: snap.tenant && snap.tenant.name });
         const result = await alerts.emailTo(v.visitorEmail, msg, `visit-${id}`);
-        delivery = result === 'delivered' ? 'emailed' : 'email_failed';
-        if (delivery === 'email_failed') warnings.push(`the email could not be sent (${result}): hand the code over yourself`);
-        await ctx.t.unit().raw('UPDATE visits SET delivery = ? WHERE tenant_id = ? AND id = ?', [delivery, ctx.tenantId, id])
-          .audit(delivery === 'emailed' ? 'visit.code_emailed' : 'visit.email_failed', `${id}${delivery === 'emailed' ? '' : `: ${result}`}`, ctx.actor).commit();
+        outcomes.push(result === 'delivered' ? 'emailed' : 'email_failed');
+        events.push(result === 'delivered' ? ['visit.code_emailed', id] : ['visit.email_failed', `${id}: ${result}`]);
+        if (result !== 'delivered') warnings.push(`the email could not be sent (${result}): hand the code over yourself`);
       }
+    }
+    if (body.sendSms === true) {
+      if (!v.visitorPhone) warnings.push('no visitor phone: hand the code over yourself');
+      else if (!smsAvailable()) warnings.push('SMS is not configured on this server: hand the code over yourself');
+      else {
+        const result = await sms.send(v.visitorPhone, visitors.invitationSms({ visit: v, siteName: site ? site.name : null, doors: doorsWithCodes, timeZone: plan.timeZone }));
+        outcomes.push(result === 'delivered' ? 'texted' : 'sms_failed');
+        events.push(result === 'delivered' ? ['visit.code_texted', id] : ['visit.sms_failed', `${id}: ${result}`]);
+        if (result !== 'delivered') warnings.push(`the text message could not be sent (${result}): hand the code over yourself`);
+      }
+    }
+    const delivery = outcomes.length ? outcomes.join('+') : 'shown';
+    if (events.length) {
+      const u = ctx.t.unit().raw('UPDATE visits SET delivery = ? WHERE tenant_id = ? AND id = ?', [delivery, ctx.tenantId, id]);
+      for (const [action, detail] of events) u.audit(action, detail, ctx.actor);
+      await u.commit();
     }
     const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null };
     // The codes are returned exactly once and never stored.
@@ -822,9 +840,9 @@ function createApi({
     const v = await loadVisit(ctx, id);
     if (v.erased) return { visit: visitView(await ctx.snap(), v) };
     const at = new Date().toISOString();
-    await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+    await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
-    return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, company: null, erased: true, erasedAt: at }) };
+    return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, visitorPhone: null, company: null, erased: true, erasedAt: at }) };
   });
 
   // --- visitor arrival --------------------------------------------------
@@ -1831,7 +1849,7 @@ function createApi({
       const due = await store.sql.first('SELECT COUNT(*) AS n FROM visits WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [tenantId, cutoff]);
       if (due && Number(due.n)) {
         await store.tenant(tenantId).unit()
-          .raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [new Date().toISOString(), tenantId, cutoff])
+          .raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [new Date().toISOString(), tenantId, cutoff])
           .audit('visits.erased', `${Number(due.n)} visit(s) ended more than ${retentionDays} days ago`, 'system').commit();
         out.visitsErased = Number(due.n);
       }

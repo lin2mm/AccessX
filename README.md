@@ -81,6 +81,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
+| `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `SMS_FROM` | texting visitor codes | `twilio`. `SMS_FROM` is a Twilio number (+E.164), an alphanumeric sender ID where the country allows it, or a Messaging Service SID (`MG…`). An API key may replace the auth token (`TWILIO_API_KEY` + `TWILIO_API_SECRET`). Codes are sent once and never queued; Twilio keeps message bodies in its logs according to your account settings. |
 | `ALLOW_HTTP_WEBHOOKS` | local testing | `1` allows `http://` alert and anchor webhooks. **Never in production**: webhook URLs carry secrets. |
 | `ALLOW_HTTP_ISSUERS` / `MOCK_IDP` | local testing | Allow `http://` OIDC issuers / mount a fake IdP. Never in production. |
 | `DOH_URL` | SSO domain verification | DNS-over-HTTPS resolver for the TXT check (default Cloudflare). |
@@ -197,7 +198,7 @@ Operators (people who administer the system) are separate from door users.
   Checking out early revokes over the gateway (a door without one is flagged
   for removal at the lock, honestly). Visitor codes follow the host: suspend
   the host and their visitors lose access. No sensitive doors (those need a
-  rule and four-eyes), at most 24 h by default, codes optionally emailed
+  rule and four-eyes), at most 24 h by default, codes optionally emailed or texted (SMS)
   (never queued or stored). Visitor details never enter the audit chain or
   TTLock, and are erased 30 days after the visit (configurable) or on request.
   **Arrival**: the first unlock with the visitor's code (TTLock callback, or

@@ -221,6 +221,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <div class="grid c3">
           <div><label for="vi-name">Visitor name</label><input id="vi-name" required maxlength="100"></div>
           <div><label for="vi-email">Email (optional)</label><input id="vi-email" type="email" maxlength="200"></div>
+          <div><label for="vi-phone">Mobile (optional)</label><input id="vi-phone" type="tel" maxlength="30" placeholder="+44 7700 900123" autocomplete="off"></div>
           <div><label for="vi-company">Company (optional)</label><input id="vi-company" maxlength="100"></div>
           <div><label for="vi-host">Host</label><select id="vi-host" required></select></div>
           <div><label for="vi-date">Date at the door</label><input id="vi-date" type="date" required></div>
@@ -232,7 +233,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <label>Doors</label>
         <div id="vi-doors" class="checks"></div>
         <div class="meta tz-note" id="vi-tz"></div>
-        <div class="checks"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label></div>
+        <div class="checks"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label><label id="vi-sms-l"><input type="checkbox" id="vi-sms"> Text the code (SMS)</label></div>
         <div style="margin-top:10px"><button class="btn" type="submit" id="vi-submit">Register &amp; create code</button></div>
       </form>
       <div id="vi-res"></div>

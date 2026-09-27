@@ -403,3 +403,70 @@ test('visitor_arrived alerts are opt-in (they name people)', async t => {
   assert.equal(on.status, 200, JSON.stringify(on.body));
   assert.deepEqual(on.body.alerts.events, ['removal_overdue', 'visitor_arrived']);
 });
+
+// ---- SMS (Twilio) -------------------------------------------------------------------
+async function twilio(t, statuses) {
+  const got = [];
+  const srv = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => { b += c; });
+    req.on('end', () => { got.push({ path: req.url, headers: req.headers, form: Object.fromEntries(new URLSearchParams(b)) }); res.writeHead(statuses[Math.min(got.length - 1, statuses.length - 1)], { 'content-type': 'application/json' }); res.end('{"sid":"SMx","status":"queued"}'); });
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  t.after(() => srv.close());
+  return { base: `http://127.0.0.1:${srv.address().port}`, got };
+}
+const TWILIO_ENV = base => ({ SMS_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: 'AC0123456789abcdef0123456789abcdef', TWILIO_AUTH_TOKEN: 'tw-token', SMS_FROM: '+447700900000', SMS_API_BASE: base });
+
+test('SMS: the code is texted once (no visitor name in the text), a failed text falls back to the screen, phones are validated and erased', async t => {
+  const tw = await twilio(t, [201, 500, 201]);
+  const mail = await provider(t, [200]);
+  const { api } = await setup(t, { ...TWILIO_ENV(tw.base), EMAIL_PROVIDER: 'resend', EMAIL_API_KEY: 're_k', EMAIL_FROM: 'desk@accessx.example', EMAIL_API_BASE: mail.base });
+  assert.equal((await api.call('GET', '/api/visits/settings', DESK)).body.smsAvailable, true);
+  assert.equal((await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '07700 900123' }) })).status, 400, 'international format required');
+
+  const r = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+44 7700 900-123', sendSms: true, lockIds: [9001, 9003] }) });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.delivery, 'texted');
+  assert.equal(r.body.visit.visitorPhone, '+447700900123', 'normalised');
+  const m = tw.got[0];
+  assert.equal(m.path, '/2010-04-01/Accounts/AC0123456789abcdef0123456789abcdef/Messages.json');
+  assert.equal(m.headers.authorization, `Basic ${Buffer.from('AC0123456789abcdef0123456789abcdef:tw-token').toString('base64')}`);
+  assert.equal(m.form.To, '+447700900123');
+  assert.equal(m.form.From, '+447700900000');
+  assert.match(m.form.Body, new RegExp(`^Riverside Office: door codes Main Entrance ${r.body.codes[0].code}, Warehouse Side Door ${r.body.codes[1].code} valid`));
+  assert.ok(!m.form.Body.includes(MARKER), 'no name in a text that may be read on a lock screen');
+  assert.ok(m.form.Body.length <= 320, `two segments at most (${m.form.Body.length})`);
+  const log = (await api.call('GET', '/api/audit?action=visit.code_texted', OWNER)).body.log;
+  assert.equal(log[0].detail, r.body.visit.id);
+  assert.ok(!JSON.stringify(log).includes('7700'), 'no phone number in the audit chain');
+
+  const f = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true }) });
+  assert.equal(f.body.delivery, 'sms_failed');
+  assert.equal(f.body.codes.length, 1);
+  assert.ok(f.body.warnings.some(w => /text message could not be sent/.test(w)));
+  assert.equal(tw.got.length, 2, 'no retry');
+
+  const both = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true, sendCode: true }) });
+  assert.equal(both.body.delivery, 'emailed+texted');
+  const noPhone = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ sendSms: true }) });
+  assert.ok(noPhone.body.warnings.some(w => /no visitor phone/.test(w)));
+
+  const er = await api.call('POST', `/api/visits/${r.body.visit.id}/erase`, { ...DESK, body: {} });
+  assert.equal(er.body.visit.visitorPhone, null);
+  const row = await api.server.store.sql.first('SELECT visitor_phone FROM visits WHERE id = ?', [r.body.visit.id]);
+  assert.equal(row.visitor_phone, null);
+});
+
+test('SMS config and helpers', () => {
+  const { smsConfigFromEnv, normalizePhone, smsRequest } = require('../sms-core');
+  assert.equal(smsConfigFromEnv({}), null);
+  assert.throws(() => smsConfigFromEnv({ SMS_PROVIDER: 'nexmo' }), /twilio/);
+  assert.throws(() => smsConfigFromEnv({ SMS_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: 'AC1' }), /SMS_FROM/);
+  const key = smsConfigFromEnv({ SMS_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: 'AC1', TWILIO_API_KEY: 'SK1', TWILIO_API_SECRET: 's', SMS_FROM: 'MG0123456789abcdef0123456789abcdef' });
+  assert.equal(key.username, 'SK1');
+  const req = smsRequest(key, '+15558675310', 'hi');
+  assert.match(req.body, /MessagingServiceSid=MG0123456789abcdef0123456789abcdef/);
+  assert.ok(!/From=/.test(req.body), 'From must be empty with a Messaging Service');
+  assert.equal(normalizePhone('+1 (555) 867-5310'), '+15558675310');
+  for (const bad of ['5558675310', '+0123456789', '+12', 'call me']) assert.equal(normalizePhone(bad), null, bad);
+});

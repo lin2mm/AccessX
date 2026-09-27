@@ -66,6 +66,7 @@ const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? liveVendor || demoV
 // Per-tenant TTLock accounts (owners connect their own; tokens sealed with SECRETS_KEY).
 // A connected account overrides vendorFor() for that tenant.
 const { createAlerts, emailConfigFromEnv, needsReconnectMessage } = require('./alerts-core');
+const { createSms, smsConfigFromEnv } = require('./sms-core');
 const vendorAccounts = createVendorAccounts({
   store,
   secretsKey: process.env.SECRETS_KEY || '',
@@ -91,8 +92,9 @@ const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
 const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
+const sms = createSms({ config: smsConfigFromEnv(process.env) });
 const api = createApi({
-  store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady,
+  store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady,
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',

@@ -15,6 +15,7 @@ import { createVendorAccounts } from './vendor-accounts.js';
 import { createAuditOps } from './audit-ops.js';
 import { createDnsTxtResolver } from './dns-core.js';
 import { createAlerts, emailConfigFromEnv, needsReconnectMessage } from './alerts-core.js';
+import { createSms, smsConfigFromEnv } from './sms-core.js';
 import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
 
 const MAX_BODY = 64 * 1024;
@@ -88,7 +89,8 @@ function apiFor(env) {
   const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
   const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
   const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const sms = createSms({ config: smsConfigFromEnv(env) });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }

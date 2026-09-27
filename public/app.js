@@ -630,6 +630,9 @@ async function loadVisitors(){
   $('#vi-send').disabled=!r.settings.emailAvailable;
   $('#vi-send-l').classList.toggle('off',!r.settings.emailAvailable);
   $('#vi-send-l').title=r.settings.emailAvailable?'':'Email is not configured on this server';
+  $('#vi-sms').disabled=!r.settings.smsAvailable;
+  $('#vi-sms-l').classList.toggle('off',!r.settings.smsAvailable);
+  $('#vi-sms-l').title=r.settings.smsAvailable?'':'SMS is not configured on this server';
   const s=await api('/api/visits/settings');
   // Owner-only (also enforced by the server).
   $('#vis-settings').hidden=!(s.ok&&ME&&ME.role==='r_owner');
@@ -638,15 +641,16 @@ async function loadVisitors(){
     $('#vs-arrivals').textContent=!a.enabled?'Arrival detection is off: SECRETS_KEY is not set on the server.'
       :a.callback?'Arrivals: reported by TTLock within seconds (record callback), doors with a gateway.'
       :'Arrivals: checked every scheduled run (about 15 min) on doors with a gateway. Set TTLOCK_NOTIFY_SECRET and the TTLock callback URL for instant notice.';}
+  const DELIVERY={emailed:'code emailed',email_failed:'email failed',texted:'code texted',sms_failed:'text failed'};
   const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
   const rows=r.visits.map(v=>{
     const lock=v.lockIds[0];
     const open=v.status==='scheduled'&&v.state!=='ended';
-    const who=v.erased?'<span class="meta">details erased</span>':`<b>${esc(v.visitorName)}</b><div class="meta">${esc([v.company,v.visitorEmail].filter(Boolean).join(' · '))}</div>`;
+    const who=v.erased?'<span class="meta">details erased</span>':`<b>${esc(v.visitorName)}</b><div class="meta">${esc([v.company,v.visitorEmail,v.visitorPhone].filter(Boolean).join(' · '))}</div>`;
     const doors=v.codes.map(c=>{const d=DOORS.find(x=>Number(x.lockId)===Number(c.lockId));return `<div>${esc(d?d.lockAlias:c.lockId)} ${codeTag(c)}</div>`;}).join('');
     return `<tr><td>${who}</td><td>${esc(v.hostName||v.hostUserId)}</td><td>${doors}</td>
-      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.arrivedAt?`<div class="meta">arrived ${esc(atDoor(v.arrivedAt,v.arrivedLock||lock))}${(()=>{const d=DOORS.find(x=>Number(x.lockId)===Number(v.arrivedLock));return d?' · '+esc(d.lockAlias):'';})()}</div>`:''}${v.delivery==='emailed'?'<div class="meta">code emailed</div>':v.delivery==='email_failed'?'<div class="meta">email failed</div>':''}</td>
+      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.arrivedAt?`<div class="meta">arrived ${esc(atDoor(v.arrivedAt,v.arrivedLock||lock))}${(()=>{const d=DOORS.find(x=>Number(x.lockId)===Number(v.arrivedLock));return d?' · '+esc(d.lockAlias):'';})()}</div>`:''}${v.delivery&&v.delivery!=='shown'?`<div class="meta">${esc(v.delivery.split('+').map(d=>DELIVERY[d]||d).join(' · '))}</div>`:''}</td>
       <td style="white-space:nowrap">${open?`<button class="btn2 sm" data-vact="${v.state==='scheduled'?'cancel':'checkout'}" data-vid="${esc(v.id)}">${v.state==='scheduled'?'Cancel':'Check out'}</button> `:''}${v.erased?'':`<button class="btn2 sm" data-vact="erase" data-vid="${esc(v.id)}" title="Erase this visitor's personal details now">Erase details</button>`}</td></tr>`;
   }).join('');
   $('#vis-list').innerHTML=rows?`<table><tr><th>Visitor</th><th>Host</th><th>Doors</th><th>When (door time)</th><th>State</th><th></th></tr>${rows}</table>`:'<div class="meta">No visitors in this period.</div>';
@@ -661,7 +665,7 @@ $('#vi-form').addEventListener('submit',async e=>{
   const out=$('#vi-res');
   if(!lockIds.length){out.innerHTML='<div class="res n">Choose at least one door.</div>';return;}
   const date=$('#vi-date').value,from=$('#vi-from').value,until=$('#vi-until').value;
-  const body={visitorName:$('#vi-name').value,visitorEmail:$('#vi-email').value,company:$('#vi-company').value,hostUserId:$('#vi-host').value,lockIds,
+  const body={visitorName:$('#vi-name').value,visitorEmail:$('#vi-email').value,visitorPhone:$('#vi-phone').value,sendSms:$('#vi-sms').checked&&!$('#vi-sms').disabled,company:$('#vi-company').value,hostUserId:$('#vi-host').value,lockIds,
     endLocal:until==='24:00'?nextDay(date)+'T00:00':`${date}T${until}`,sendCode:$('#vi-send').checked&&!$('#vi-send').disabled};
   if(from)body.startLocal=`${date}T${from}`;
   $('#vi-submit').disabled=true;
@@ -669,18 +673,18 @@ $('#vi-form').addEventListener('submit',async e=>{
   $('#vi-submit').disabled=false;
   if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
   const v=r.visit,lock=v.lockIds[0];
-  out.innerHTML=`<div class="res y"><b>${esc(v.visitorName)}</b> — ${r.delivery==='emailed'?'code emailed to the visitor':'give the visitor '+(r.codes.length>1?'these codes':'this code')}
+  out.innerHTML=`<div class="res y"><b>${esc(v.visitorName)}</b> — ${/emailed|texted/.test(r.delivery)?'code sent to the visitor ('+esc(r.delivery.split('+').filter(d=>d==='emailed'||d==='texted').join(' and '))+')':'give the visitor '+(r.codes.length>1?'these codes':'this code')}
     ${r.codes.map(c=>`<div style="margin-top:8px"><span class="meta">${esc(c.door)}</span><div class="code">${esc(c.code)}</div></div>`).join('')}
     <div class="meta" style="margin-top:6px">Shown once — the system keeps only the last two digits.</div>
     <div style="margin-top:6px">${esc(atDoor(v.startAt,lock))} → ${esc(atDoor(v.endAt,lock))} <span class="meta">(door time)</span> · <span class="tag g">lock-enforced</span></div>
     ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
-  $('#vi-name').value='';$('#vi-email').value='';$('#vi-company').value='';
+  $('#vi-name').value='';$('#vi-email').value='';$('#vi-phone').value='';$('#vi-company').value='';
   loadVisitors();loadAudit();
 });
 $('#vis-list').addEventListener('click',async e=>{
   const b=e.target.closest('button[data-vact]');if(!b)return;
   const act=b.dataset.vact,id=b.dataset.vid;
-  const q={cancel:'Cancel this visit? Its codes stop working now where the door has a gateway.',checkout:'Check this visitor out? Their codes stop working now where the door has a gateway.',erase:"Erase this visitor's name, email and company now? The visit record (host, doors, times) stays."}[act];
+  const q={cancel:'Cancel this visit? Its codes stop working now where the door has a gateway.',checkout:'Check this visitor out? Their codes stop working now where the door has a gateway.',erase:"Erase this visitor's name, email, mobile and company now? The visit record (host, doors, times) stays."}[act];
   if(!confirm(q))return;
   b.disabled=true;
   const r=await post(`/api/visits/${encodeURIComponent(id)}/${act}`,{});

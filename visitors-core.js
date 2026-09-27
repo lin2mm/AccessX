@@ -20,6 +20,7 @@
  */
 const policy = require('./policy-core');
 const creds = require('./credentials-core');
+const { normalizePhone } = require('./sms-core');
 
 const LIMITS = { maxDoors: 5, maxHours: 24, maxHoursCap: 168, aheadDays: 30, retentionDays: 30, retentionMin: 1, retentionMax: 365 };
 const HOUR = 36e5;
@@ -67,6 +68,9 @@ function planVisit(snap, body, { now = Date.now(), sensitive = new Set(), canSee
   const visitorEmail = clean(body.visitorEmail, 200).toLowerCase() || null;
   if (visitorEmail && !EMAIL_RE.test(visitorEmail)) return fail(400, 'visitorEmail is not a valid address');
   const company = clean(body.company, 100) || null;
+  const rawPhone = clean(body.visitorPhone, 30);
+  const visitorPhone = rawPhone ? normalizePhone(rawPhone) : null;
+  if (rawPhone && !visitorPhone) return fail(400, 'visitorPhone must be an international number, e.g. +44 7700 900123');
 
   const host = (snap.users || []).find(u => u.id === body.hostUserId);
   if (!host || !canSeeUser(host)) return fail(404, 'unknown host');
@@ -107,7 +111,7 @@ function planVisit(snap, body, { now = Date.now(), sensitive = new Set(), canSee
     warnings: creds.ttlockWarnings(win, timeZone, { explicitStart: Boolean(body.startLocal) }),
     host,
     visit: {
-      visitorName, visitorEmail, company, hostUserId: host.id, siteId, lockIds,
+      visitorName, visitorEmail, visitorPhone, company, hostUserId: host.id, siteId, lockIds,
       startAt: new Date(win.start).toISOString(), endAt: new Date(win.end).toISOString(),
     },
   };
@@ -123,7 +127,7 @@ function stateOf(visit, now = Date.now()) {
 
 function rowToVisit(r) {
   return {
-    id: r.id, visitorName: r.visitor_name, visitorEmail: r.visitor_email, company: r.company,
+    id: r.id, visitorName: r.visitor_name, visitorEmail: r.visitor_email, visitorPhone: r.visitor_phone || null, company: r.company,
     hostUserId: r.host_user_id, siteId: r.site_id, lockIds: JSON.parse(r.lock_ids || '[]'),
     startAt: r.start_at, endAt: r.end_at, status: r.status, delivery: r.delivery,
     createdBy: r.created_by, createdAt: r.created_at, endedAt: r.ended_at, endedBy: r.ended_by,
@@ -151,6 +155,18 @@ function invitationEmail({ visit, hostName, siteName, doors, timeZone, tenantNam
   return { subject: `Your door code for ${siteName || 'your visit'}`.slice(0, 200), text: lines.join('\n') };
 }
 
+/** SMS with the codes: short (one or two segments), no visitor name. */
+function invitationSms({ visit, siteName, doors, timeZone }) {
+  const label = iso => policy.localParts(new Date(iso), timeZone).label.replace(/ [A-Za-z_]+\/[A-Za-z_/]+$/, '');
+  const long = Date.parse(visit.endAt) - Date.parse(visit.startAt) > 24 * HOUR;
+  return [
+    `${siteName || 'Your visit'}: door code${doors.length > 1 ? 's' : ''} ${doors.map(d => (doors.length > 1 ? `${d.name} ${d.code}` : d.code)).join(', ')}`,
+    `valid ${label(visit.startAt)} to ${label(visit.endAt)} (local time).`,
+    long ? `Use it first by ${label(new Date(Date.parse(visit.startAt) + 24 * HOUR).toISOString())}.` : '',
+    'Enter it on the keypad, then the unlock key. Do not share.',
+  ].filter(Boolean).join(' ');
+}
+
 /** Host notification: "your visitor has arrived". */
 function arrivalEmail({ visit, hostName, door, at, timeZone, tenantName }) {
   const who = visit.visitorName ? `${visit.visitorName}${visit.company ? ` (${visit.company})` : ''}` : 'Your visitor';
@@ -171,4 +187,4 @@ function arrivalCandidates(records) {
   })).filter(r => r.recordType === PASSCODE_UNLOCK && r.success === 1 && /^\d{4,12}$/.test(r.code) && Number.isFinite(r.lockId) && Number.isFinite(r.at));
 }
 
-module.exports = { LIMITS, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail, arrivalEmail, arrivalCandidates };
+module.exports = { LIMITS, settingsOf, validateSettings, planVisit, stateOf, rowToVisit, invitationEmail, invitationSms, arrivalEmail, arrivalCandidates };
