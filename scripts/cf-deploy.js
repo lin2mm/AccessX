@@ -37,17 +37,32 @@ function permissionProblem(text) {
   return /Authentication error|\[code: 10000\]|not authorized|Unauthorized|code: 7403/i.test(String(text || ''));
 }
 
-/** The JSON array in `wrangler d1 list --json` output (tolerates a banner before it). */
+/**
+ * The array printed by `wrangler d1 list --json` (wrangler 4.141: the raw API objects,
+ * `{ uuid, name, … }`, JSON.stringify(dbs, null, 2), no banner). Tolerates other lines
+ * before it, including ones that contain "[" such as "[WARNING]".
+ */
 function parseList(stdout) {
   const s = String(stdout || '');
-  const at = s.indexOf('[');
-  if (at < 0) throw new DeployError(`wrangler d1 list --json printed no list: ${s.slice(0, 200)}`);
-  const list = JSON.parse(s.slice(at, s.lastIndexOf(']') + 1));
-  return list.map(d => ({ name: d.name, id: d.uuid || d.id || d.database_id }));
+  const end = s.lastIndexOf(']');
+  for (const m of s.matchAll(/^\[/gm)) {
+    let list;
+    try { list = JSON.parse(s.slice(m.index, end + 1)); } catch { continue; }
+    if (Array.isArray(list)) return list.map(d => ({ name: d.name, id: d.uuid || d.id || d.database_id }));
+  }
+  throw new DeployError(`wrangler d1 list --json printed no list: ${s.slice(0, 200)}`);
 }
 
+/**
+ * The Worker's workers.dev URL from `wrangler deploy` output. Wrangler prints the targets
+ * after "Deployed <name> triggers", one per line with "https://" on workers.dev ones;
+ * prefer those over any other workers.dev URL earlier in the output.
+ */
 function workersDevUrl(stdout) {
-  const m = String(stdout || '').match(/https:\/\/[a-z0-9.-]+\.workers\.dev\b/i);
+  const s = String(stdout || '');
+  const re = /https:\/\/[a-z0-9.-]+\.workers\.dev\b/i;
+  const at = s.search(/Deployed \S+ triggers/);
+  const m = (at >= 0 && s.slice(at).match(re)) || s.match(re);
   return m ? m[0] : null;
 }
 
@@ -68,7 +83,10 @@ async function deploy({ configText, run, write, fetch: fetchFn = globalThis.fetc
     steps.push(args.join(' '));
     const r = await run(args);
     const text = `${r.stdout || ''}\n${r.stderr || ''}`;
-    if (r.code !== 0) throw new DeployError(permissionProblem(text) ? `${what} failed. ${PERMISSION_HELP}` : `${what} failed (wrangler exit ${r.code})`);
+    if (r.code !== 0) {
+      if (/necessary to set a CLOUDFLARE_API_TOKEN/.test(text)) throw new DeployError(`${what} failed: not logged in to Cloudflare. By hand: npx wrangler login, then npm run deploy. In Workers Builds the token is provided; check Settings > Build > API token.`);
+      throw new DeployError(permissionProblem(text) ? `${what} failed. ${PERMISSION_HELP}` : `${what} failed (wrangler exit ${r.code})`);
+    }
     return r;
   };
 
@@ -82,7 +100,8 @@ async function deploy({ configText, run, write, fetch: fetchFn = globalThis.fetc
     if (id) log(`D1 "${db.database_name}" found: ${id.slice(0, 8)}…`);
     else {
       log(`D1 "${db.database_name}" not found in this account: creating it`);
-      await wrangler(['d1', 'create', db.database_name, ...(env.D1_LOCATION ? ['--location', env.D1_LOCATION] : [])], `Creating D1 "${db.database_name}"`);
+      // --update-config=false: never let wrangler edit wrangler.jsonc (it would add an id to the repo file)
+      await wrangler(['d1', 'create', db.database_name, '--update-config=false', ...(env.D1_LOCATION ? ['--location', env.D1_LOCATION] : [])], `Creating D1 "${db.database_name}"`);
       id = await find();
       if (!id) throw new DeployError(`D1 "${db.database_name}" was created but is not listed`);
       log(`D1 "${db.database_name}" created: ${id.slice(0, 8)}…`);
@@ -107,15 +126,23 @@ async function deploy({ configText, run, write, fetch: fetchFn = globalThis.fetc
   // 5. health
   const base = (env.HEALTH_URL || workersDevUrl(`${deployed.stdout}\n${deployed.stderr}`) || '').replace(/\/+$/, '');
   if (!base) { log('No workers.dev URL in the deploy output and no HEALTH_URL: health check skipped'); return { id, steps, url: null, healthy: null }; }
-  let last = '';
+  // An HTTP answer that is not 200 {ok:true} fails the build (503 = schema behind, D1 down,
+  // 5xx = broken code). Never getting any answer (a new workers.dev subdomain can take
+  // minutes to resolve) is not evidence against the code: warn, do not fail.
+  let last = ''; let answered = false;
   for (let i = 1; i <= tries; i++) {
     try {
       const res = await fetchFn(`${base}/api/healthz`, { headers: { 'cache-control': 'no-cache' } });
+      answered = true;
       const body = await res.json().catch(() => ({}));
       if (res.status === 200 && body.ok) { log(`healthy: ${base}/api/healthz (schema ${body.schema && body.schema.applied})`); return { id, steps, url: base, healthy: true }; }
       last = `HTTP ${res.status} ${JSON.stringify(body).slice(0, 200)}`;
     } catch (error) { last = error.message; }
     if (i < tries) await sleep(waitMs);
+  }
+  if (!answered) {
+    log(`WARNING: deployed, but ${base}/api/healthz never answered (${last}). A new workers.dev subdomain can take a few minutes: open the URL by hand, then run npm run doctor -- --url ${base}`);
+    return { id, steps, url: base, healthy: null };
   }
   throw new DeployError(`deployed, but ${base}/api/healthz is not healthy: ${last}`);
 }

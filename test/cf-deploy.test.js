@@ -51,7 +51,7 @@ test('no database yet: created (with the location hint) before migrating', async
   const f = fakes({ existing: ['something-else'] });
   const r = await deploy({ configText: REPO_CONFIG, ...f, env: { D1_LOCATION: 'oc' } });
   assert.deepStrictEqual(f.calls, ['d1 list', 'd1 create', 'd1 list', 'd1 migrations', 'deploy']);
-  assert.ok(r.steps.includes('d1 create accessx-demo --location oc'));
+  assert.ok(r.steps.includes('d1 create accessx-demo --update-config=false --location oc'), r.steps.join(' | ')); // never edits wrangler.jsonc
   assert.strictEqual(r.id, ID);
 });
 
@@ -64,6 +64,11 @@ test('a failed migration stops the deploy: the old code keeps running', async ()
 test('the default Workers Builds token (no D1 permission) gets a precise fix', async () => {
   const f = fakes({ fail: { 'd1 list': 'A request to the Cloudflare API failed. Authentication error [code: 10000]' } });
   await assert.rejects(deploy({ configText: REPO_CONFIG, ...f }), /D1 > Edit/);
+});
+
+test('not logged in (by hand, no wrangler login) gets the next step, not a stack of wrangler output', async () => {
+  const f = fakes({ fail: { 'd1 list': "In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable" } });
+  await assert.rejects(deploy({ configText: REPO_CONFIG, ...f }), /npx wrangler login/);
 });
 
 test('health: waits for 200 ok, fails the build when the schema stays behind', async () => {
@@ -111,8 +116,26 @@ test('the shipped wrangler.jsonc is safe to deploy from Git', () => {
   assert.ok(fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8').includes('wrangler.deploy.jsonc'));
 });
 
-test('output parsers', () => {
-  assert.deepStrictEqual(parseList(`banner\n${listJson(['a'])}`), [{ name: 'a', id: ID }]);
+test('health: never reaching the Worker warns (new subdomain DNS), an HTTP error still fails', async () => {
+  const unreachable = fakes();
+  unreachable.fetch = async () => { throw new Error('getaddrinfo ENOTFOUND accessx-demo.acme.workers.dev'); };
+  const r = await deploy({ configText: REPO_CONFIG, ...unreachable, tries: 3 });
+  assert.strictEqual(r.healthy, null);
+  const mixed = fakes({ healthSeq: [[500, {}]] });
+  let n = 0; const inner = mixed.fetch;
+  mixed.fetch = async u => { if (n++ === 0) throw new Error('ENOTFOUND'); return inner(u); };
+  await assert.rejects(deploy({ configText: REPO_CONFIG, ...mixed, tries: 3 }), /not healthy: HTTP 500/);
+});
+
+test('output parsers (formats read from wrangler 4.141 source)', () => {
+  // d1 list --json: JSON.stringify(apiObjects, null, 2); tolerate lines before it, even with "["
+  const pretty = JSON.stringify([{ uuid: ID, name: 'a', created_at: 'x', version: 'production', num_tables: 3 }], null, 2);
+  assert.deepStrictEqual(parseList(`▲ [WARNING] something\n${pretty}\n`), [{ name: 'a', id: ID }]);
+  assert.deepStrictEqual(parseList('[]'), []);
+  assert.throws(() => parseList('Authentication error'), /no list/);
+  // deploy: targets after "Deployed <name> triggers (…)", "  https://…workers.dev"
+  const out = 'Uploaded accessx-demo (3.1 sec)\nhttps://1a2b3c4d-accessx-demo.acme.workers.dev (version preview)\nDeployed accessx-demo triggers (0.8 sec)\n  https://accessx-demo.acme.workers.dev\n  schedule: */15 * * * *\nCurrent Version ID: 1a2b';
+  assert.strictEqual(workersDevUrl(out), 'https://accessx-demo.acme.workers.dev');
   assert.strictEqual(workersDevUrl('x https://a-b.c-d.workers.dev/ y'), 'https://a-b.c-d.workers.dev');
-  assert.strictEqual(workersDevUrl('no url'), null);
+  assert.strictEqual(workersDevUrl('No targets deployed for accessx-demo'), null);
 });

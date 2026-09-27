@@ -1,6 +1,6 @@
 # 13 · Deploying from GitHub (Cloudflare Workers Builds)
 
-Status: current (R23, 2026-09-27). Owner: whoever owns the Cloudflare account.
+Status: current (R23, 2026-09-27; checked against the wrangler 4.141 source in R24). Owner: whoever owns the Cloudflare account.
 
 The repository is connected to Cloudflare (GitHub App *Cloudflare Workers and
 Pages*). Once the settings below are in place, **every merge to `main` deploys
@@ -20,6 +20,8 @@ push / merge to main
        4. wrangler deploy                                 ← then code
        5. GET https://accessx-demo.<account>.workers.dev/api/healthz until 200 {"ok":true}
      any step fails → the build fails → the previous version keeps serving
+     (step 5: an HTTP error fails the build; no answer at all, e.g. DNS for a brand-new
+      workers.dev subdomain, only warns. The code is live by then either way)
 ```
 
 Why not the default `npx wrangler deploy`:
@@ -31,7 +33,10 @@ Why not the default `npx wrangler deploy`:
 - Migrations only add, never rename or drop. So for the few seconds between steps 3
   and 4, the old code runs fine on the new schema.
 
-The repo-side guarantees are tested in `test/cf-deploy.test.js`:
+The repo-side guarantees are tested in `test/cf-deploy.test.js`. The wrangler output formats
+the script parses (`d1 list --json`, the deploy target list) were read from the wrangler 4.141
+source. `d1 create` runs with `--update-config=false`, so wrangler never writes an id into the repo file.
+Migrations auto-confirm when there is no terminal (Wrangler's fallback answer is "yes"):
 - the order of the steps;
 - a failed migration blocks the deploy;
 - a missing D1 permission gets a precise error;
@@ -46,7 +51,7 @@ isn't linked to a branch that received commits, or its build settings aren't sav
 
 | # | Where (dash.cloudflare.com) | Set | Why |
 |---|---|---|---|
-| 1 | Workers & Pages → the Worker linked to `lin2mm/AccessX` (or *Create → Import a repository*) | Worker name **`accessx-demo`** | must equal `"name"` in `wrangler.jsonc`, otherwise the build fails. To use another name, change `"name"` in a PR first |
+| 1 | Workers & Pages → the Worker linked to `lin2mm/AccessX` (or *Create → Import a repository*) | Worker name **`accessx-demo`** | should equal `"name"` in `wrangler.jsonc`. If it doesn't, wrangler warns "Failed to match Worker name", **deploys under the dashboard name anyway**, and Cloudflare opens a pull request that changes `"name"`. Merge that PR (it only renames), or rename the Worker. Nothing else depends on the name |
 | 2 | Worker → Settings → Build | Git branch **`main`** · Build command **`npm ci`** · Deploy command **`npm run deploy`** · Root directory `/` | `npm ci` installs the pinned wrangler; `npm run deploy` migrates before deploying |
 | 3 | My Profile → API Tokens → **"Workers Builds - …"** → Edit | add **Account · D1 · Edit** (same account) | the token Cloudflare generates for builds has no D1 access. Without this the build stops at "Listing D1 databases" and prints this step |
 | 4 | Settings → Build → **builds for non-production branches** | **off** | a preview build would run the default preview command against the same production database. Turn it on when a staging Worker exists (section 6) |
@@ -89,7 +94,9 @@ token, and there is nothing to write with.
 | `wrangler.jsonc database_id "…" is a placeholder` | someone put a fake id back | remove the line (or paste the real id) |
 | `Applying D1 migrations failed` | a migration errors on real data | nothing was deployed. Fix it with a **new** migration; published migrations are never edited |
 | `deployed, but …/api/healthz is not healthy: HTTP 503` | new code, schema behind, or D1 down | rarely the code is live but unhealthy: roll back (section 5), then read `wrangler tail` |
-| name mismatch / "Worker not found" | dashboard name ≠ `"name"` | section 2 step 1 |
+| `Failed to match Worker name … Overriding using the CI provided Worker name` (warning, build continues) | dashboard name ≠ `"name"` | merge the pull request Cloudflare opens, or rename the Worker (section 2 step 1) |
+| `…failed: not logged in to Cloudflare` | running `npm run deploy` by hand without logging in | `npx wrangler login`, then retry |
+| `WARNING: deployed, but …/api/healthz never answered` (build passes) | a brand-new workers.dev subdomain isn't resolvable yet | open the URL a few minutes later; run `npm run doctor -- --url …` |
 | `No workers.dev URL … health check skipped` | `workers_dev` off (custom domain only) | build variable `HEALTH_URL=https://doors.<you>` |
 
 ## 5. Rollback
