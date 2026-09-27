@@ -45,7 +45,8 @@ function apiFor(env) {
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
-  const store = createStore(sql);
+  // Per-isolate snapshot cache (Workers have 128 MB): budget in rows, 0 = off.
+  const store = createStore(sql, { snapshotCache: { maxRows: env.SNAPSHOT_CACHE_ROWS === undefined ? 100000 : Number(env.SNAPSHOT_CACHE_ROWS) } });
   const mirror = {
     // The hosted demo serves a read-only snapshot of the record mirror.
     async doc() { return (await appState(sql, 'mirror')) || mirrorDefaults; },

@@ -86,6 +86,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `DATA_DIR`, `PORT` | Node | SQLite location and HTTP port. |
 | `RECONCILE_INTERVAL_MIN` | Node | Reconciler period (default 15, `0` = off). The Worker uses the cron trigger in `wrangler.jsonc`. |
 | `WRITE_QUEUE_MAX` | Node | Per-tenant write queue depth before 503 (default 256). |
+| `SNAPSHOT_CACHE_ROWS` | both | Snapshot cache budget in rows across tenants (Node 500000, Worker 100000; `0` = off). See *Snapshot cache* in docs/ARCHITECTURE.md. |
 
 ### Rotating SECRETS_KEY
 
@@ -198,6 +199,9 @@ Operators (people who administer the system) are separate from door users.
   Object per tenant on Cloudflare, an in-process queue on Node), so a
   2,000-person SCIM sync completes with zero failed writes
   (`npm run load:scim`, numbers in docs/ARCHITECTURE.md).
+- **Stays fast at 10k+ people** — a version-checked snapshot cache (database
+  triggers log every change; readers patch only changed rows): reads and
+  writes ~7–8 ms at 10,000 people instead of ~230 ms.
 - **RBAC coverage gate** — `test/rbac-coverage.test.js` fails when a new API
   route has no explicit permission rule, a rule is stale, or an anonymous
   demo visitor could reach a write.

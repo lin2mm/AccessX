@@ -59,3 +59,7 @@ BEFORE DELETE ON audit_checkpoints
 BEGIN
   SELECT RAISE(ABORT, 'audit_checkpoints is append-only');
 END;
+
+-- Deliberate no-op: a trigger must not be the last statement of a migration
+-- (D1 remote splitter, cloudflare/workers-sdk#15314). Harmless where already applied.
+UPDATE app_state SET key = key WHERE 0;

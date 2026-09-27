@@ -1509,11 +1509,17 @@ function createApi({
       const f = await alerts.flush(tenantId);
       if (f.retried || f.error) out.alerts = f;
     }
+    try {
+      // Snapshot-cache change log: keep the newest rows; caches further behind reload in full.
+      const pruned = await store.tenant(tenantId).pruneChanges();
+      if (pruned) out.changesPruned = pruned;
+    } catch (error) {
+      log(`maintenance ${tenantId} prune failed`, error);
+    }
     return out;
   }
 
   async function maintenance() {
-    if (!auditOps && !alerts) return [];
     const results = [];
     for (const id of await tenantIds()) results.push(await serialize(id, () => maintainOne(id)));
     return results;

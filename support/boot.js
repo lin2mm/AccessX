@@ -11,7 +11,8 @@ async function boot(env = {}) {
   const dataDir = env.DATA_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'accessx-'));
   const saved = { ...process.env };
   for (const key of ['ADMIN_TOKEN', 'AUTH_OPEN_READS', 'OPERATORS', 'TTLOCK_CLIENT_ID', 'PLATFORM_TOKEN']) delete process.env[key];
-  Object.assign(process.env, { DATA_DIR: dataDir, ...env });
+  // Guard mode: shared snapshot items throw on writes (store/snapshot-cache.js).
+  Object.assign(process.env, { DATA_DIR: dataDir, ACCESSX_SNAPSHOT_GUARD: '1', ...env });
   for (const key of Object.keys(require.cache)) {
     if (!key.includes('node_modules')) delete require.cache[key];
   }

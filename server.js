@@ -24,7 +24,8 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 /* ---------------- storage ---------------- */
 const sql = nodeSqliteAdapter(path.join(DATA_DIR, 'accessx.sqlite'));
 migrateNode(sql, path.join(__dirname, 'migrations'));
-const store = createStore(sql);
+// Snapshot cache budget in rows across tenants (0 = off). ~1 KB per row in memory.
+const store = createStore(sql, { snapshotCache: { maxRows: process.env.SNAPSHOT_CACHE_ROWS === undefined ? 500000 : Number(process.env.SNAPSHOT_CACHE_ROWS) } });
 
 const readJson = file => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }

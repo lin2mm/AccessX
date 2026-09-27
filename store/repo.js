@@ -18,6 +18,7 @@
  */
 const auditCore = require('../audit-core');
 const { ConflictError } = require('./sql');
+const { createSnapshotCache } = require('./snapshot-cache');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -103,25 +104,70 @@ const rowToAudit = row => ({
   detail: row.detail, prevHash: row.prev_hash, hash: row.hash,
 });
 
-function createStore(sql) {
+/** Snapshot item for a row, including derived fields. */
+function toSnapshotItem(name, row) {
+  const item = fromRow(name, row);
+  if (name !== 'users') return item;
+  // Effective suspension = operator switch OR directory deactivation.
+  if (item.directoryStatus !== 'inactive') return item.suspended ? { ...item, suspendedBy: 'operator' } : item;
+  return { ...item, suspended: true, suspendedBy: item.suspended ? 'operator+directory' : 'directory' };
+}
+
+const envFlag = name => (typeof process !== 'undefined' && process.env ? process.env[name] : undefined);
+
+/**
+ * @param sql adapter
+ * @param {object} [options]
+ * @param {object} [options.snapshotCache] { maxRows, patchMax, maxAgeMs, guard } — see snapshot-cache.js.
+ *   maxRows 0 turns the cache off. guard defaults to ACCESSX_SNAPSHOT_GUARD=1 (tests).
+ */
+function createStore(sql, { snapshotCache = {} } = {}) {
+  const cache = createSnapshotCache({
+    sql, collections: COLLECTIONS, toItem: toSnapshotItem,
+    guard: envFlag('ACCESSX_SNAPSHOT_GUARD') === '1',
+    ...snapshotCache,
+  });
+  // false once we learn the database predates migration 0011 (deploy before
+  // migrate): keep serving, uncached, instead of failing every request.
+  let versioned = true;
+
+  async function tenantRow(tenantId) {
+    if (versioned) {
+      try {
+        return await sql.first('SELECT name, settings, data_version FROM tenants WHERE id = ?', [tenantId]);
+      } catch (error) {
+        if (!/no such column|data_version/i.test(String(error && error.message))) throw error;
+        versioned = false;
+      }
+    }
+    return sql.first('SELECT name, settings FROM tenants WHERE id = ?', [tenantId]);
+  }
+
   function tenant(tenantId) {
     if (!tenantId || typeof tenantId !== 'string') throw new Error('tenant id required');
 
     async function snapshot() {
-      const names = Object.keys(COLLECTIONS);
-      const results = await Promise.all(names.map(name =>
-        sql.all(`SELECT * FROM ${COLLECTIONS[name].table} WHERE tenant_id = ? ORDER BY rowid`, [tenantId])));
+      // Version BEFORE data: cached data is never older than its label.
+      const t = await tenantRow(tenantId);
+      const version = t && t.data_version !== undefined && t.data_version !== null ? Number(t.data_version) : null;
+      const cols = await cache.read(tenantId, version);
       const snap = {};
-      names.forEach((name, index) => { snap[name] = results[index].map(row => fromRow(name, row)); });
-      // Effective suspension = operator switch OR directory deactivation.
-      snap.users = snap.users.map(u => {
-        if (u.directoryStatus !== 'inactive') return u.suspended ? { ...u, suspendedBy: 'operator' } : u;
-        return { ...u, suspended: true, suspendedBy: u.suspended ? 'operator+directory' : 'directory' };
-      });
-      const t = await sql.first('SELECT name, settings FROM tenants WHERE id = ?', [tenantId]);
+      for (const name of Object.keys(COLLECTIONS)) snap[name] = cache.view(cols[name]);
       snap.settings = t ? JSON.parse(t.settings || '{}') : {};
       snap.tenant = { id: tenantId, name: t ? t.name : tenantId };
       return snap;
+    }
+
+    /** Keep the newest `keep` change-log rows (maintenance). Older caches just reload in full. */
+    async function pruneChanges(keep = 5000) {
+      if (!versioned) return 0;
+      const row = await sql.first('SELECT data_version AS v FROM tenants WHERE id = ?', [tenantId]);
+      const cutoff = row ? Number(row.v) - keep : 0;
+      if (cutoff <= 0) return 0;
+      const n = await sql.first('SELECT COUNT(*) AS n FROM snapshot_changes WHERE tenant_id = ? AND version <= ?', [tenantId, cutoff]);
+      if (!n || !Number(n.n)) return 0;
+      await sql.batch([{ sql: 'DELETE FROM snapshot_changes WHERE tenant_id = ? AND version <= ?', params: [tenantId, cutoff] }]);
+      return Number(n.n);
     }
 
     async function auditHead() {
@@ -286,7 +332,7 @@ function createStore(sql) {
       return sql.first('SELECT id, name, seeded, settings FROM tenants WHERE id = ?', [tenantId]);
     }
 
-    return { id: tenantId, snapshot, unit, transact, auditRecent, auditCount, auditVerify, auditHead, auditCheckpoint, auditRange, auditEntry, anchors, operators, info };
+    return { id: tenantId, snapshot, pruneChanges, unit, transact, auditRecent, auditCount, auditVerify, auditHead, auditCheckpoint, auditRange, auditEntry, anchors, operators, info };
   }
 
   const OP_COLS = 'tenant_id, id, name, role, site_ids, email, sso_issuer, sso_subject, break_glass';
@@ -359,7 +405,7 @@ function createStore(sql) {
   }
 
   return {
-    sql, tenant, createTenant, listTenants, tenantSettings, COLLECTIONS,
+    sql, tenant, createTenant, listTenants, tenantSettings, COLLECTIONS, cacheStats: cache.stats,
     operatorByTokenHash, operatorById, operatorBySso, operatorInvite,
     createSession, findSession, touchSession, revokeSession, saveFlow, takeFlow,
   };

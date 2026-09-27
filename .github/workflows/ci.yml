@@ -6,6 +6,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Shared snapshot items throw on writes instead of failing silently.
+      ACCESSX_SNAPSHOT_GUARD: '1'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

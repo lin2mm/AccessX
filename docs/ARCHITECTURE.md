@@ -327,11 +327,60 @@ bounded (429 + `Retry-After` past `WRITE_QUEUE_MAX`, default 256):
   and `test/approvals.api.test.js` runs with `WRITE_QUEUE=off` so the
   in-transaction guard keeps its own race test.
 
-Remaining limit: every write still loads the whole tenant snapshot (O(people)),
-so throughput falls as a tenant grows (Node: 99 req/s at 300 people, 22 req/s
-at 2,000). The DO is the natural place for the next step — cache the snapshot
-in memory and invalidate it on its own commits — or targeted queries per
-route. Not needed for the 5–200-door target; revisit past ~10k people.
+### Snapshot cache
+
+Every handler used to re-read the whole tenant (ten tables) per request:
+O(people) time and D1 rows read, and — because writes are serialized per
+tenant — a hard cap on write throughput as a tenant grows.
+`store/snapshot-cache.js` keeps a per-process copy and makes staleness
+structural rather than a matter of discipline:
+
+- **Versioning in the database.** `migrations/0011` adds triggers on all ten
+  snapshot tables: any insert/update/delete — any code path, a manual
+  `wrangler d1 execute` included — bumps `tenants.data_version` and logs
+  `(version, table, row id)` in `snapshot_changes`.
+- **Check on every read.** `snapshot()` reads the tenant row (settings +
+  `data_version`) exactly as before. Same version → cached collections, no
+  table reads. Newer → fetch only the logged rows (≤ 90 ids per statement:
+  D1 allows 100 bound parameters) and patch copy-on-write, keeping full-load
+  (`rowid`) order. Settings are never cached (they have side writes via
+  `json_set`).
+- **Fallbacks to a full reload:** a hole in the log (pruned — maintenance
+  keeps the newest 5,000 rows per tenant), more than 2,000 changes, an entry
+  older than 15 min, or a restored database (the cached version's log row is
+  gone). A database without migration 0011 is served uncached, not failed.
+- **Many processes, no coordination.** Every Worker isolate and the
+  tenant's Durable Object keep their own cache; since each read checks the
+  database version, a suspension written through the DO is visible to the
+  next read in any isolate (tested on the Worker).
+- **Shared objects are read-only.** Items are deep-frozen and every caller
+  gets its own arrays. The modules are sloppy-mode, where writes to frozen
+  objects fail silently, so tests and CI run with `ACCESSX_SNAPSHOT_GUARD=1`:
+  items become proxies that throw on any write. The whole suite passes in
+  that mode.
+- **Budget.** `SNAPSHOT_CACHE_ROWS` (Node 500k, Worker 100k — isolates have
+  128 MB): least recently used tenants are evicted; a tenant larger than the
+  budget is served uncached.
+
+Measured (`support/snapshot-bench.js`, Node/SQLite, people + as many
+credentials; median per request):
+
+| people | read before → after | write before → after |
+|---:|---:|---:|
+| 1,000 | 23 → 8 ms | 22 → 7 ms |
+| 10,000 | 246 → 7 ms | 223 → 8 ms |
+| 30,000 | 814 → 7 ms | 888 → 21 ms |
+
+Local D1 through `wrangler dev` (5,000 people): read 178 → 18 ms, write
+through the Durable Object 188 → 26 ms; D1 rows read per cached request drop
+from ~10,000 to 1. Cost: each row write also writes one `tenants` update and
+one log row (3× rows written on D1).
+
+D1 remote migrations: the server-side splitter mis-parses triggers with a
+lowercase `BEGIN`, CRLF line endings, or a trigger as the file's last
+statement (cloudflare/workers-sdk#15314); `test/snapshot-cache.test.js`
+lints every migration for these. After a D1 Time Travel restore, caches
+notice on their own (above); redeploying also clears them.
 
 ## TTLock outages
 
