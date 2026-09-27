@@ -48,3 +48,35 @@ test('security headers are set on pages and API', async t => {
   const apiRes = await fetch(api.base + '/api/auth');
   assert.equal(apiRes.headers.get('cache-control'), 'no-store');
 });
+
+test('clickjacking: pages may only be framed by their own origin (R22)', async t => {
+  const api = await boot({});
+  t.after(api.close);
+  const page = await fetch(api.base + '/');
+  assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'self'(;|$)/);
+  assert.equal(page.headers.get('x-frame-options'), 'SAMEORIGIN');
+  // Cloudflare serves the pages from public/_headers: same policy there.
+  const hdr = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'public', '_headers'), 'utf8');
+  assert.match(hdr, /Content-Security-Policy:[^\n]*frame-ancestors 'self'/);
+  assert.match(hdr, /X-Frame-Options: SAMEORIGIN/);
+  // Signup adds Turnstile to the policy and must keep frame-ancestors.
+  const { withTurnstile } = require('../signup-core');
+  assert.match(withTurnstile(page.headers.get('content-security-policy')), /frame-ancestors 'self'/);
+});
+
+test('FRAME_ANCESTORS widens framing only to a valid origin list; the doctor flags *', async t => {
+  const wide = await boot({ FRAME_ANCESTORS: 'https://intranet.example.com' });
+  t.after(wide.close);
+  const res = await fetch(wide.base + '/');
+  assert.match(res.headers.get('content-security-policy'), /frame-ancestors https:\/\/intranet\.example\.com(;|$)/);
+  assert.equal(res.headers.get('x-frame-options'), null);
+  const junk = await boot({ FRAME_ANCESTORS: "https://a.example.com; script-src *" });
+  t.after(junk.close);
+  assert.match((await fetch(junk.base + '/')).headers.get('content-security-policy'), /frame-ancestors 'self'$/, 'malformed value falls back to self');
+  const { checkConfig } = require('../doctor-core');
+  const find = (env, o) => checkConfig(env, o).find(c => c.id === 'FRAME_ANCESTORS');
+  assert.equal(find({ FRAME_ANCESTORS: '*' }).level, 'error');
+  assert.equal(find({ FRAME_ANCESTORS: 'https://intranet.example.com' }).level, 'warn');
+  assert.equal(find({ FRAME_ANCESTORS: 'https://x.example.com' }, { runtime: 'worker' }).level, 'warn');
+  assert.equal(find({}), undefined);
+});

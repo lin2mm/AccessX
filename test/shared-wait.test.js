@@ -33,3 +33,20 @@ test('Node mode, or a promise that was not shared: plain await', async () => {
   assert.equal(await awaitShared(share(Promise.resolve(3)), { workers: false }), 3);
   assert.equal(await awaitShared(Promise.resolve(4), { workers: true }), 4);
 });
+
+test('runtime detection: Workers mode is on exactly under workerd (R22)', () => {
+  // The smoke test cannot reproduce the R20 bug with a small tenant, so pin the switch itself:
+  // if detection ever says "not Workers" on Workers, every waiter awaits foreign I/O again.
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const src = fs.readFileSync(require.resolve('../store/shared-wait'), 'utf8');
+  const load = navigator => {
+    const mod = { exports: {} };
+    vm.runInNewContext(src, { module: mod, exports: mod.exports, navigator, setTimeout, WeakMap, Error, Promise });
+    return mod.exports.ON_WORKERS;
+  };
+  assert.equal(load({ userAgent: 'Cloudflare-Workers' }), true, 'workerd reports navigator.userAgent === "Cloudflare-Workers"');
+  assert.equal(load(undefined), false);
+  assert.equal(load({ userAgent: 'Node.js/22' }), false);
+  assert.equal(require('../store/shared-wait').ON_WORKERS, false, 'plain Node');
+});

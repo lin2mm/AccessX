@@ -64,6 +64,11 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
   for (const k of ['ALLOW_HTTP_WEBHOOKS', 'ALLOW_HTTP_ISSUERS', 'MOCK_IDP', 'MOCK_IDP_AUTOCONFIGURE']) {
     if (val(k) === '1') add(bad, k, `${k}=1 is a development switch (plain-HTTP or fake identity provider)`, `remove ${k}`);
   }
+  // R22 clickjacking: pages may only be framed by their own origin unless FRAME_ANCESTORS (Node) widens it.
+  const fa = val('FRAME_ANCESTORS').trim();
+  if (fa && runtime === 'worker') add('warn', 'FRAME_ANCESTORS', 'FRAME_ANCESTORS has no effect on the Worker', "edit frame-ancestors in public/_headers instead");
+  else if (fa.split(/\s+/).includes('*')) add(bad, 'FRAME_ANCESTORS', 'FRAME_ANCESTORS=* lets any site frame the console (clickjacking of Approve / Open door)', 'list the embedding origins, e.g. https://intranet.example.com');
+  else if (fa) add('warn', 'FRAME_ANCESTORS', `pages may be framed by: ${fa.slice(0, 120)}`, 'only for an intended embedding');
   if (val('COOKIE_SAMESITE').toLowerCase() === 'none') add('warn', 'COOKIE_SAMESITE', 'COOKIE_SAMESITE=None sends the session cookie on cross-site requests', 'only if the app must run inside another site\'s iframe');
 
   // --- secrets at rest

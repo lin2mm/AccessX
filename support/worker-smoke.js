@@ -58,6 +58,34 @@ check('public auth status', async () => {
   assert.equal(r.status, 200);
   assert.ok(r.body.operatorsConfigured >= 1);
 });
+// Overlapping reads and writes on a freshly started instance: no 5xx, every read 200, every
+// create lands. NOT the R20 regression gate: with the small demo tenant a snapshot reload is too
+// quick for requests to pile up on it, and this check still passes with the R20 fix reverted
+// (tried in R22, also at 400 requests). The gate for that bug is `npm run load:test` against a
+// fresh wrangler with ~2,000 people (docs/rounds/R20), plus test/shared-wait.test.js.
+check('concurrent reads and writes on a cold instance: no 5xx', async () => {
+  const statuses = [];
+  const created = [];
+  const odd = [];
+  for (let wave = 0; wave < 4; wave++) {
+    const reqs = [];
+    for (let i = 0; i < 24; i++) {
+      if (i % 6 === 0) {
+        reqs.push(call('POST', '/api/users', OWNER, { name: `Concurrency ${wave}-${i}`, groupIds: ['ug_staff'] })
+          .then(r => { statuses.push(r.status); if (r.body && r.body.item) created.push(r.body.item.id); }));
+      } else {
+        const url = ['/api/doors', '/api/users', '/api/audit?limit=5', '/api/doorGroups', '/api/compile'][i % 5];
+        reqs.push(call('GET', url, i % 2 ? OWNER : GYM).then(r => { statuses.push(r.status); if (r.status < 500 && r.status !== 200) odd.push(`${url} ${r.status}`); }));
+      }
+    }
+    await Promise.all(reqs);
+  }
+  for (const id of created) statuses.push((await call('DELETE', `/api/users/${id}`, OWNER)).status);
+  const errors = statuses.filter(s => s >= 500);
+  assert.equal(errors.length, 0, `${errors.length} of ${statuses.length} requests failed: ${[...new Set(errors)]}`);
+  assert.deepEqual(odd, [], 'every read answers 200');
+  assert.equal(created.length, 16, 'every create succeeded');
+});
 check('anonymous may read doors (demo open reads)', async () => {
   assert.equal((await call('GET', '/api/doors')).status, 200);
 });

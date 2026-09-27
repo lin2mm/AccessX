@@ -22,7 +22,7 @@ async function loadReview(){
       <div class="meta" style="margin-top:4px">${sm.total} line(s) you can see: ${sm.kept} kept, ${sm.removed} removed, <b>${sm.undecided} waiting</b>. Removing takes effect at once — the person leaves this site's groups and their codes there are deleted.</div></div>`;
     const lines=o.items||[];
     const row=i=>{
-      const who=`<b>${esc(i.name)}</b>${i.email?`<div class="meta">${esc(i.email)}</div>`:''}`;
+      const who=`<b translate="no">${esc(i.name)}</b>${i.email?`<div class="meta">${esc(i.email)}</div>`:''}`;
       const what=i.kind==='door'
         ?`<span class="tag">${esc(i.siteName||i.siteId)}</span> ${i.directory?'<span class="tag" title="Group membership comes from your directory (SCIM)">directory</span>':''}<div class="meta">${esc((i.doors||[]).join(', ')||'no doors')}${i.codes?` · ${i.codes} code(s)`:''}</div><div class="meta">via ${esc((i.groups||[]).join(', ')||'—')}</div>`
         :`<span class="tag o">administrator</span> ${esc(i.role)}${i.breakGlass?' <span class="tag r">break-glass</span>':''}<div class="meta">sites: ${esc((i.sites||[]).join(', '))} · last sign-in ${esc(ageText(i.lastLoginAt))}</div>`;
@@ -129,10 +129,10 @@ function renderSweep(){
   const odd=(s.unknown||0)+(s.expired_unknown||0)+(s.should_be_gone||0)+(s.missing||0)+(s.unreadable||0);
   let html=(r.note?`<div class="res y" style="margin-bottom:8px">${esc(r.note)}</div>`:'')+`<div class="res ${odd?'n':'y'}"><b>${r.locks.length} door(s) checked</b> — ${s.registered} code(s) issued by AccessX${odd?`; <b>${(s.unknown||0)+(s.expired_unknown||0)}</b> not from AccessX, <b>${s.should_be_gone||0}</b> revoked but still on the lock, <b>${s.missing||0}</b> missing from the lock${s.unreadable?`, ${s.unreadable} door(s) unreadable`:''}`:' and nothing else'}.${r.truncated?`<div class="meta">${esc(r.truncated)}</div>`:''}</div>`;
   for(const l of r.locks){
-    if(l.error){html+=`<div class="meta" style="margin-top:8px"><b>${esc(l.name)}</b>: could not read the codes — ${esc(l.error)}</div>`;continue;}
+    if(l.error){html+=`<div class="meta" style="margin-top:8px"><b translate="no">${esc(l.name)}</b>: could not read the codes — ${esc(l.error)}</div>`;continue;}
     const extra=(l.codes||[]).filter(c=>c.class!=='registered');
     if(!extra.length&&!(l.missing||[]).length)continue;
-    html+=`<div style="margin-top:12px"><b>${esc(l.name)}</b>${l.hasGateway?'':' <span class="tag o" title="Codes can only be removed at the lock (TTLock app over Bluetooth)">no gateway</span>'}`;
+    html+=`<div style="margin-top:12px"><b translate="no">${esc(l.name)}</b>${l.hasGateway?'':' <span class="tag o" title="Codes can only be removed at the lock (TTLock app over Bluetooth)">no gateway</span>'}`;
     if(extra.length){
       html+=`<table style="margin-top:6px"><tr>${l.hasGateway?'<th></th>':''}<th>Code</th><th>What</th><th>Valid</th><th>Set by</th></tr>`+extra.map(c=>`<tr>${l.hasGateway?`<td><input type="checkbox" data-sw-lock="${esc(l.lockId)}" value="${esc(c.ref)}"${c.class==='expired_unknown'?'':' checked'}></td>`:''}
         <td>${esc(c.name||c.ref)}<div class="meta">${esc(c.type||'')}</div></td><td><span class="tag ${c.class==='should_be_gone'?'r':'o'}">${esc(SWEEP_TEXT[c.class])}</span>${c.holder?`<div class="meta">${esc(c.holder)}</div>`:''}</td>

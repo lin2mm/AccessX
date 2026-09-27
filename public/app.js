@@ -202,13 +202,13 @@ async function loadPeople(){
   const groups=g.userGroups||[];
   const gname=id=>(groups.find(x=>x.id===id)||{}).name||id;
   $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th><th></th></tr>`+
-    USERS.map(p=>`<tr><td><b>${esc(p.name)}</b>${p.source==='scim'?' <span class="tag" title="Managed by your directory (SCIM)">directory</span>':''}<div class="meta">${esc(p.email||'')}</div></td>
+    USERS.map(p=>`<tr><td><b translate="no">${esc(p.name)}</b>${p.source==='scim'?' <span class="tag" title="Managed by your directory (SCIM)">directory</span>':''}<div class="meta">${esc(p.email||'')}</div></td>
     <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+esc(gname(i))+'</span>').join('')}</td>
     <td>${p.suspended?`<span class="tag r">${p.suspendedBy==='directory'?'deactivated in directory':'suspended'}</span>`:'<span class="tag g">active</span>'}
     ${p.validTo?'<div class="meta">until '+esc(String(p.validTo).slice(0,10))+'</div>':''}</td>
     <td>${p.suspendedBy==='directory'?'':`<button class="btn2 sm" type="button" data-suspend="${esc(p.id)}" data-to="${p.suspended?'unsuspend':'suspend'}">${p.suspended?'Reinstate':'Suspend'}</button>`}</td></tr>`).join('')+`</table><div id="people-msg" class="meta" style="margin-top:8px"></div>`;
   $('#ugroups').innerHTML=groups.map(x=>`<span class="chip">${esc(x.name)}</span>`).join('');
-  $('#scheds').innerHTML=(s.schedules||[]).map(x=>`<div style="margin-bottom:10px"><b>${esc(x.name)}</b>
+  $('#scheds').innerHTML=(s.schedules||[]).map(x=>`<div style="margin-bottom:10px"><b translate="no">${esc(x.name)}</b>
     ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
     <div class="sched">${(x.windows||[]).map(w=>'Days '+esc((w.days||[]).join(','))+' · '+esc(w.from)+'–'+esc(w.to)).join('<br>')}</div></div>`).join('');
   const opts=USERS.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
@@ -236,12 +236,12 @@ async function loadAdmin(){
   const siteName=id=>((sites.sites||[]).find(x=>x.id===id)||{}).name||id;
   const live=(o.operators||[]).filter(x=>!x.revokedAt);
   $('#ops').innerHTML=`<table><tr><th>Operator</th><th>Role</th><th>Sites</th><th>Sign-in</th><th>Last login</th><th></th></tr>`+
-    live.map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">${esc(x.email||'')}</div></td><td>${esc(x.role)}</td>
+    live.map(x=>`<tr><td><b translate="no">${esc(x.name)}</b><div class="meta">${esc(x.email||'')}</div></td><td>${esc(x.role)}</td>
     <td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td>
     <td>${x.ssoLinked?'<span class="tag g">SSO</span>':x.email?'<span class="tag o">SSO invited</span>':'<span class="tag">token</span>'}${x.breakGlass?' <span class="tag r">break-glass</span>':''}</td>
     <td class="meta">${when(x.lastLoginAt)}</td>
     <td><button class="btn2 sm" type="button" data-revoke-op="${esc(x.id)}">Revoke</button></td></tr>`).join('')+
-    (o.bootstrap||[]).map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">server configuration</div></td><td>${esc(x.role)}</td><td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td><td><span class="tag">env token</span></td><td></td><td></td></tr>`).join('')+'</table>';
+    (o.bootstrap||[]).map(x=>`<tr><td><b translate="no">${esc(x.name)}</b><div class="meta">server configuration</div></td><td>${esc(x.role)}</td><td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td><td><span class="tag">env token</span></td><td></td><td></td></tr>`).join('')+'</table>';
   $('#i-site').innerHTML='<option value="*">All sites</option>'+(sites.sites||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');
   const [dir,ug]=await Promise.all([api('/api/directory'),api('/api/userGroups')]);
   $('#dir-box').hidden=!dir.ok;
@@ -481,7 +481,7 @@ async function loadRules(){
   const rows=[...R.dg].sort((x,y)=>siteName(x.siteId).localeCompare(siteName(y.siteId))||x.name.localeCompare(y.name));
   $('#dgroups').innerHTML=`<table><tr><th>Site</th><th>Door group</th><th>Doors</th></tr>`+rows.map(g=>`<tr>
     <td>${esc(siteName(g.siteId))}</td>
-    <td><b>${esc(g.name)}</b> ${g.sensitive?'<span class="tag r">sensitive</span>':''}
+    <td><b translate="no">${esc(g.name)}</b> ${g.sensitive?'<span class="tag r">sensitive</span>':''}
       ${m?`<div style="margin-top:4px"><button class="btn2 sm" type="button" data-dg-rename="${esc(g.id)}">Rename</button>
       <button class="btn2 sm" type="button" data-dg-sens="${esc(g.id)}">${g.sensitive?'Unmark sensitive':'Mark sensitive'}</button>
       <button class="btn2 sm" type="button" data-dg-del="${esc(g.id)}">Delete</button></div>`:''}</td>
@@ -613,7 +613,7 @@ async function loadCompile(){
       <td>${x.doors.map(d=>`<details><summary>${lv(d.level)} ${esc(d.name)}</summary><div class="meta">${d.reasons.map(q=>'· '+esc(q.text)).join('<br>')}</div></details>`).join('')}
       ${x.slots.length?`<details><summary>compiled lock slots (${x.slots.length})</summary><div class="meta">${x.slots.map(q=>esc(DAYS[q.weekDay])+' '+hm(q.startMin)+'–'+hm(q.endMin)).join(' · ')}</div></details>`:''}</td></tr>`).join('')+`</table>`;
   $('#cm-locks').innerHTML=`<table><tr><th>Lock</th><th>Worst level</th><th>Rules</th><th>Issues</th></tr>`+
-    r.locks.map(l=>`<tr><td><b>${esc(l.name)}</b><div class="meta">${l.hasGateway?'gateway':'no gateway'} · ${l.cyclic?'weekly windows':'period only'}</div></td>
+    r.locks.map(l=>`<tr><td><b translate="no">${esc(l.name)}</b><div class="meta">${l.hasGateway?'gateway':'no gateway'} · ${l.cyclic?'weekly windows':'period only'}</div></td>
       <td>${lv(l.level)}</td><td>${Number(l.rules)}</td><td class="meta">${l.issues.map(esc).join('<br>')||'—'}</td></tr>`).join('')+`</table>`;
 }
 
@@ -1038,7 +1038,7 @@ async function loadWalkins(){
   if(fresh.length&&document.visibilityState!=='visible'){VIS.walkinsUnseen=(VIS.walkinsUnseen||0)+fresh.length;document.title=`(${VIS.walkinsUnseen}) walk-in · ${BASE_TITLE}`;}
   if(!list.length)return;
   $('#walk-list').innerHTML=`<table><tr><th>Visitor</th><th>Asked for</th><th>Signed in</th><th></th></tr>${list.map(w=>`<tr>
-    <td><b>${esc(w.name)}</b>${fresh.includes(w.id)?' <span class="tag o">new</span>':''}<div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
+    <td><b translate="no">${esc(w.name)}</b>${fresh.includes(w.id)?' <span class="tag o">new</span>':''}<div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
     <td>${w.hostName?esc(w.hostName)+(w.hostNotified==='delivered'?' <span class="tag g">told by email</span>':''):'<span class="meta">not matched: ask the visitor</span>'}</td>
     <td>${esc(new Date(w.createdAt).toLocaleTimeString(window.axLocale||[], {hour:'2-digit',minute:'2-digit'}))}<div class="meta">${esc(w.siteName||'')}${w.noticeAccepted?' · notice accepted':''}</div></td>
     <td style="white-space:nowrap"><button class="btn sm" data-wact="issue" data-wid="${esc(w.id)}">Issue code</button> <button class="btn2 sm" data-wact="dismiss" data-wid="${esc(w.id)}">Dismiss</button></td></tr>`).join('')}</table>`;
@@ -1059,7 +1059,7 @@ $('#walk-list').addEventListener('click',async e=>{
   $('#vi-invite').checked=false;renderInviteMode();
   $('#vi-name').value=w.name||'';$('#vi-company').value=w.company||'';$('#vi-email').value=w.email||'';
   if(w.hostUserId&&[...$('#vi-host').options].some(o=>o.value===w.hostUserId))$('#vi-host').value=w.hostUserId;
-  $('#vi-res').innerHTML=`<div class="res y">Issuing a code for walk-in <b>${esc(w.name)}</b>${w.siteName?' at '+esc(w.siteName):''}: choose the doors and the end time, then <b>Register &amp; create code</b>. <button class="btn2 sm" type="button" id="walk-cancel">Not now</button></div>`;
+  $('#vi-res').innerHTML=`<div class="res y">Issuing a code for walk-in <b translate="no">${esc(w.name)}</b>${w.siteName?' at '+esc(w.siteName):''}: choose the doors and the end time, then <b>Register &amp; create code</b>. <button class="btn2 sm" type="button" id="walk-cancel">Not now</button></div>`;
   $('#walk-cancel').addEventListener('click',()=>{VIS.walkinId=null;$('#vi-res').innerHTML='';});
   $('#vi-form').scrollIntoView({behavior:'smooth',block:'start'});
 });
@@ -1069,7 +1069,7 @@ async function loadKiosks(){
   if(!r.ok)return;
   if(!$('#kiosk-site').options.length)$('#kiosk-site').innerHTML=r.sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
   const act=r.kiosks.filter(k=>!k.revokedAt);
-  $('#kiosk-list').innerHTML=act.length?`<table><tr><th>Kiosk</th><th>Site</th><th>Last seen</th><th></th></tr>${act.map(k=>`<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.siteName||k.siteId)}</td>
+  $('#kiosk-list').innerHTML=act.length?`<table><tr><th>Kiosk</th><th>Site</th><th>Last seen</th><th></th></tr>${act.map(k=>`<tr><td><b translate="no">${esc(k.name)}</b></td><td>${esc(k.siteName||k.siteId)}</td>
     <td>${k.lastSeenAt?esc(new Date(k.lastSeenAt).toLocaleString(window.axLocale)):'<span class="meta">not opened yet</span>'}</td>
     <td><button class="btn2 sm" data-kact="revoke" data-kid="${esc(k.id)}">Switch off</button></td></tr>`).join('')}</table>`:'<div class="meta">No kiosks yet.</div>';
 }
@@ -1087,7 +1087,7 @@ $('#kiosk-form').addEventListener('submit',async e=>{
   if(!r.ok){$('#kiosk-res').innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
   const url=r.pairUrl.startsWith('/')?location.origin+r.pairUrl:r.pairUrl;
   let qr='';try{qr=window.AccessQR.svg(url,{size:200});}catch{qr='';}
-  $('#kiosk-res').innerHTML=`<div class="res y"><b>${esc(r.kiosk.name)}</b> is ready. On the reception tablet, scan this code with the camera or open the link. <b>Shown once</b>: anyone with the link can use this kiosk until you switch it off.
+  $('#kiosk-res').innerHTML=`<div class="res y"><b translate="no">${esc(r.kiosk.name)}</b> is ready. On the reception tablet, scan this code with the camera or open the link. <b>Shown once</b>: anyone with the link can use this kiosk until you switch it off.
     <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:8px"><div>${qr}</div><div class="meta" style="word-break:break-all;max-width:420px">${esc(url)}</div></div>
     <button class="btn2 sm" type="button" id="kiosk-hide" style="margin-top:8px">Done: hide the link</button></div>`;
   $('#kiosk-hide').addEventListener('click',()=>{$('#kiosk-res').innerHTML='';});
@@ -1113,7 +1113,7 @@ async function loadCalendar(){
       $('#cal-on').checked=!r.inbox||r.inbox.enabled;
       $('#cal-sets').innerHTML=r.sites.map(s=>{
         const doors=visDoors().filter(d=>d.siteId===s.id);
-        return `<div style="margin-top:6px"><b>${esc(s.name)}</b><div class="checks">${doors.map(d=>`<label class="${d.sensitive?'off':''}"><input type="checkbox" data-cal-site="${esc(s.id)}" value="${esc(d.lockId)}" ${d.sensitive?'disabled':''} ${!d.sensitive&&(chosen[s.id]||[]).includes(String(d.lockId))?'checked':''}> ${esc(d.lockAlias||d.lockId)}${d.sensitive?' <span class="meta">sensitive</span>':''}</label>`).join('')||'<span class="meta">no doors</span>'}</div></div>`;
+        return `<div style="margin-top:6px"><b translate="no">${esc(s.name)}</b><div class="checks">${doors.map(d=>`<label class="${d.sensitive?'off':''}"><input type="checkbox" data-cal-site="${esc(s.id)}" value="${esc(d.lockId)}" ${d.sensitive?'disabled':''} ${!d.sensitive&&(chosen[s.id]||[]).includes(String(d.lockId))?'checked':''}> ${esc(d.lockAlias||d.lockId)}${d.sensitive?' <span class="meta">sensitive</span>':''}</label>`).join('')||'<span class="meta">no doors</span>'}</div></div>`;
       }).join('');
     }
   }

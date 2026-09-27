@@ -129,9 +129,21 @@ app.disable('x-powered-by');
 // Mirrors public/_headers (used by the Cloudflare build).
 // No inline scripts or handlers: script-src 'self' blocks injected <script>/on*=.
 // connect-src/img-src 'self' stop exfiltration of tokens or data.
+// frame-ancestors (R22): only this origin may put the pages in a frame, so another site cannot
+// overlay the Approve / Open door buttons (clickjacking). FRAME_ANCESTORS widens it for an
+// intended embedding: space-separated origins. On the Worker the same policy is in public/_headers.
+const FRAME_ANCESTORS = frameAncestors(process.env.FRAME_ANCESTORS);
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; " +
-  "base-uri 'none'; form-action 'self'";
+  `base-uri 'none'; form-action 'self'; frame-ancestors ${FRAME_ANCESTORS}`;
+/** FRAME_ANCESTORS -> a CSP frame-ancestors source list; anything malformed falls back to 'self'. */
+function frameAncestors(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return "'self'";
+  const ok = v.split(/\s+/).every(t => /^('self'|'none'|\*|https?:\/\/(\*\.)?[a-z0-9.-]+(:\d+)?)$/i.test(t));
+  if (!ok) { console.error(`FRAME_ANCESTORS ignored (not a list of origins): ${v.slice(0, 80)}`); return "'self'"; }
+  return v;
+}
 const TURNSTILE_ON = Boolean(signupConfigFromEnv(process.env).turnstileSiteKey);
 const CSP_SIGNUP = withTurnstile(CSP); // R16: only the signup page may load the Turnstile widget
 app.use((req, res, next) => {
@@ -141,6 +153,7 @@ app.use((req, res, next) => {
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   });
+  if (FRAME_ANCESTORS === "'self'") res.set('X-Frame-Options', 'SAMEORIGIN'); // browsers without frame-ancestors
   if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
   next();
 });
