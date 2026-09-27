@@ -4,7 +4,7 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // No token is ever kept in the page. Signing in exchanges it for an
 // HttpOnly session cookie; only the CSRF token lives in memory.
-let csrf='', signedIn=false;
+let csrf='', signedIn=false, ME=null;
 const api=async(u,o={})=>{
   const headers=new Headers(o.headers||{});
   const m=(o.method||'GET').toUpperCase();
@@ -19,7 +19,7 @@ let DOORS=[],USERS=[];
 
 function showSession(s){
   signedIn=Boolean(s&&s.authenticated);
-  csrf=signedIn?s.csrf:'';
+  csrf=signedIn?s.csrf:'';ME=signedIn?(s.operator||null):null;
   $('#admin-logout').hidden=!signedIn;
   $('#admin-token').hidden=signedIn;$('#admin-submit').hidden=signedIn;
   $('#sso-btn').hidden=signedIn||!(s&&s.sso);
@@ -75,7 +75,7 @@ async function init(){
     return;
   }
   await loadMode();
-  await loadDoors();refreshTzNotes(true);await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();
+  await loadDoors();refreshTzNotes(true);await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 /* ---- door-local time: every time the operator types or reads is in the door's time zone ---- */
@@ -427,7 +427,8 @@ $('#appr-list').addEventListener('click',async e=>{
 async function issuePasscode(acknowledge=false){
   const end=$('#p-end').value;
   const body={userId:$('#p-user').value,lockId:Number($('#p-door').value),acknowledgeScheduleGap:acknowledge};
-  if(end)body.endLocal=end+'T23:59'; // converted in the door's time zone on the server
+  // End of that day = 00:00 the next day at the door (TTLock codes run on whole hours).
+  if(end)body.endLocal=nextDay(end)+'T00:00'; // converted in the door's time zone on the server
   const r=await post('/api/passcode',body);
   const out=$('#p-res');
   if(r._status===409&&r.needs==='acknowledgeScheduleGap'){
@@ -581,5 +582,109 @@ async function ask(text){
 $('#ai-sugg').addEventListener('click',e=>{if(e.target.tagName==='BUTTON')ask(e.target.textContent);});
 $('#ai-send').addEventListener('click',()=>ask());
 $('#ai-in').addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
+/* ---- visitors: a code per door, valid only for the visit ---- */
+function nextDay(ymd){const d=new Date(ymd+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+1);return d.toISOString().slice(0,10);}
+const hh=h=>String(h).padStart(2,'0')+':00';
+let VIS={hosts:[],settings:null};
+function visDoors(){return DOORS.filter(d=>d.siteId);}
+/** Doors of one site per visit: once a door is ticked, other sites' doors are disabled. */
+function renderVisDoors(checked=$$('#vi-doors input:checked').map(i=>i.value)){
+  const first=DOORS.find(d=>checked.includes(String(d.lockId)));
+  const site=first?first.siteId:null;
+  $('#vi-doors').innerHTML=visDoors().map(d=>{
+    const off=d.sensitive||(site&&d.siteId!==site);
+    const why=d.sensitive?' — sensitive, needs a rule + approval':(site&&d.siteId!==site?' — other site':'');
+    const on=!off&&checked.includes(String(d.lockId));
+    return `<label class="${off?'off':''}"><input type="checkbox" value="${esc(d.lockId)}" ${off?'disabled':''} ${on?'checked':''}> ${esc(d.lockAlias||d.lockId)} <span class="meta">${esc(d.site)}${esc(why)}</span></label>`;
+  }).join('')||'<span class="meta">No doors at a site you can see.</span>';
+}
+function visTz(){const c=$('#vi-doors input:checked');return c?doorTz(c.value):(visDoors()[0]?doorTz(visDoors()[0].lockId):BROWSER_TZ);}
+function renderVisTimes(){
+  const tz=visTz(),now=tzParts(new Date(),tz);
+  if(!$('#vi-date').value||$('#vi-date').value<now.date)$('#vi-date').value=now.date;
+  $('#vi-date').min=now.date;
+  const today=$('#vi-date').value===now.date,curH=Number(now.time.slice(0,2));
+  const from=$('#vi-from').value,until=$('#vi-until').value;
+  $('#vi-from').innerHTML=(today?'<option value="">Now</option>':'')+Array.from({length:24},(_,h)=>h).filter(h=>!today||h>curH).map(h=>`<option value="${hh(h)}">${hh(h)}</option>`).join('');
+  if([...$('#vi-from').options].some(o=>o.value===from))$('#vi-from').value=from;
+  const startH=$('#vi-from').value?Number($('#vi-from').value.slice(0,2)):curH;
+  $('#vi-until').innerHTML=Array.from({length:24},(_,i)=>i+1).filter(h=>h>startH).map(h=>`<option value="${h===24?'24:00':hh(h)}">${h===24?'Midnight':hh(h)}</option>`).join('');
+  const dflt=Math.min(24,Math.max(startH+1,17));
+  $('#vi-until').value=[...$('#vi-until').options].some(o=>o.value===until)?until:(dflt===24?'24:00':hh(dflt));
+  const c=$('#vi-doors input:checked');
+  $('#vi-tz').innerHTML=c?tzNote(c.value):'';
+}
+async function loadVisitors(){
+  const r=await api('/api/visits?range='+encodeURIComponent($('#vis-range').value));
+  const nav=$('nav button[data-v="visitors"]');
+  nav.hidden=!r.ok;
+  if(!r.ok){$('#vis-list').innerHTML=`<div class="meta">${esc(errText(r))}</div>`;return;}
+  VIS.settings=r.settings;
+  if(!VIS.hosts.length){const h=await api('/api/visits/hosts');VIS.hosts=h.hosts||[];
+    $('#vi-host').innerHTML='<option value="">Choose…</option>'+VIS.hosts.map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');}
+  if(!$('#vi-doors').children.length)renderVisDoors();
+  renderVisTimes();
+  $('#vi-send').disabled=!r.settings.emailAvailable;
+  $('#vi-send-l').classList.toggle('off',!r.settings.emailAvailable);
+  $('#vi-send-l').title=r.settings.emailAvailable?'':'Email is not configured on this server';
+  const s=await api('/api/visits/settings');
+  // Owner-only (also enforced by the server).
+  $('#vis-settings').hidden=!(s.ok&&ME&&ME.role==='r_owner');
+  if(s.ok){$('#vs-max').value=s.maxHours;$('#vs-ret').value=s.retentionDays;}
+  const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">on site window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
+  const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
+  const rows=r.visits.map(v=>{
+    const lock=v.lockIds[0];
+    const open=v.status==='scheduled'&&v.state!=='ended';
+    const who=v.erased?'<span class="meta">details erased</span>':`<b>${esc(v.visitorName)}</b><div class="meta">${esc([v.company,v.visitorEmail].filter(Boolean).join(' · '))}</div>`;
+    const doors=v.codes.map(c=>{const d=DOORS.find(x=>Number(x.lockId)===Number(c.lockId));return `<div>${esc(d?d.lockAlias:c.lockId)} ${codeTag(c)}</div>`;}).join('');
+    return `<tr><td>${who}</td><td>${esc(v.hostName||v.hostUserId)}</td><td>${doors}</td>
+      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.delivery==='emailed'?'<div class="meta">code emailed</div>':v.delivery==='email_failed'?'<div class="meta">email failed</div>':''}</td>
+      <td style="white-space:nowrap">${open?`<button class="btn2 sm" data-vact="${v.state==='scheduled'?'cancel':'checkout'}" data-vid="${esc(v.id)}">${v.state==='scheduled'?'Cancel':'Check out'}</button> `:''}${v.erased?'':`<button class="btn2 sm" data-vact="erase" data-vid="${esc(v.id)}" title="Erase this visitor's personal details now">Erase details</button>`}</td></tr>`;
+  }).join('');
+  $('#vis-list').innerHTML=rows?`<table><tr><th>Visitor</th><th>Host</th><th>Doors</th><th>When (door time)</th><th>State</th><th></th></tr>${rows}</table>`:'<div class="meta">No visitors in this period.</div>';
+}
+$('#vi-doors').addEventListener('change',()=>{renderVisDoors();renderVisTimes();});
+$('#vi-date').addEventListener('change',renderVisTimes);
+$('#vi-from').addEventListener('change',renderVisTimes);
+$('#vis-range').addEventListener('change',loadVisitors);
+$('#vi-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const lockIds=$$('#vi-doors input:checked').map(i=>Number(i.value));
+  const out=$('#vi-res');
+  if(!lockIds.length){out.innerHTML='<div class="res n">Choose at least one door.</div>';return;}
+  const date=$('#vi-date').value,from=$('#vi-from').value,until=$('#vi-until').value;
+  const body={visitorName:$('#vi-name').value,visitorEmail:$('#vi-email').value,company:$('#vi-company').value,hostUserId:$('#vi-host').value,lockIds,
+    endLocal:until==='24:00'?nextDay(date)+'T00:00':`${date}T${until}`,sendCode:$('#vi-send').checked&&!$('#vi-send').disabled};
+  if(from)body.startLocal=`${date}T${from}`;
+  $('#vi-submit').disabled=true;
+  const r=await post('/api/visits',body);
+  $('#vi-submit').disabled=false;
+  if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
+  const v=r.visit,lock=v.lockIds[0];
+  out.innerHTML=`<div class="res y"><b>${esc(v.visitorName)}</b> — ${r.delivery==='emailed'?'code emailed to the visitor':'give the visitor '+(r.codes.length>1?'these codes':'this code')}
+    ${r.codes.map(c=>`<div style="margin-top:8px"><span class="meta">${esc(c.door)}</span><div class="code">${esc(c.code)}</div></div>`).join('')}
+    <div class="meta" style="margin-top:6px">Shown once — the system keeps only the last two digits.</div>
+    <div style="margin-top:6px">${esc(atDoor(v.startAt,lock))} → ${esc(atDoor(v.endAt,lock))} <span class="meta">(door time)</span> · <span class="tag g">lock-enforced</span></div>
+    ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
+  $('#vi-name').value='';$('#vi-email').value='';$('#vi-company').value='';
+  loadVisitors();loadAudit();
+});
+$('#vis-list').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-vact]');if(!b)return;
+  const act=b.dataset.vact,id=b.dataset.vid;
+  const q={cancel:'Cancel this visit? Its codes stop working now where the door has a gateway.',checkout:'Check this visitor out? Their codes stop working now where the door has a gateway.',erase:"Erase this visitor's name, email and company now? The visit record (host, doors, times) stays."}[act];
+  if(!confirm(q))return;
+  b.disabled=true;
+  const r=await post(`/api/visits/${encodeURIComponent(id)}/${act}`,{});
+  if(!r.ok)alert(errText(r));
+  else if((r.warnings||[]).length)alert(r.warnings.join('\n'));
+  loadVisitors();loadCreds();loadAudit();
+});
+$('#vs-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const r=await api('/api/visits/settings',{method:'PUT',body:JSON.stringify({maxHours:Number($('#vs-max').value),retentionDays:Number($('#vs-ret').value)})});
+  $('#vs-msg').textContent=r.ok?`Saved: visits up to ${r.maxHours} h, details kept ${r.retentionDays} days after the visit.`:errText(r);
+});
 init();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});

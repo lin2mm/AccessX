@@ -134,7 +134,7 @@ Operators (people who administer the system) are separate from door users.
   door codes in the same request. SCIM groups grant nothing until an owner
   maps them to a user group (People → Operators & sign-in).
 - Built-in roles: `r_owner`, `r_manager` (site manager), `r_installer`, `r_view`
-  (auditor), `r_provisioner` (SCIM only). Every API route maps to one permission in `rbac-core.js`; routes
+  (auditor), `r_front_desk` (reception: visitors only), `r_provisioner` (SCIM only). Every API route maps to one permission in `rbac-core.js`; routes
   not listed there require the owner (fail closed).
 - Site-scoped operators only see, unlock, issue codes for and read records of
   doors at their sites. They see people with at least one group at their sites
@@ -190,6 +190,20 @@ Operators (people who administer the system) are separate from door users.
   that must be reconnected go to one webhook per tenant (URL stored
   encrypted) and/or up to 10 email recipients. Undelivered alerts are
   retried for about a day, then recorded as `alerts.dropped`.
+- **Visitors** — reception (`r_front_desk`, or anyone who may issue codes)
+  registers a visitor with a host, doors and a window; each door gets a code
+  valid only for the visit, so the lock ends it by itself, even offline.
+  Checking out early revokes over the gateway (a door without one is flagged
+  for removal at the lock, honestly). Visitor codes follow the host: suspend
+  the host and their visitors lose access. No sensitive doors (those need a
+  rule and four-eyes), at most 24 h by default, codes optionally emailed
+  (never queued or stored). Visitor details never enter the audit chain or
+  TTLock, and are erased 30 days after the visit (configurable) or on request.
+- **Codes run on whole hours** — TTLock period codes are valid on whole
+  hours only and must be used once within 24 h of their start, or the lock
+  voids them. Windows are rounded on the door's clock (start down, end up,
+  never past a person's contract end); the operator is told when rounding
+  changes a time and when the 24 h rule applies.
 - **Local times mean the site's clock** — passcode end dates and schedules
   are converted in the door's time zone, and the console labels every time
   field and result with that zone; on a daylight-saving fall-back the

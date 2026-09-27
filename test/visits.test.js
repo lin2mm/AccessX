@@ -106,6 +106,11 @@ test('refused: sensitive doors, mixed sites, other sites, unknown/suspended host
   const { api, sent } = await setup(t);
   const dg = await api.call('POST', '/api/doorGroups', { ...OWNER, body: { name: 'Server room', siteId: 'site_river', lockIds: [9002], sensitive: true } });
   assert.equal(dg.status, 200);
+  const doors = (await api.call('GET', '/api/doors', DESK)).body.doors;
+  assert.deepEqual(doors.filter(d => d.sensitive).map(d => d.lockId), [9002], 'the form can grey out sensitive doors');
+  assert.ok(doors.every(d => d.siteId === 'site_river'));
+  const roles = (await api.call('GET', '/api/permissions', OWNER)).body.roles;
+  assert.ok(roles.some(r => r.id === 'r_front_desk' && r.builtIn), 'assignable in tenants seeded before the role existed');
   const post = (body, who = DESK) => api.call('POST', '/api/visits', { ...who, body: visitBody(body) });
   const sens = await post({ lockIds: [9001, 9002] });
   assert.equal(sens.status, 409);

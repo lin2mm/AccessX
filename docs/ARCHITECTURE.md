@@ -413,6 +413,58 @@ Now (`vendor-accounts.js` `tokenSource`):
 Tests reproduce the race with two `vendorAccounts` instances on one database
 and a fake TTLock that rotates refresh tokens.
 
+## Visitors
+
+- A **visit** (table `visits`, migration 0012) is an invitation: visitor
+  name/email/company, host, site, doors, window, status
+  (`scheduled | checked_out | cancelled`; `active`/`ended` are derived from
+  the clock). It is not in the tenant snapshot (it grows with every visit):
+  routes query it directly, always with `tenant_id`.
+- Its codes are ordinary `credentials` rows with `visit_id` set and
+  `userId` = the host. So review, reconciler, removal SLA, alerts and the
+  revocation report cover visitor codes with no extra code. The review
+  treats them differently in one way: they are authorised by the visit, not
+  by rules, and are flagged only when the **host** is suspended or removed
+  (or they expired). Suspending a host therefore revokes their visitors.
+- `POST /api/visits` checks: host active and visible to the operator, every
+  door in this tenant's fleet and the operator's sites, all doors at one
+  site (one time zone), **no sensitive doors** (409: those need a rule and
+  four-eyes), at most `maxHours` (default 24, owner-settable up to 168),
+  starts at most 30 days ahead. Then one TTLock period code per door, with
+  the visit window as validity, and one unit of work: visit row +
+  credentials + `passcode.create` per door + `visit.create`. If the vendor
+  fails halfway, codes already on locks are deleted (gateway) or recorded as
+  `pending_removal` — never left untracked.
+- **Personal data** stays in `visits` only. Audit entries carry the visit
+  id, host id and lock ids; TTLock gets `AccessX visit <id>` as the code
+  name. `POST /api/visits/:id/erase` nulls name/email/company on request;
+  maintenance does it `retentionDays` (default 30) after the visit ends and
+  audits `visits.erased` with a count.
+- **Email** (`alerts.emailTo`): one attempt after the commit, never through
+  the alert outbox — a queued message would store the code. On failure the
+  code is still shown and the operator is told to hand it over.
+- **Checkout / cancel**: gateway → `deletePasscode` → `revoked`; no gateway →
+  `pending_removal` plus a warning that the code works until its end time
+  unless removed at the lock. A failed delete keeps the progress, leaves
+  the visit open and returns the error, so a retry finishes the job.
+- RBAC: `visitor.manage` (implied by `credential.issue`); `r_front_desk` =
+  `door.read` + `visitor.manage` — no people, rules, reports or sensitive
+  doors. `PUT /api/visits/settings` is owner-only.
+
+### TTLock validity rules (all passcodes)
+
+TTLock's keyboardPwd/get documents two rules the lock enforces regardless of
+what we send: validity is **whole hours** ("set the minute and second to
+0"), and a period code must be **used once within 24 h of its start** or it
+is voided. `credentials-core.ttlockWindow()` computes the window the lock
+will actually enforce — rounded on the door's wall clock (start down, end
+up; if rounding up would pass a person's `validTo`, round down) — and that
+is what is recorded and sent. Before this, "valid until 23:59" was recorded
+while the lock enforced something else. `ttlockWarnings()` tells the
+operator when rounding moved a time and, for windows over 24 h, the
+first-use deadline. Half-hour zones (Adelaide, India) round on the local
+clock; confirm on a real lock in such a zone before selling there.
+
 ## Vendors
 
 - Interface: `listLocks, unlock, createPasscode, deletePasscode, records,
@@ -461,8 +513,8 @@ and a fake TTLock that rotates refresh tokens.
 
 ## Known gaps
 
-- Snapshot per request (~11 small queries). Fine for small tenants; add a
-  per-tenant version counter + cache when it shows up in latency.
+- Visitor codes are one per door; TTLock has no multi-lock code. A visit is
+  capped at 5 doors. For recurring contractors, use a person + rule instead.
 - Auth rate limiting is in-memory (per process / per isolate). Use a
   Durable Object or Cloudflare rate-limiting rules in production.
 - SAML is not supported (OIDC covers Entra, Okta, Google; add SAML only when

@@ -241,12 +241,13 @@ function createApi({
   // --- doors ---------------------------------------------------------
   route('GET', /^\/api\/doors$/, async ctx => {
     const snap = await ctx.snap();
+    const sensitive = sensitiveLockSet(snap);
     const doors = (await ctx.visibleLocks()).map(l => {
       const dg = snap.doorGroups.find(d => (d.lockIds || []).map(Number).includes(Number(l.lockId)));
       const site = dg ? snap.sites.find(s => s.id === dg.siteId) : null;
       // timeZone: the zone every door-local time (endLocal, localTime, schedules)
       // is read in, so the UI can label and prefill in the door's time, not the browser's.
-      return { ...l, doorGroup: dg ? dg.name : null, site: site ? site.name : (l.groupName || 'Unassigned'), timeZone: policy.siteTimeZone(snap, site ? site.id : null) };
+      return { ...l, doorGroup: dg ? dg.name : null, site: site ? site.name : (l.groupName || 'Unassigned'), siteId: site ? site.id : null, timeZone: policy.siteTimeZone(snap, site ? site.id : null), sensitive: sensitive.has(Number(l.lockId)) };
     });
     return { doors };
   });

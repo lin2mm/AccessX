@@ -139,6 +139,9 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 .lv-lock{background:var(--green7);color:#C1F2D6}.lv-synced{background:#5c2d00;color:#FFCD88}.lv-cloud{background:#4a0f1a;color:var(--red3)}
 details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
 .code{font:700 22px/1 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--bold-green)}
+.checks label{display:inline-flex;align-items:center;gap:6px;margin:6px 16px 6px 0;text-transform:none;letter-spacing:0;font-size:13px;color:var(--txt)}
+.checks input{width:auto}
+.checks label.off{color:var(--txt3)}
 </style>
 </head>
 <body>
@@ -201,6 +204,49 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="meta tz-note" id="p-tz"></div>
       <div style="margin-top:14px"><button class="btn" type="button" id="p-issue">Issue passcode</button></div>
       <div id="p-res"></div>
+    </div>
+  </section>
+
+  <!-- VISITORS -->
+  <section id="v-visitors" class="view">
+    <div class="card">
+      <h2>Register a visitor</h2>
+      <div class="hint">The visitor gets a code for each door, valid only for the visit — the lock itself ends it, even offline. Codes run on whole hours (a TTLock rule). Sensitive doors are not offered: those need a rule and a second operator's approval.</div>
+      <form id="vi-form" autocomplete="off">
+        <div class="grid c3">
+          <div><label for="vi-name">Visitor name</label><input id="vi-name" required maxlength="100"></div>
+          <div><label for="vi-email">Email (optional)</label><input id="vi-email" type="email" maxlength="200"></div>
+          <div><label for="vi-company">Company (optional)</label><input id="vi-company" maxlength="100"></div>
+          <div><label for="vi-host">Host</label><select id="vi-host" required></select></div>
+          <div><label for="vi-date">Date at the door</label><input id="vi-date" type="date" required></div>
+          <div class="grid c2" style="gap:8px">
+            <div><label for="vi-from">From</label><select id="vi-from"></select></div>
+            <div><label for="vi-until">Until</label><select id="vi-until"></select></div>
+          </div>
+        </div>
+        <label>Doors</label>
+        <div id="vi-doors" class="checks"></div>
+        <div class="meta tz-note" id="vi-tz"></div>
+        <div class="checks"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label></div>
+        <div style="margin-top:10px"><button class="btn" type="submit" id="vi-submit">Register &amp; create code</button></div>
+      </form>
+      <div id="vi-res"></div>
+    </div>
+    <div class="card">
+      <h2>Visitors</h2>
+      <div class="hint">Checking out ends the codes now (doors with a gateway). A door without a gateway keeps accepting the code until the end time unless it is removed at the lock. Visitor details are erased automatically after the retention period.</div>
+      <label for="vis-range">Show</label>
+      <select id="vis-range" style="max-width:260px"><option value="current">Today &amp; upcoming</option><option value="recent">Last 30 days</option><option value="all">All</option></select>
+      <div id="vis-list" style="margin-top:10px;overflow-x:auto"></div>
+    </div>
+    <div class="card" id="vis-settings" hidden>
+      <h2>Visitor settings</h2>
+      <form id="vs-form" class="grid c3" style="align-items:end">
+        <div><label for="vs-max">Longest visit (hours)</label><input id="vs-max" type="number" min="1" max="168" required></div>
+        <div><label for="vs-ret">Keep visitor details (days after the visit)</label><input id="vs-ret" type="number" min="1" max="365" required></div>
+        <div><button class="btn2 sm" type="submit">Save</button></div>
+      </form>
+      <div id="vs-msg" class="meta" style="margin-top:6px"></div>
     </div>
   </section>
 
@@ -348,6 +394,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
   <button class="on" data-v="doors"><span class="ic">▣</span>Doors</button>
   <button data-v="access"><span class="ic">⛨</span>Access</button>
   <button data-v="ai"><span class="ic">✦</span>Copilot</button>
+  <button data-v="visitors"><span class="ic">✚</span>Visitors</button>
   <button data-v="people"><span class="ic">◉</span>People</button>
   <button data-v="log"><span class="ic">≡</span>Activity</button>
 </nav>
