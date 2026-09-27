@@ -480,6 +480,38 @@ and a fake TTLock that rotates refresh tokens.
 - Recorded once (CAS on `arrived_at IS NULL`); cancelled/checked-out visits
   and unlocks outside the window are ignored.
 
+### Lock alarms
+
+- Same TTLock records, other record types: 29 forced opening, 44 tamper,
+  48 keypad locked after repeated wrong codes, 64 door left open
+  (`lock-events-core.js`). The callback routes each alarm to tenants whose
+  door groups contain the lock (read-only), then **inside the tenant's
+  queue** the lock must be in that tenant's own TTLock fleet — a door group
+  can name any number, so without this check a tenant could subscribe to a
+  stranger's alarms.
+- `lock_alarms` keeps every report (primary key tenant+lock+kind+time, so a
+  resent record is ignored); one alert per lock and kind per 30 min;
+  `lock.alarm` is audited for announced alarms. Records uploaded more than an
+  hour after the event (no gateway, phone sync) are marked late.
+- Polling only reads doors with a visitor on site, so alarms on other doors
+  need the callback.
+- Adding a default-on alert event: owners who saved an event list earlier get
+  it too (`eventsSeen`); once they untick it, it stays off.
+
+### Visitor self check-out
+
+- With `PUBLIC_URL`, creating a visit that is emailed/texted (or
+  `checkoutLink: true`) stores `sha256("visit-checkout|" + token)` for a
+  144-bit random token and sends `PUBLIC_URL/checkout#<token>`. The fragment
+  is never sent to a server (no access logs, no Referer), the page removes it
+  from the address bar and POSTs it in the body to `/api/visit-checkout`
+  (`status` or `checkout`).
+- It can only **reduce** access: end the visit, delete codes on gateway doors,
+  mark the rest for removal. It never returns names or codes. Valid while the
+  visit is scheduled and until one hour after its end; cleared by check-out,
+  cancel and erasure. The write runs in the tenant's queue (Node
+  `serialize`, Worker DO `/__tenant/job`), audited with actor `visitor`.
+
 ### TTLock validity rules (all passcodes)
 
 TTLock's keyboardPwd/get documents two rules the lock enforces regardless of

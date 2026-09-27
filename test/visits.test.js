@@ -496,7 +496,7 @@ test('self check-out: a link in the message (token in the fragment, only its has
   const in6h = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(Date.now() + 6 * 36e5)).replace(' ', 'T');
   const v = await api.call('POST', '/api/visits', { ...DESK, body: visitBody({ visitorPhone: '+447700900123', sendSms: true, lockIds: [9001, 9004], startLocal: undefined, endLocal: in6h, acknowledgeScheduleGap: true }) });
   assert.equal(v.status, 200, JSON.stringify(v.body));
-  assert.match(v.body.checkoutUrl, /^https:\/\/doors\.example\/checkout\.html#[A-Za-z0-9_-]{24}$/);
+  assert.match(v.body.checkoutUrl, /^https:\/\/doors\.example\/checkout#[A-Za-z0-9_-]{24}$/);
   const token = v.body.checkoutUrl.split('#')[1];
   assert.ok(tw.got[0].form.Body.endsWith(`Leaving? ${v.body.checkoutUrl}`));
   const row = await api.server.store.sql.first('SELECT checkout_token_hash FROM visits WHERE id = ?', [v.body.visit.id]);

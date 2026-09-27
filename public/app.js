@@ -499,7 +499,7 @@ $('#a-verify').addEventListener('click',async()=>{
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
 });
-const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)'};
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)',lock_alarm:'Lock alarms (tamper, forced, keypad locked)',door_left_open:'Door left open'};
 async function loadAlerts(){
   const r=await api('/api/alerts');
   $('#alerts-box').hidden=!r.ok;
@@ -649,7 +649,11 @@ async function loadVisitors(){
     const a=s.arrivals||{};
     $('#vs-arrivals').textContent=!a.enabled?'Arrival detection is off: SECRETS_KEY is not set on the server.'
       :a.callback?'Arrivals: reported by TTLock within seconds (record callback), doors with a gateway.'
-      :'Arrivals: checked every scheduled run (about 15 min) on doors with a gateway. Set TTLOCK_NOTIFY_SECRET and the TTLock callback URL for instant notice.';}
+      :'Arrivals: checked every scheduled run (about 15 min) on doors with a gateway. Set TTLOCK_NOTIFY_SECRET and the TTLock callback URL for instant notice.';
+    if(a.callback)$('#vs-arrivals').textContent+=a.lastCallbackAt?` Last message from TTLock: ${new Date(a.lastCallbackAt).toLocaleString()}.`:' No message from TTLock yet: check the callback URL in the TTLock developer console.';
+    $('#vs-arrivals').textContent+=s.checkoutLinks?' Visitors get a self check-out link with their code.':' Set PUBLIC_URL to send visitors a self check-out link.';
+    $('#vs-sms').hidden=!s.smsAvailable;
+    if(s.smsUsage)$('#vs-sms-usage').textContent=`Text messages this month (${s.smsUsage.period}): ${s.smsUsage.sent}${s.smsUsage.cap?` of ${s.smsUsage.cap}`:''} · ${s.smsUsage.segments} billed segment${s.smsUsage.segments===1?'':'s'}`;}
   const DELIVERY={emailed:'code emailed',email_failed:'email failed',texted:'code texted',sms_failed:'text failed'};
   const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
@@ -682,9 +686,10 @@ $('#vi-form').addEventListener('submit',async e=>{
   $('#vi-submit').disabled=false;
   if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
   const v=r.visit,lock=v.lockIds[0];
+  const co=r.checkoutUrl?`<div class="meta" style="margin-top:6px">Self check-out link${/emailed|texted/.test(r.delivery)?' (sent to the visitor)':' — give it to the visitor'}: <span style="word-break:break-all">${esc(r.checkoutUrl)}</span></div>`:'';
   out.innerHTML=`<div class="res y"><b>${esc(v.visitorName)}</b> — ${/emailed|texted/.test(r.delivery)?'code sent to the visitor ('+esc(r.delivery.split('+').filter(d=>d==='emailed'||d==='texted').join(' and '))+')':'give the visitor '+(r.codes.length>1?'these codes':'this code')}
     ${r.codes.map(c=>`<div style="margin-top:8px"><span class="meta">${esc(c.door)}</span><div class="code">${esc(c.code)}</div></div>`).join('')}
-    <div class="meta" style="margin-top:6px">Shown once — the system keeps only the last two digits.</div>
+    <div class="meta" style="margin-top:6px">Shown once — the system keeps only the last two digits.</div>${co}
     <div style="margin-top:6px">${esc(atDoor(v.startAt,lock))} → ${esc(atDoor(v.endAt,lock))} <span class="meta">(door time)</span> · <span class="tag g">lock-enforced</span></div>
     ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
   $('#vi-name').value='';$('#vi-email').value='';$('#vi-phone').value='';$('#vi-company').value='';
@@ -700,6 +705,12 @@ $('#vis-list').addEventListener('click',async e=>{
   if(!r.ok)alert(errText(r));
   else if((r.warnings||[]).length)alert(r.warnings.join('\n'));
   loadVisitors();loadCreds();loadAudit();
+});
+$('#vs-sms-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const r=await post('/api/visits/sms-test',{to:$('#vs-sms-to').value});
+  $('#vs-msg').textContent=r.ok?(r.delivery==='delivered'?'Test text sent.':`Test text not sent: ${r.delivery}`):errText(r);
+  loadVisitors();
 });
 $('#vs-form').addEventListener('submit',async e=>{
   e.preventDefault();

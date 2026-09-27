@@ -805,7 +805,7 @@ function createApi({
     if (publicUrl && (body.sendCode === true || body.sendSms === true || body.checkoutLink === true)) {
       const token = randomB64url(18);
       await store.sql.batch([{ sql: 'UPDATE visits SET checkout_token_hash = ? WHERE tenant_id = ? AND id = ?', params: [sha256Hex(`visit-checkout|${token}`), ctx.tenantId, id] }]);
-      checkoutUrl = `${publicUrl.replace(/\/+$/, '')}/checkout.html#${token}`;
+      checkoutUrl = `${publicUrl.replace(/\/+$/, '')}/checkout#${token}`;
     }
     // Sent only AFTER the codes are recorded; never queued (a queue would store the code).
     const site = snap.sites.find(x => x.id === v.siteId);
@@ -922,6 +922,7 @@ function createApi({
    */
   async function visitCheckoutPublic(body, { dispatch = null } = {}) {
     const gone = { status: 404, body: { ok: false, error: 'This link is no longer valid. If you are still on site, please see reception.' } };
+    await whenReady();
     const row = await visitByToken(body && body.token);
     if (!row) return gone;
     const tenantId = row.tenant_id;
@@ -1062,6 +1063,7 @@ function createApi({
 
   /** One write for a tenant, run in its queue (Node serialize / Worker Durable Object). */
   async function runTenantJob(tenantId, job) {
+    await whenReady();
     if (job && job.type === 'alarm') return recordAlarm(tenantId, job);
     if (job && job.type === 'checkout') return visitorCheckout(tenantId, job);
     return recordArrival(tenantId, job);
@@ -1075,6 +1077,7 @@ function createApi({
    */
   async function ttlockNotify({ secret, form }, { dispatch = null } = {}) {
     if (!ttlockNotifySecret || !rbac.constantTimeEqual(String(secret || ''), ttlockNotifySecret)) return { status: 404, body: { ok: false, error: 'not found' } };
+    await whenReady(); // may be the first request this instance serves (D1 migrations / seeding)
     const list = [];
     for (const chunk of [].concat((form && form.records) || [])) {
       try { list.push(...[].concat(typeof chunk === 'string' ? JSON.parse(chunk) : chunk)); } catch { /* not JSON: ignore */ }

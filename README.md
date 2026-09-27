@@ -4,7 +4,9 @@ AccessX is an access-control demo with a browser-based PWA. The local Express
 server and Cloudflare Worker run the **same API core** (`api-core.js`) over the
 same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). Both
 use demo data and do not control physical locks. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
+[docs/PILOT.md](docs/PILOT.md) for trying it with real locks, and
+[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the proposed visitor pre-registration.
 
 ## Run locally
 
@@ -75,13 +77,14 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
-| `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI and for links in alerts; without it links are left out and the redirect URI follows the request host. |
+| `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts and visitors' self check-out links; without it those links are left out and the redirect URI follows the request host. |
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
 | `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `SMS_FROM` | texting visitor codes | `twilio`. `SMS_FROM` is a Twilio number (+E.164), an alphanumeric sender ID where the country allows it, or a Messaging Service SID (`MG…`). An API key may replace the auth token (`TWILIO_API_KEY` + `TWILIO_API_SECRET`). Codes are sent once and never queued; Twilio keeps message bodies in its logs according to your account settings. |
+| `SMS_MONTHLY_CAP` | optional | Texts per tenant per calendar month (default unlimited). The platform can set a tenant's own cap (`PUT /api/platform/tenants/:id/limits`); usage for billing: `GET /api/platform/usage?period=YYYY-MM`. At the cap, visits are still created and the code is shown on screen. |
 | `ALLOW_HTTP_WEBHOOKS` | local testing | `1` allows `http://` alert and anchor webhooks. **Never in production**: webhook URLs carry secrets. |
 | `ALLOW_HTTP_ISSUERS` / `MOCK_IDP` | local testing | Allow `http://` OIDC issuers / mount a fake IdP. Never in production. |
 | `DOH_URL` | SSO domain verification | DNS-over-HTTPS resolver for the TXT check (default Cloudflare). |
@@ -196,6 +199,11 @@ Operators (people who administer the system) are separate from door users.
   requests, overdue removals and arrivals can wait for one message a day at
   a local hour; break-glass, failed revocations and TTLock disconnections are
   always sent at once. Erasing a visitor also deletes their waiting alerts.
+- **Lock alarms** — with the TTLock callback, a tamper alarm, a forced
+  opening or a keypad locked after repeated wrong codes alerts at once
+  (`lock_alarm`, on by default, never batched; at most once per door and kind
+  per 30 min); a door left open is opt-in. Only the tenant whose TTLock
+  account holds the lock hears about it.
 - **Visitors** — reception (`r_front_desk`, or anyone who may issue codes)
   registers a visitor with a host, doors and a window; each door gets a code
   valid only for the visit, so the lock ends it by itself, even offline.
@@ -208,6 +216,11 @@ Operators (people who administer the system) are separate from door users.
   **Arrival**: the first unlock with the visitor's code (TTLock callback, or
   lock records every scheduled run) marks them arrived and emails the host;
   a Slack/Teams `visitor_arrived` alert is available opt-in.
+  **Self check-out**: with `PUBLIC_URL`, the email/text carries a link;
+  one tap ends the visit and removes the codes (no login, one use, shows no
+  names or codes; the token sits in the URL fragment, so it is never in
+  server logs). **SMS** is metered per tenant (messages and billed segments)
+  with an optional monthly cap, and owners can send a test text.
 - **Codes run on whole hours** — TTLock period codes are valid on whole
   hours only and must be used once within 24 h of their start, or the lock
   voids them. Windows are rounded on the door's clock (start down, end up,

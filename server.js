@@ -187,7 +187,8 @@ if (process.env.MOCK_IDP === '1') {
   console.warn('WARNING: MOCK_IDP=1 — a fake identity provider is mounted at /mock-idp (demo only)');
   app.use('/mock-idp', require('./support/mock-idp').createMockIdp({ basePath: '/mock-idp' }).router);
 }
-app.use(express.static(path.join(__dirname, 'public')));
+// extensions: /checkout serves checkout.html, as Cloudflare's asset handling does.
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 // Malformed JSON and oversize bodies → JSON errors, not HTML stack traces.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
