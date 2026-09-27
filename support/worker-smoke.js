@@ -422,6 +422,34 @@ check('demo reset through the tenant Durable Object restores the seed and keeps 
   assert.equal(after.ok, true);
   assert.ok(after.count > before.count);
 });
+check('Nuki on workerd (R19): connect by API token → keypad code → revoke → disconnect', async () => {
+  // Needs NUKI_API_BASE=http://127.0.0.1:<NUKI_PORT> and SECRETS_KEY in .dev.vars; the fake runs here.
+  if (!process.env.NUKI_PORT) { console.log('     (skipped: set NUKI_PORT, and NUKI_API_BASE in .dev.vars)'); return; }
+  const { nukiFixture } = require('./fake-nuki');
+  const { validKeypadCode } = require('../nuki');
+  const cloud = nukiFixture();
+  await cloud.listen(Number(process.env.NUKI_PORT));
+  try {
+    const c = await call('PUT', '/api/vendor-account', OWNER, { kind: 'nuki', apiToken: 'nuki-river-token' });
+    assert.equal(c.status, 200, JSON.stringify(c.body));
+    assert.equal(c.body.account.lockCount, 4);
+    const issued = await call('POST', '/api/passcode', OWNER, { lockId: 9001, userId: 'u1', acknowledgeScheduleGap: true });
+    assert.equal(issued.status, 200, JSON.stringify(issued.body));
+    assert.ok(validKeypadCode(issued.body.passcode.keyboardPwd), 'a Nuki keypad code, made with Web Crypto');
+    assert.equal(cloud.auths(9001)[0].allowedWeekDays, 127);
+    const info = await call('GET', '/api/vendor', OWNER);
+    assert.ok(info.body.limits.some(l => /Keypad/.test(l)), 'limits in words');
+    const r = await call('DELETE', `/api/credentials/${issued.body.credential.id}`, OWNER, { reason: 'smoke' });
+    assert.equal(r.body.credential.status, 'revoked', JSON.stringify(r.body));
+    assert.equal(cloud.auths(9001).length, 0, 'deleted on Nuki');
+  } finally {
+    const d = await call('DELETE', '/api/vendor-account', OWNER);
+    await cloud.close();
+    assert.equal(d.status, 200, 'back to the demo fleet');
+  }
+  assert.equal((await call('GET', '/api/doors', OWNER)).body.demo, true);
+});
+
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });
