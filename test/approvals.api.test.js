@@ -4,6 +4,7 @@ const { boot } = require('../support/boot');
 const { sha256Hex } = require('../audit-core');
 
 const OWNER = { token: 'owner-token' };
+const SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
 const M1 = { token: 'm1-token' };
 const M2 = { token: 'm2-token' };
 const AUD = { token: 'aud-token' };
@@ -14,7 +15,7 @@ const OPERATORS = JSON.stringify([
 ]);
 
 async function setup(t, env = {}) {
-  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, RECONCILE_INTERVAL_MIN: '0', ...env });
+  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, RECONCILE_INTERVAL_MIN: '0', SECRETS_KEY, ...env });
   t.after(api.close);
   const dg = await api.call('POST', '/api/doorGroups', { ...OWNER, body: { name: 'Server room', siteId: 'site_river', lockIds: [9002], sensitive: true } });
   assert.equal(dg.status, 200, JSON.stringify(dg.body));
@@ -47,12 +48,31 @@ test('passcode on a sensitive door: 202 → a different operator with the same p
 
   const ok = await api.call('POST', `/api/approvals/${id}/approve`, { ...M2, body: { note: 'ticket CHG-1042' } });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
-  assert.ok(ok.body.result.passcode.keyboardPwd, 'the code is shown once, to the approver');
+  assert.equal(ok.body.result.passcode, undefined, 'the approver never sees the code');
+  assert.ok(!JSON.stringify(ok.body).match(/keyboardPwd|codeHint/), 'not even a hint');
+  assert.equal(ok.body.result.codeHeldFor, 'op_m1');
   assert.equal(ok.body.result.credential.issuedBy, 'op_m1', 'issued in the requester\'s name');
+  // Only the requester can collect it, once.
+  assert.equal((await api.call('POST', `/api/approvals/${id}/collect`, { ...M2, body: {} })).status, 404, 'the approver cannot collect');
+  assert.equal((await api.call('POST', `/api/approvals/${id}/collect`, { ...OWNER, body: {} })).status, 404, 'nor can the owner');
+  const ready = (await api.call('GET', '/api/approvals', M1)).body.ready;
+  assert.deepEqual(ready.map(a => a.id), [id]);
+  assert.equal((await api.call('GET', '/api/approvals', M2)).body.ready.length, 0);
+  const got = await api.call('POST', `/api/approvals/${id}/collect`, { ...M1, body: {} });
+  assert.equal(got.status, 200, JSON.stringify(got.body));
+  assert.match(String(got.body.passcode.keyboardPwd), /^\d{4,9}$/);
+  assert.equal(got.body.credential.id, ok.body.result.credential.id);
+  const again = await api.call('POST', `/api/approvals/${id}/collect`, { ...M1, body: {} });
+  assert.equal(again.status, 410);
+  assert.match(again.body.error, /already collected/);
+  const row = await api.server.store.sql.first('SELECT sealed_code, collected_at FROM approvals WHERE id = ?', [id]);
+  assert.equal(row.sealed_code, null, 'nothing left in the database');
+  assert.ok(row.collected_at);
   assert.equal((await creds(api)).length, before + 1);
   const log = (await api.call('GET', '/api/audit?limit=10', OWNER)).body.log;
   assert.match(log.find(e => e.action === 'passcode.create').detail, new RegExp(`approval=${id} approvedBy=op_m2`));
   assert.match(log.find(e => e.action === 'approval.approve').detail, /ticket CHG-1042/);
+  assert.equal(log.find(e => e.action === 'approval.collect').actor, 'op_m1');
   assert.equal((await api.call('POST', `/api/approvals/${id}/approve`, { ...OWNER, body: {} })).status, 409, 'already approved');
   const done = (await api.call('GET', '/api/approvals?status=all', OWNER)).body.approvals.find(a => a.id === id);
   assert.equal(done.status, 'approved');
@@ -129,4 +149,26 @@ test('assignments, alias door groups, new members and deleting the protection al
   assert.equal((await api.call('GET', '/api/approvals?status=expired', OWNER)).body.approvals[0].id, stale);
   const actions = (await api.call('GET', '/api/audit?limit=60', OWNER)).body.log.map(e => e.action);
   for (const a of ['approval.request', 'approval.approve', 'approval.reject', 'approval.cancel', 'approval.expire']) assert.ok(actions.includes(a), a);
+});
+
+test('four-eyes passcodes fail closed without SECRETS_KEY; uncollected codes are discarded after 72 h', async t => {
+  const { api } = await setup(t, { SECRETS_KEY: '' });
+  const r = await api.call('POST', '/api/passcode', { ...M1, body: { lockId: 9002, userId: 'u2' } });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.reason, 'secrets_key_missing');
+  assert.equal((await api.call('GET', '/api/approvals', M2)).body.approvals.length, 0, 'no request created');
+  assert.equal((await api.call('POST', '/api/passcode', { ...M1, body: { lockId: 9001, userId: 'u1', acknowledgeScheduleGap: true } })).status, 200, 'other doors unaffected');
+});
+
+test('an approved code nobody collects is thrown away after 72 h (audited)', async t => {
+  const { api } = await setup(t);
+  const id = (await api.call('POST', '/api/passcode', { ...M1, body: { lockId: 9002, userId: 'u2' } })).body.approval.id;
+  assert.equal((await api.call('POST', `/api/approvals/${id}/approve`, { ...M2, body: {} })).status, 200);
+  await api.server.store.sql.batch([{ sql: 'UPDATE approvals SET decided_at = ? WHERE id = ?', params: [new Date(Date.now() - 73 * 36e5).toISOString(), id] }]);
+  const late = await api.call('POST', `/api/approvals/${id}/collect`, { ...M1, body: {} });
+  assert.equal(late.status, 410);
+  assert.match(late.body.error, /no code is waiting/);
+  const log = (await api.call('GET', '/api/audit?action=approval.code_discarded', OWNER)).body.log;
+  assert.equal(log.length, 1);
+  assert.match(log[0].detail, new RegExp(`^${id}: not collected`));
 });

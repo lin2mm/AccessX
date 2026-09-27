@@ -351,7 +351,8 @@ $('#cm-notices').addEventListener('click',e=>{const b=e.target.closest('[data-co
 async function loadApprovals(){
   const r=await api('/api/approvals');
   const list=r.ok?(r.approvals||[]):[];
-  $('#appr-card').hidden=!list.length&&!$('#appr-msg').textContent;
+  const ready=r.ok?(r.ready||[]):[];
+  $('#appr-card').hidden=!list.length&&!ready.length&&!$('#appr-msg').textContent;
   const who=id=>((USERS||[]).find(u=>u.id===id)||{}).name;
   const pretty=t=>esc(t).replace(/\buser (\w+)/g,(m,id)=>who(id)?`user ${esc(who(id))}`:m);
   $('#appr-list').innerHTML=list.length?`<table><tr><th>Request</th><th>Requested by</th><th>Expires</th><th></th></tr>`+
@@ -362,7 +363,20 @@ async function loadApprovals(){
     ${a.canCancel?`<button class="btn2 sm" type="button" data-appr="cancel" data-id="${esc(a.id)}">Cancel</button>`:''}
     ${!a.canDecide&&!a.canCancel?'<span class="meta">needs someone else</span>':''}</td></tr>`).join('')+'</table>'
     :'<div class="meta">Nothing waiting.</div>';
+  $('#appr-ready').innerHTML=ready.length?`<div class="meta" style="margin:12px 0 6px"><b>Codes approved for you</b> — only you can see them, once. Uncollected codes are discarded 72 h after approval.</div><table>`+
+    ready.map(a=>`<tr><td>${pretty(a.summary)}<div class="meta">approved by ${esc(a.decidedBy)} · ${esc(new Date(a.decidedAt).toLocaleString())}</div></td>
+    <td><button class="btn sm" type="button" data-collect="${esc(a.id)}">Show code (once)</button></td></tr>`).join('')+'</table>':'';
 }
+$('#appr-ready').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-collect]');if(!b)return;
+  if(!confirm('The code is shown once and then deleted from the server. Ready to write it down or hand it over?'))return;
+  b.disabled=true;
+  const r=await post(`/api/approvals/${encodeURIComponent(b.dataset.collect)}/collect`,{});
+  const msg=$('#appr-msg');
+  if(!r.ok)msg.textContent=errText(r);
+  else msg.innerHTML=`Passcode (shown once): <b class="code" style="font-size:18px">${esc(r.passcode.keyboardPwd)}</b>${r.credential?` <span class="meta">door ${esc(r.credential.lockId)} · until ${esc(new Date(r.credential.endAt).toLocaleString())}</span>`:''}`;
+  loadApprovals();loadAudit();
+});
 $('#appr-list').addEventListener('click',async e=>{
   const b=e.target.closest('[data-appr]');if(!b)return;
   const verb=b.dataset.appr;
@@ -371,7 +385,7 @@ $('#appr-list').addEventListener('click',async e=>{
   const r=await post(`/api/approvals/${encodeURIComponent(b.dataset.id)}/${verb}`,{note});
   const msg=$('#appr-msg');
   if(!r.ok)msg.textContent=errText(r);
-  else if(verb==='approve'&&r.result&&r.result.passcode)msg.innerHTML=`Approved. Passcode (shown once — hand it to the person): <b class="code" style="font-size:18px">${esc(r.result.passcode.keyboardPwd)}</b>`;
+  else if(verb==='approve'&&r.result&&r.result.codeHeldFor)msg.textContent=`Approved. The passcode was issued and is waiting for ${r.result.codeHeldFor} (the requester) — you never see it.`;
   else msg.textContent=`Request ${verb==='approve'?'approved and applied':verb==='reject'?'rejected':'cancelled'}.`;
   loadApprovals();loadAudit();loadCreds();loadRules();
 });

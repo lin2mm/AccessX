@@ -311,15 +311,21 @@ function createApi({
       id: r.id, summary: r.summary, locks: JSON.parse(r.locks), request: { method: payload.method, path: payload.path },
       requestedBy: r.requested_by, requestedAt: r.requested_at, expiresAt: r.expires_at, status: r.status,
       decidedBy: r.decided_by || null, decidedAt: r.decided_at || null, note: r.note || null, result: r.result ? JSON.parse(r.result) : null,
+      codeWaiting: Boolean(r.sealed_code), collectedAt: r.collected_at || null,
     };
   };
 
   /** Returns a 202 response body when approval is needed, else null. */
-  async function fourEyes(ctx, lockIds, summary) {
+  async function fourEyes(ctx, lockIds, summary, { issuesCode = false } = {}) {
     if (ctx.approval) return null; // this IS the approved execution
     const sensitive = sensitiveLockSet(await ctx.snap());
     const hit = [...new Set((lockIds || []).map(Number).filter(id => sensitive.has(id)))];
     if (!hit.length) return null;
+    if (issuesCode && !secretsKey) {
+      // Fail closed: without a key the code could only be handed to the approver,
+      // which defeats four-eyes (the approver would hold a working code).
+      throw new HttpError(503, 'Passcodes for sensitive doors need SECRETS_KEY on the server: the approved code is sealed so that only the requester can read it.', { reason: 'secrets_key_missing' });
+    }
     const now = Date.now();
     const approval = { id: policy.uid('apr'), summary, locks: hit, request: { method: ctx.method, path: ctx.path }, requestedBy: ctx.actor, requestedAt: new Date(now).toISOString(), expiresAt: new Date(now + APPROVAL_TTL_MS).toISOString(), status: 'pending' };
     await ctx.t.unit()
@@ -332,6 +338,15 @@ function createApi({
 
   async function expireApprovals(tenantId) {
     const now = new Date().toISOString();
+    // A code nobody collected within the approval window is thrown away (the
+    // credential stays; revoke/reissue if it is still needed).
+    const uncollected = await store.sql.all('SELECT id FROM approvals WHERE tenant_id = ? AND sealed_code IS NOT NULL AND decided_at <= ?',
+      [tenantId, new Date(Date.now() - APPROVAL_TTL_MS).toISOString()]);
+    if (uncollected.length) {
+      const u = store.tenant(tenantId).unit();
+      for (const r of uncollected) u.raw('UPDATE approvals SET sealed_code = NULL WHERE tenant_id = ? AND id = ?', [tenantId, r.id]).audit('approval.code_discarded', `${r.id}: not collected within 72 h`, 'system');
+      await u.commit();
+    }
     const stale = await store.sql.all("SELECT id FROM approvals WHERE tenant_id = ? AND status = 'pending' AND expires_at <= ?", [tenantId, now]);
     if (!stale.length) return 0;
     const uow = store.tenant(tenantId).unit();
@@ -359,6 +374,9 @@ function createApi({
         const canDecide = a.status === 'pending' && a.requestedBy !== ctx.actor && Boolean(r) && rbac.hasPermission(snap, ctx.operator, r.perm);
         return { ...a, canDecide, canCancel: a.status === 'pending' && a.requestedBy === ctx.actor };
       }),
+      // Approved passcodes waiting for *this* operator (the requester) to collect.
+      ready: (await store.sql.all("SELECT * FROM approvals WHERE tenant_id = ? AND requested_by = ? AND status = 'approved' AND sealed_code IS NOT NULL ORDER BY decided_at DESC LIMIT 50",
+        [ctx.tenantId, ctx.actor])).map(rowToApproval),
     };
   });
 
@@ -402,9 +420,35 @@ function createApi({
     let out;
     try { out = await decided.r.found.fn(reqCtx, decided.r.params); } catch (e) { return fail(e.message || String(e)); }
     const brief = out && (out.item ? { item: out.item.id } : out.credential ? { credential: out.credential.id } : out.mapped ? { mapped: out.mapped } : {});
-    await ctx.t.unit().raw('UPDATE approvals SET result = ? WHERE tenant_id = ? AND id = ?', [JSON.stringify({ ok: true, ...brief }), ctx.tenantId, id]).commit();
-    // A passcode is shown once — to the approver here, who hands it over.
-    return { approval: { ...decided.a, status: 'approved', decidedBy: ctx.actor, note, result: { ok: true, ...brief } }, result: out };
+    let sealedCode = null;
+    let result = out;
+    if (out && out.passcode) {
+      // Four-eyes means the approver must not hold a working code: seal it for
+      // the requester (bound to tenant + approval id) and return only metadata.
+      sealedCode = await encryptSecret(secretsKey, JSON.stringify(out.passcode), { tenantId: ctx.tenantId, purpose: `approval-code:${id}` });
+      const { credential: c = {}, warnings = [] } = out;
+      result = { credential: { id: c.id, lockId: c.lockId, userId: c.userId, startAt: c.startAt, endAt: c.endAt, status: c.status, issuedBy: c.issuedBy }, warnings, codeHeldFor: decided.a.requestedBy };
+    }
+    await ctx.t.unit().raw('UPDATE approvals SET result = ?, sealed_code = ? WHERE tenant_id = ? AND id = ?', [JSON.stringify({ ok: true, ...brief }), sealedCode, ctx.tenantId, id]).commit();
+    return { approval: { ...decided.a, status: 'approved', decidedBy: ctx.actor, note, result: { ok: true, ...brief }, codeWaiting: Boolean(sealedCode) }, result };
+  });
+
+  // The requester collects an approved passcode — once. The sealed copy is
+  // wiped in the same transaction that audits the collection.
+  route('POST', /^\/api\/approvals\/([^/]+)\/collect$/, async (ctx, [id]) => {
+    await expireApprovals(ctx.tenantId);
+    const taken = await ctx.t.transact(async (snap, uow) => {
+      const row = await store.sql.first('SELECT * FROM approvals WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+      if (!row || row.requested_by !== ctx.actor) throw new HttpError(404, 'not found'); // only the requester even learns it exists
+      if (!row.sealed_code) throw new HttpError(410, row.collected_at ? `this code was already collected at ${row.collected_at}` : 'no code is waiting for this request', { collectedAt: row.collected_at || null });
+      const at = new Date().toISOString();
+      uow.raw('UPDATE approvals SET sealed_code = NULL, collected_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+        .audit('approval.collect', `${id}: passcode collected by the requester`, ctx.actor);
+      return { sealed: row.sealed_code, result: row.result ? JSON.parse(row.result) : {} };
+    });
+    const passcode = JSON.parse(await decryptSecret(secretsKey, taken.sealed, { tenantId: ctx.tenantId, purpose: `approval-code:${id}` }));
+    const credential = taken.result.credential ? (await ctx.snap()).credentials.find(c => c.id === taken.result.credential) || null : null;
+    return { passcode, credential, message: 'Shown once. It is not stored anywhere any more.' };
   });
 
   // --- collections (CRUD) ----------------------------------------------
@@ -485,7 +529,7 @@ function createApi({
       throw new HttpError(status, error, rest);
     }
     const c = plan.credential;
-    const gate = await fourEyes(ctx, [c.lockId], `passcode: lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt}`);
+    const gate = await fourEyes(ctx, [c.lockId], `passcode: lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt}`, { issuesCode: true });
     if (gate) return gate;
     const out = await ctx.vendor.createPasscode({ lockId: c.lockId, name: String(name || `AccessX ${userId}`).slice(0, 100), startAt: c.startAt, endAt: c.endAt });
     const entry = creds.register({ credentials: [] }, c, { issuedBy: ctx.actor, vendorRef: out.keyboardPwdId, code: out.keyboardPwd });

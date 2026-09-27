@@ -193,7 +193,14 @@ of the head hash held by someone else.
   stored request is then re-run **as the requester** through the same route
   handler, so policy, scope and validation are re-checked against current
   data (a person suspended meanwhile gets nothing; `approval.failed`).
-  A passcode is shown once to the approver, who hands it over.
+  The approver never sees a passcode: it is sealed with `SECRETS_KEY`
+  (AES-GCM, bound to tenant + approval id) and only the requester can
+  collect it, once (`POST /api/approvals/:id/collect`, audited
+  `approval.collect`; the ciphertext is wiped in the same transaction).
+  Uncollected codes are discarded 72 h after approval
+  (`approval.code_discarded`). Without `SECRETS_KEY`, passcodes for sensitive
+  doors fail closed (503 `secrets_key_missing`) instead of falling back to
+  showing the approver the code.
 - `reject` (with note), `cancel` (requester only), 72 h expiry
   (`approval.expire`). All steps are audit entries; the action's own entry
   carries `approval=<id> approvedBy=<op>`.

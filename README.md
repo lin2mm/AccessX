@@ -138,7 +138,9 @@ Operators (people who administer the system) are separate from door users.
   (≥ 365 days) purges only below a delivered anchor, via a checkpoint.
 - **Four-eyes approvals** — mark a door group *sensitive* and every new way
   into its doors (code, rule, group membership, directory mapping) waits for
-  a second operator; approved requests are re-checked before they run.
+  a second operator; approved requests are re-checked before they run. The
+  approver never sees an approved passcode — only the requester can collect
+  it, once.
 - **48 h removal SLA** — a code that still has to be removed at an offline
   lock is flagged *over 48 h* in the revocation report and evidence pack, and
   escalated once in the audit log (`credential.removal_overdue`).

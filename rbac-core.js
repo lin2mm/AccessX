@@ -86,6 +86,8 @@ const ROUTES = [
   // Four-eyes: listing is operational; deciding re-checks the ORIGINAL route's permission inside.
   ['GET', /^\/api\/approvals$/, 'door.read'],
   ['POST', /^\/api\/approvals\/[^/]+\/(approve|reject|cancel)$/, AUTHENTICATED],
+  // Collecting an approved code: only the requester, checked in the route.
+  ['POST', /^\/api\/approvals\/[^/]+\/collect$/, 'credential.issue'],
   ['GET', /^\/api\/credentials$/, 'report.read'],
   ['DELETE', /^\/api\/credentials\/[^/]+$/, 'credential.issue'],
   ['GET', /^\/api\/compile$/, 'report.read'],
