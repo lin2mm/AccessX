@@ -5,6 +5,17 @@ All work is on branch `arena/01a0de29-accessx`, starting from `main` at `b74185b
 delivery each; details per round in [docs/90-ROUNDS.md](docs/90-ROUNDS.md) and
 `docs/rounds/`. Dates are 2026-09-27, Sydney time.
 
+## R24 — deploy script checked against the wrangler source (part of v1.0-pilot)
+
+- `d1 list --json` parsing tolerates lines before the JSON, including `[WARNING]`.
+- `d1 create --update-config=false`: wrangler never writes an id into `wrangler.jsonc`.
+- The health URL comes from the deploy target list (after `Deployed <name> triggers`).
+- Health check: an unhealthy HTTP answer fails the build. No answer at all (DNS for a
+  new workers.dev subdomain) only warns.
+- A clear message when `npm run deploy` runs without `wrangler login`.
+- Doc 13: a Worker-name mismatch doesn't fail the build. Wrangler deploys under the
+  dashboard name and Cloudflare opens a pull request that renames it.
+
 ## R23 — deploy from GitHub (part of v1.0-pilot)
 
 The repository is connected to Cloudflare Workers Builds, so a merge to `main`
