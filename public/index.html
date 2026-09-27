@@ -260,12 +260,40 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
           <div><button class="btn sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="sso-remove">Remove</button></div>
           <div id="sso-msg" class="meta"></div>
         </form>
+        <div id="sso-domains" style="margin-top:10px"></div>
+        <div id="sso-enforce-box" hidden style="margin-top:10px">
+          <div class="hint">Require single sign-on: people can only sign in through your identity provider, so disabling them there locks them out here too. Directory-sync tokens and break-glass owners keep working; every break-glass sign-in is recorded.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+            <button class="btn2 sm" type="button" id="sso-enforce">Require single sign-on</button>
+            <button class="btn2 sm" type="button" id="glass-create">Create break-glass owner</button>
+            <span id="sso-enforce-msg" class="meta"></span>
+          </div>
+        </div>
+      </div>
+      <div id="vendor-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Lock vendor account (TTLock)</b>
+        <div id="vendor-state" class="meta" style="margin:4px 0 8px"></div>
+        <form id="vendor-form" class="grid c3" style="align-items:end">
+          <label>Region<select id="v-region"><option value="eu">EU (euapi.ttlock.com)</option><option value="cn">China (api.sciener.com)</option></select></label>
+          <label>TTLock account<input id="v-user" required maxlength="100" autocomplete="off" placeholder="a dedicated admin account, not a personal one"></label>
+          <label>Password<input id="v-pass" type="password" required maxlength="200" autocomplete="new-password" placeholder="used once, never stored"></label>
+          <label>Own app client ID (optional)<input id="v-cid" autocomplete="off" placeholder="leave empty to use the platform app"></label>
+          <label>Own app client secret<input id="v-csec" type="password" autocomplete="new-password"></label>
+          <div><button class="btn sm" type="submit">Connect</button> <button class="btn2 sm" type="button" id="vendor-remove">Disconnect</button></div>
+          <div id="vendor-msg" class="meta"></div>
+        </form>
       </div>
     </div>
   </section>
 
   <!-- ACTIVITY -->
   <section id="v-log" class="view">
+    <div class="card" id="appr-card" hidden>
+      <h2>Waiting for a second person</h2>
+      <div class="hint">New access to a sensitive door needs approval by a different operator with the same permission. Approved requests are re-checked against current rules before they run; requests expire after 72 hours.</div>
+      <div id="appr-list" style="overflow-x:auto"></div>
+      <div id="appr-msg" class="meta" style="margin-top:6px"></div>
+    </div>
     <div class="card">
       <h2>Time to revoke · last 30 days</h2>
       <div class="grid c3" id="ttr-kpis"></div>
@@ -287,6 +315,13 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <button class="btn2 sm" type="button" id="a-verify">Verify audit chain</button>
         <span id="a-verify-res" class="meta"></span>
       </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn2 sm" type="button" id="a-anchor">Anchor now</button>
+        <button class="btn2 sm" type="button" id="a-export">Export (JSON)</button>
+        <a class="btn2 sm" id="a-evidence" href="evidence.html" target="_blank" rel="noopener">Evidence pack</a>
+        <span id="a-anchor-res" class="meta"></span>
+      </div>
+      <div class="hint" id="a-anchor-state"></div>
       <div style="overflow-x:auto"><table id="alog"></table></div>
     </div>
   </section>

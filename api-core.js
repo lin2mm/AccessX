@@ -109,8 +109,11 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }),
+  secretsKey = '', fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn }), vendorAccounts = null, auditOps = null, dns = null,
 }) {
+  /** A tenant's own connected account wins; otherwise the adapter's default (demo / legacy env). */
+  const resolveVendor = async tenantId => (vendorAccounts && await vendorAccounts.vendorFor(tenantId)) || vendorFor(tenantId);
+
   let ready = null;
   const whenReady = () => {
     if (!ready) ready = ensureReady().catch(error => { ready = null; throw error; });
@@ -132,14 +135,22 @@ function createApi({
   /* ---------------------------------------------------------------- */
   async function reconcileTenant(tenantId, { userId = null, lockFilter = () => true, dryRun = false, actor } = {}) {
     const t = store.tenant(tenantId);
-    const vendor = vendorFor(tenantId);
+    const vendor = await resolveVendor(tenantId);
     const [snap, locks] = await Promise.all([t.snapshot(), vendor.listLocks()]);
     const planned = reconciler.plan(snap, locks, { userId, lockFilter });
-    if (dryRun || !planned.actions.length) return { dryRun, plan: planned, summary: { revoked: 0, expired: 0, pendingRemoval: 0, failed: 0 } };
+    const overdue = planned.notices.filter(n => n.type === 'removal_overdue');
+    // Escalate each overdue on-site removal once (the audit entry is the marker).
+    let fresh = [];
+    if (overdue.length && !dryRun) {
+      const done = new Set((await t.auditRecent({ action: 'credential.removal_overdue', limit: 1000 })).map(e => String(e.detail).split(' ')[0]));
+      fresh = overdue.filter(n => !done.has(n.credentialId));
+    }
+    if (dryRun || (!planned.actions.length && !fresh.length)) return { dryRun, plan: planned, summary: { revoked: 0, expired: 0, pendingRemoval: 0, failed: 0, overdue: overdue.length, escalated: 0 } };
     const uow = t.unit();
-    const outcome = await reconciler.execute(planned, { vendor, uow, snapshot: snap, actor });
+    const outcome = planned.actions.length ? await reconciler.execute(planned, { vendor, uow, snapshot: snap, actor }) : { summary: { revoked: 0, expired: 0, pendingRemoval: 0, failed: 0 }, results: [] };
+    for (const n of fresh) uow.audit('credential.removal_overdue', `${n.credentialId} lock ${n.lockId} user ${n.userId} still on the lock after ${n.ageHours} h (SLA ${n.slaHours} h)`, reconciler.ACTOR);
     await uow.commit();
-    return { dryRun, plan: planned, ...outcome };
+    return { dryRun, plan: planned, ...outcome, summary: { ...outcome.summary, overdue: overdue.length, escalated: fresh.length } };
   }
 
   /** Run after a write that can remove access. Never fails the request:
@@ -280,6 +291,122 @@ function createApi({
     };
   });
 
+  // --- four-eyes approvals ------------------------------------------------------
+  /**
+   * New access to a sensitive door needs a second person. The original
+   * request is stored; when a different operator with the same permission
+   * approves, it is re-run AS THE REQUESTER against current data (so every
+   * validation, policy and scope check happens again). 72 h expiry.
+   * Removing access never needs approval.
+   */
+  const APPROVAL_TTL_MS = 72 * 3600e3;
+  const sensitiveLockSet = snap => new Set(snap.doorGroups.filter(g => g.sensitive).flatMap(g => g.lockIds || []).map(Number));
+  const locksOfUserGroups = (snap, ugIds) => {
+    const dgs = new Set(snap.assignments.filter(a => ugIds.includes(a.userGroupId)).map(a => a.doorGroupId));
+    return snap.doorGroups.filter(g => dgs.has(g.id)).flatMap(g => g.lockIds || []);
+  };
+  const rowToApproval = r => {
+    const payload = JSON.parse(r.payload);
+    return {
+      id: r.id, summary: r.summary, locks: JSON.parse(r.locks), request: { method: payload.method, path: payload.path },
+      requestedBy: r.requested_by, requestedAt: r.requested_at, expiresAt: r.expires_at, status: r.status,
+      decidedBy: r.decided_by || null, decidedAt: r.decided_at || null, note: r.note || null, result: r.result ? JSON.parse(r.result) : null,
+    };
+  };
+
+  /** Returns a 202 response body when approval is needed, else null. */
+  async function fourEyes(ctx, lockIds, summary) {
+    if (ctx.approval) return null; // this IS the approved execution
+    const sensitive = sensitiveLockSet(await ctx.snap());
+    const hit = [...new Set((lockIds || []).map(Number).filter(id => sensitive.has(id)))];
+    if (!hit.length) return null;
+    const now = Date.now();
+    const approval = { id: policy.uid('apr'), summary, locks: hit, request: { method: ctx.method, path: ctx.path }, requestedBy: ctx.actor, requestedAt: new Date(now).toISOString(), expiresAt: new Date(now + APPROVAL_TTL_MS).toISOString(), status: 'pending' };
+    await ctx.t.unit()
+      .raw('INSERT INTO approvals (tenant_id, id, summary, payload, locks, requested_by, requested_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [ctx.tenantId, approval.id, summary, JSON.stringify({ method: ctx.method, path: ctx.path, body: ctx.body }), JSON.stringify(hit), ctx.actor, approval.requestedAt, approval.expiresAt])
+      .audit('approval.request', `${approval.id}: ${summary} [sensitive locks ${hit.join(',')}]`, ctx.actor)
+      .commit();
+    return { _status: 202, approvalRequired: true, approval, message: 'This grants access to a sensitive door: a second operator must approve it (within 72 hours).' };
+  }
+
+  async function expireApprovals(tenantId) {
+    const now = new Date().toISOString();
+    const stale = await store.sql.all("SELECT id FROM approvals WHERE tenant_id = ? AND status = 'pending' AND expires_at <= ?", [tenantId, now]);
+    if (!stale.length) return 0;
+    const uow = store.tenant(tenantId).unit();
+    for (const r of stale) {
+      uow.raw("UPDATE approvals SET status = 'expired', decided_at = ? WHERE tenant_id = ? AND id = ? AND status = 'pending'", [now, tenantId, r.id]).audit('approval.expire', r.id, 'system');
+    }
+    await uow.commit();
+    return stale.length;
+  }
+  const routeFor = payload => {
+    const found = routes.find(r => r.method === payload.method && r.pattern.test(payload.path));
+    return found ? { found, params: payload.path.match(found.pattern).slice(1).map(decodeURIComponent), perm: rbac.requiredPermission(payload.method, payload.path) } : null;
+  };
+
+  route('GET', /^\/api\/approvals$/, async ctx => {
+    await expireApprovals(ctx.tenantId);
+    const status = ctx.query.get('status') || 'pending';
+    const rows = await store.sql.all(`SELECT * FROM approvals WHERE tenant_id = ?${status === 'all' ? '' : ' AND status = ?'} ORDER BY requested_at DESC LIMIT 100`,
+      status === 'all' ? [ctx.tenantId] : [ctx.tenantId, status]);
+    const snap = await ctx.snap();
+    const list = rows.map(rowToApproval).filter(a => ctx.scope.all || a.locks.every(l => ctx.scope.lock(l)));
+    return {
+      approvals: list.map(a => {
+        const r = routeFor(a.request);
+        const canDecide = a.status === 'pending' && a.requestedBy !== ctx.actor && Boolean(r) && rbac.hasPermission(snap, ctx.operator, r.perm);
+        return { ...a, canDecide, canCancel: a.status === 'pending' && a.requestedBy === ctx.actor };
+      }),
+    };
+  });
+
+  route('POST', /^\/api\/approvals\/([^/]+)\/(approve|reject|cancel)$/, async (ctx, [id, verb]) => {
+    await expireApprovals(ctx.tenantId);
+    const note = typeof ctx.body.note === 'string' && ctx.body.note.trim() ? ctx.body.note.trim().slice(0, 500) : null;
+    // Decide under the tenant's audit head: two approvers racing → one wins, the other sees "already approved".
+    const decided = await ctx.t.transact(async (snap, uow) => {
+      const row = await store.sql.first('SELECT * FROM approvals WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+      if (!row) throw new HttpError(404, 'not found');
+      const a = rowToApproval(row);
+      if (!ctx.scope.all && a.locks.some(l => !ctx.scope.lock(l))) throw new HttpError(404, 'not found');
+      if (a.status !== 'pending') throw new HttpError(409, `this request is already ${a.status}`);
+      const r = routeFor(JSON.parse(row.payload));
+      if (verb === 'cancel') {
+        if (a.requestedBy !== ctx.actor) throw new HttpError(403, 'forbidden', { detail: 'only the requester can cancel' });
+      } else {
+        if (a.requestedBy === ctx.actor) throw new HttpError(403, 'forbidden', { detail: 'four-eyes: a different operator must decide' });
+        if (!r || !rbac.hasPermission(snap, ctx.operator, r.perm)) throw new HttpError(403, 'forbidden', { detail: `deciding needs the ${r ? r.perm : '?'} permission` });
+      }
+      const status = { approve: 'approved', reject: 'rejected', cancel: 'cancelled' }[verb];
+      uow.raw("UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?, note = ? WHERE tenant_id = ? AND id = ? AND status = 'pending'",
+        [status, ctx.actor, new Date().toISOString(), note, ctx.tenantId, id])
+        .audit(`approval.${verb}`, `${id}: ${a.summary}${note ? ` — note: ${note}` : ''}`, ctx.actor);
+      return { a, payload: JSON.parse(row.payload), r, status };
+    });
+    if (verb !== 'approve') return { approval: { ...decided.a, status: decided.status, decidedBy: ctx.actor, note } };
+
+    // Execute as the requester, re-validated against current data.
+    const fail = async message => {
+      await ctx.t.unit().raw("UPDATE approvals SET status = 'failed', result = ? WHERE tenant_id = ? AND id = ?", [JSON.stringify({ error: message }), ctx.tenantId, id])
+        .audit('approval.failed', `${id}: ${message}`, ctx.actor).commit();
+      throw new HttpError(409, `approved, but the change could not be applied: ${message}`, { approvalId: id });
+    };
+    const requester = await auth.operatorFor(ctx.tenantId, decided.a.requestedBy);
+    const snap = await ctx.t.snapshot();
+    if (!requester) return fail('the requester no longer has access');
+    if (!decided.r || !rbac.hasPermission(snap, requester, decided.r.perm)) return fail('the requester no longer holds the permission for this change');
+    const reqCtx = buildCtx({ t: ctx.t, vendor: ctx.vendor, tenantId: ctx.tenantId, operator: requester, body: decided.payload.body || {}, query: new URLSearchParams(), origin: ctx.origin, method: decided.payload.method, path: decided.payload.path, approval: { id, approvedBy: ctx.actor } });
+    reqCtx.scope = scopeFor(snap, requester);
+    let out;
+    try { out = await decided.r.found.fn(reqCtx, decided.r.params); } catch (e) { return fail(e.message || String(e)); }
+    const brief = out && (out.item ? { item: out.item.id } : out.credential ? { credential: out.credential.id } : out.mapped ? { mapped: out.mapped } : {});
+    await ctx.t.unit().raw('UPDATE approvals SET result = ? WHERE tenant_id = ? AND id = ?', [JSON.stringify({ ok: true, ...brief }), ctx.tenantId, id]).commit();
+    // A passcode is shown once — to the approver here, who hands it over.
+    return { approval: { ...decided.a, status: 'approved', decidedBy: ctx.actor, note, result: { ok: true, ...brief } }, result: out };
+  });
+
   // --- collections (CRUD) ----------------------------------------------
   for (const coll of COLLECTIONS) {
     route('GET', new RegExp(`^/api/${coll}$`), async ctx => ({ [coll]: ctx.scope.filter(coll, (await ctx.snap())[coll]) }));
@@ -290,8 +417,17 @@ function createApi({
       if (!ctx.scope.canWrite(coll, clean)) {
         throw outOfScope(coll === 'users' ? 'every groupId must belong to one of your sites' : `creating ${coll} here needs all-site scope`);
       }
+      let gate = null;
+      if (coll === 'assignments') {
+        gate = await fourEyes(ctx, (snap.doorGroups.find(g => g.id === clean.doorGroupId) || {}).lockIds, `assignment: user group ${clean.userGroupId} -> door group ${clean.doorGroupId}`);
+      } else if (coll === 'users' && (clean.groupIds || []).length && !clean.suspended) {
+        gate = await fourEyes(ctx, locksOfUserGroups(snap, clean.groupIds), `new user in groups ${clean.groupIds.join(',')}`);
+      } else if (coll === 'doorGroups' && !clean.sensitive) {
+        gate = await fourEyes(ctx, clean.lockIds, `door group "${clean.name}" (not marked sensitive) containing sensitive locks`);
+      }
+      if (gate) return gate;
       const item = { ...clean, id: policy.uid(coll.slice(0, 3)) }; // server owns ids
-      await ctx.t.unit().insert(coll, item).audit(`${coll}.create`, createDetail(coll, item), ctx.actor).commit();
+      await ctx.t.unit().insert(coll, item).audit(`${coll}.create`, createDetail(coll, item) + (ctx.approval ? ` (approval ${ctx.approval.id} by ${ctx.approval.approvedBy})` : ''), ctx.actor).commit();
       return { item };
     });
 
@@ -307,6 +443,11 @@ function createApi({
       }
       const refs = referencedBy(coll, id, snap);
       if (refs.length) throw new HttpError(409, 'still referenced', { referencedBy: refs.slice(0, 20) });
+      if (coll === 'doorGroups' && item.sensitive) {
+        // Removing the protection itself needs a second person.
+        const gate = await fourEyes(ctx, item.lockIds, `delete sensitive door group ${id}`);
+        if (gate) return gate;
+      }
       // Deleting the row IS the erasure: name/email exist nowhere else
       // (audit entries reference the id only).
       await ctx.t.unit().remove(coll, id)
@@ -321,8 +462,17 @@ function createApi({
   // --- credentials -----------------------------------------------------
   route('POST', /^\/api\/passcode$/, async ctx => {
     const snap = await ctx.snap();
-    const { lockId, name, userId, startAt, endAt, acknowledgeScheduleGap } = ctx.body;
+    const { lockId, name, userId, startAt, acknowledgeScheduleGap } = ctx.body;
+    let { endAt } = ctx.body;
     if (lockId === undefined || lockId === null || lockId === '') throw new HttpError(400, 'lockId is required');
+    // endLocal = wall-clock time AT THE DOOR ("2026-10-31T23:59"), not in the admin's browser.
+    if (ctx.body.endLocal !== undefined) {
+      const site = policy.siteForLock(snap, lockId);
+      const tz = policy.siteTimeZone(snap, site ? site.id : null);
+      const t = policy.zonedTimeToDate(String(ctx.body.endLocal), tz);
+      if (Number.isNaN(t.getTime())) throw new HttpError(400, 'endLocal must look like 2026-10-31T23:59');
+      endAt = t.toISOString();
+    }
     await ctx.requireLock(lockId);
     if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
     const user = snap.users.find(u => u.id === userId);
@@ -335,11 +485,14 @@ function createApi({
       throw new HttpError(status, error, rest);
     }
     const c = plan.credential;
+    const gate = await fourEyes(ctx, [c.lockId], `passcode: lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt}`);
+    if (gate) return gate;
     const out = await ctx.vendor.createPasscode({ lockId: c.lockId, name: String(name || `AccessX ${userId}`).slice(0, 100), startAt: c.startAt, endAt: c.endAt });
     const entry = creds.register({ credentials: [] }, c, { issuedBy: ctx.actor, vendorRef: out.keyboardPwdId, code: out.keyboardPwd });
     entry.vendorRef = entry.vendorRef === null || entry.vendorRef === undefined ? null : String(entry.vendorRef);
     await ctx.t.unit().insert('credentials', entry)
       .audit('passcode.create', `${entry.id} lock ${c.lockId} user ${userId} ${c.startAt}..${c.endAt} enforcement=${c.enforcement}` +
+        (ctx.approval ? ` approval=${ctx.approval.id} approvedBy=${ctx.approval.approvedBy}` : '') +
         (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), ctx.actor)
       .commit();
     // The full code is returned exactly once and never stored.
@@ -433,6 +586,26 @@ function createApi({
   });
   route('GET', /^\/api\/audit\/verify$/, async ctx => ({ verification: await ctx.t.auditVerify() }));
 
+  // --- enforced single sign-on ---------------------------------------------
+  const ssoSettings = async tenantId => ((await store.tenantSettings(tenantId)) || {}).sso || null;
+  const verifiedDomains = cfg => Object.entries((cfg && cfg.domainVerification) || {}).filter(([, v]) => v && v.verifiedAt).map(([d]) => d);
+  /**
+   * With enforcement on, people must come through the identity provider
+   * (so disabling them there cuts them off). Exempt: SCIM machine tokens,
+   * break-glass operators, and bootstrap operators from the server config.
+   */
+  async function ssoRequiredFor(tenantId, operator, signIn) {
+    if (!operator || operator.anonymous || operator.platform || signIn === 'sso') return null;
+    if (operator.role === 'r_provisioner' || operator.breakGlass || operator.env) return null;
+    const cfg = await ssoSettings(tenantId);
+    if (!cfg || !cfg.enforced) return null;
+    return { status: 403, body: { ok: false, error: 'single sign-on is required for this account — sign in with your company account', code: 'sso_required' } };
+  }
+  const breakGlassHolders = async (ctx) => [
+    ...(await ctx.t.operators()).filter(o => !o.revokedAt && o.breakGlass && o.role === 'r_owner'),
+    ...auth.envOperators(ctx.tenantId).filter(o => o.role === 'r_owner'),
+  ];
+
   // --- operators (people who administer the system) --------------------------
   route('GET', /^\/api\/operators$/, async ctx => {
     await ctx.snap();
@@ -461,14 +634,16 @@ function createApi({
     if (viaSso && !email) throw new HttpError(400, 'email is required for single sign-on operators');
     if (viaSso && !(await store.tenantSettings(ctx.tenantId) || {}).sso) throw new HttpError(409, 'configure single sign-on first');
     if (email && (await ctx.t.operators()).some(o => !o.revokedAt && o.email === email)) throw new HttpError(409, 'an operator with this email already exists');
+    const breakGlass = b.breakGlass === true;
+    if (breakGlass && (b.role !== 'r_owner' || viaSso)) throw new HttpError(400, 'a break-glass operator must be a token-based owner');
     // SSO operators get an unusable random token hash: they can only sign in
     // through the identity provider (and are cut off when IT disables them there).
     const token = viaSso ? null : `ax_${randomToken()}`;
-    const op = { id: policy.uid('op'), name, role: b.role, siteIds, email, tokenSha256: sha256Hex(token || `unusable:${randomToken()}`), createdBy: ctx.actor };
+    const op = { id: policy.uid('op'), name, role: b.role, siteIds, email, breakGlass, tokenSha256: sha256Hex(token || `unusable:${randomToken()}`), createdBy: ctx.actor };
     const stmt = operatorStatement(ctx.tenantId, op);
     await ctx.t.unit().raw(stmt.sql, stmt.params)
-      .audit('operator.create', `${op.id} role=${op.role} sites=${siteIds.join(',') || '*'}${viaSso ? ' auth=sso' : ''}`, ctx.actor).commit();
-    const operator = { id: op.id, name, role: op.role, siteIds, email: email || undefined, auth: viaSso ? 'sso' : 'token' };
+      .audit('operator.create', `${op.id} role=${op.role} sites=${siteIds.join(',') || '*'}${viaSso ? ' auth=sso' : ''}${breakGlass ? ' break_glass' : ''}`, ctx.actor).commit();
+    const operator = { id: op.id, name, role: op.role, siteIds, email: email || undefined, auth: viaSso ? 'sso' : 'token', breakGlass };
     // Token shown once; only the hash is stored.
     return viaSso ? { operator, invited: true } : { operator, token };
   });
@@ -479,6 +654,9 @@ function createApi({
     const target = (await ctx.t.operators()).find(o => o.id === id && !o.revokedAt);
     if (!target) throw new HttpError(404, 'not found');
     if (!ctx.scope.all && (!(target.siteIds || []).length || target.siteIds.some(s => !ctx.scope.site(s)))) throw outOfScope('operator is outside your sites');
+    if (target.breakGlass && ((await ssoSettings(ctx.tenantId)) || {}).enforced && (await breakGlassHolders(ctx)).filter(o => o.id !== id).length === 0) {
+      throw new HttpError(409, 'this is the last break-glass owner while single sign-on is enforced — create another one (or turn enforcement off) first');
+    }
     const at = new Date().toISOString();
     await ctx.t.unit().raw('UPDATE operators SET revoked_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .raw('UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND operator_id = ? AND revoked_at IS NULL', [at, ctx.tenantId, id])
@@ -489,7 +667,14 @@ function createApi({
   // --- single sign-on configuration (owner only) ----------------------------
   const SSO_PURPOSE = 'sso.clientSecret';
   const publicSso = (cfg, origin) => ({
-    sso: cfg ? { issuer: cfg.issuer, clientId: cfg.clientId, domains: cfg.domains || [], trustUnverifiedEmail: Boolean(cfg.trustUnverifiedEmail), hasClientSecret: Boolean(cfg.clientSecretEnc), updatedAt: cfg.updatedAt } : null,
+    sso: cfg ? {
+      issuer: cfg.issuer, clientId: cfg.clientId, domains: cfg.domains || [], trustUnverifiedEmail: Boolean(cfg.trustUnverifiedEmail), hasClientSecret: Boolean(cfg.clientSecretEnc), updatedAt: cfg.updatedAt,
+      enforced: Boolean(cfg.enforced),
+      domainStatus: (cfg.domains || []).map(d => {
+        const v = (cfg.domainVerification || {})[d] || {};
+        return { domain: d, verified: Boolean(v.verifiedAt), verifiedAt: v.verifiedAt || null, record: v.token ? { name: `_accessx.${d}`, type: 'TXT', value: `accessx-verification=${v.token}` } : null };
+      }),
+    } : null,
     redirectUri: origin ? `${origin}/api/auth/sso/callback` : null,
     secretsKeyConfigured: Boolean(secretsKey),
   });
@@ -511,13 +696,15 @@ function createApi({
     if (!clientId || clientId.length > 200) throw new HttpError(400, 'clientId is required');
     const domains = [...new Set((Array.isArray(b.domains) ? b.domains : []).map(d => String(d).trim().toLowerCase()).filter(Boolean))];
     for (const d of domains) if (!DOMAIN_RE.test(d)) throw new HttpError(400, `domains: "${d}" is not a domain`);
-    // First tenant to claim a domain keeps it (email → tenant routing must be unambiguous).
+    // A domain someone else has PROVEN (DNS) is theirs. Unproven claims do
+    // not block anyone: the first tenant to publish the TXT record wins.
     for (const other of await store.listTenants()) {
       if (other.id === ctx.tenantId) continue;
-      const theirs = ((await store.tenantSettings(other.id)) || {}).sso;
-      const clash = theirs && (theirs.domains || []).find(d => domains.includes(d));
-      if (clash) throw new HttpError(409, `domain ${clash} is already claimed by another account`);
+      const clash = verifiedDomains(((await store.tenantSettings(other.id)) || {}).sso).find(d => domains.includes(d));
+      if (clash) throw new HttpError(409, `domain ${clash} is already verified by another account`);
     }
+    const prevVerification = (prev && prev.domainVerification) || {};
+    const domainVerification = Object.fromEntries(domains.map(d => [d, prevVerification[d] || { token: randomB64url(18), verifiedAt: null }]));
     try { await oidc.discover(issuerStr); } catch (e) { throw new HttpError(400, `issuer discovery failed: ${e.message}`); }
     let clientSecretEnc = null;
     let secretNote = 'none';
@@ -529,7 +716,7 @@ function createApi({
       clientSecretEnc = prev.clientSecretEnc;
       secretNote = 'kept';
     }
-    const sso = { issuer: issuerStr, clientId, domains, trustUnverifiedEmail: b.trustUnverifiedEmail === true, clientSecretEnc, updatedAt: new Date().toISOString() };
+    const sso = { issuer: issuerStr, clientId, domains, domainVerification, enforced: Boolean(prev && prev.enforced), trustUnverifiedEmail: b.trustUnverifiedEmail === true, clientSecretEnc, updatedAt: new Date().toISOString() };
     await saveSettings(ctx, { ...settings, sso })
       .audit('sso.configure', `issuer=${issuerStr} client=${clientId} domains=${domains.join(',') || '-'} secret=${secretNote}${sso.trustUnverifiedEmail ? ' trustUnverifiedEmail' : ''}`, ctx.actor).commit();
     return publicSso(sso, ctx.origin);
@@ -538,6 +725,7 @@ function createApi({
   route('DELETE', /^\/api\/sso$/, async ctx => {
     const settings = (await store.tenantSettings(ctx.tenantId)) || {};
     if (!settings.sso) throw new HttpError(404, 'single sign-on is not configured');
+    if (settings.sso.enforced) throw new HttpError(409, 'turn off single sign-on enforcement before removing single sign-on');
     const { sso, ...rest } = settings;
     await saveSettings(ctx, rest)
       .raw("UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND via = 'sso' AND revoked_at IS NULL", [new Date().toISOString(), ctx.tenantId])
@@ -545,9 +733,61 @@ function createApi({
     return publicSso(null, ctx.origin);
   });
 
+  /** Prove domain ownership: TXT _accessx.<domain> = accessx-verification=<token>. */
+  route('POST', /^\/api\/sso\/domains\/verify$/, async ctx => {
+    const settings = (await store.tenantSettings(ctx.tenantId)) || {};
+    const cfg = settings.sso;
+    const domain = String(ctx.body.domain || '').trim().toLowerCase();
+    if (!cfg || !(cfg.domains || []).includes(domain)) throw new HttpError(404, 'add the domain to the single sign-on settings first');
+    const entry = (cfg.domainVerification || {})[domain];
+    if (!entry || !entry.token) throw new HttpError(409, 'save the single sign-on settings again to get a verification record');
+    if (entry.verifiedAt) return publicSso(cfg, ctx.origin);
+    if (!dns) throw new HttpError(501, 'DNS verification is not available in this deployment');
+    const name = `_accessx.${domain}`;
+    const expected = `accessx-verification=${entry.token}`;
+    let found;
+    try { found = await dns.txt(name); } catch (e) { throw new HttpError(502, `could not look up ${name}: ${e.message}`); }
+    if (!found.includes(expected)) {
+      throw new HttpError(409, `TXT record not found yet — add ${name} TXT "${expected}" (DNS changes can take a while)`, { expected: { name, type: 'TXT', value: expected }, found: found.slice(0, 5) });
+    }
+    for (const other of await store.listTenants()) {
+      if (other.id !== ctx.tenantId && verifiedDomains(((await store.tenantSettings(other.id)) || {}).sso).includes(domain)) {
+        throw new HttpError(409, `domain ${domain} is already verified by another account`);
+      }
+    }
+    const sso = { ...cfg, domainVerification: { ...cfg.domainVerification, [domain]: { ...entry, verifiedAt: new Date().toISOString() } } };
+    await saveSettings(ctx, { ...settings, sso }).audit('sso.domain_verified', `${domain} (TXT ${name})`, ctx.actor).commit();
+    return publicSso(sso, ctx.origin);
+  });
+
+  /**
+   * Enforce single sign-on for people. Turning it on requires that the
+   * owner doing it is signed in through SSO right now (it works) and that a
+   * break-glass owner exists (a way back in when the IdP is down).
+   */
+  route('PUT', /^\/api\/sso\/enforcement$/, async ctx => {
+    const settings = (await store.tenantSettings(ctx.tenantId)) || {};
+    const cfg = settings.sso;
+    if (!cfg) throw new HttpError(409, 'configure single sign-on first');
+    const enforced = ctx.body.enforced === true;
+    if (enforced === Boolean(cfg.enforced)) return publicSso(cfg, ctx.origin);
+    let revoked = 0;
+    const uow = saveSettings(ctx, { ...settings, sso: { ...cfg, enforced } });
+    if (enforced) {
+      if (ctx.signIn !== 'sso') throw new HttpError(409, 'sign in with single sign-on yourself before enforcing it (so you know it works)');
+      if (!(await breakGlassHolders(ctx)).length) throw new HttpError(409, 'create a break-glass owner first (POST /api/operators with breakGlass:true) — the way back in if the identity provider is down');
+      const exempt = (await ctx.t.operators()).filter(o => o.breakGlass || o.role === 'r_provisioner').map(o => o.id);
+      const at = new Date().toISOString();
+      const stale = await store.sql.first(`SELECT COUNT(*) AS n FROM sessions WHERE tenant_id = ? AND via = 'token' AND revoked_at IS NULL${exempt.length ? ` AND operator_id NOT IN (${exempt.map(() => '?').join(',')})` : ''}`, [ctx.tenantId, ...exempt]);
+      revoked = Number(stale.n);
+      uow.raw(`UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND via = 'token' AND revoked_at IS NULL${exempt.length ? ` AND operator_id NOT IN (${exempt.map(() => '?').join(',')})` : ''}`, [at, ctx.tenantId, ...exempt]);
+    }
+    await uow.audit('sso.enforce', enforced ? `on (token sessions ended: ${revoked})` : 'off', ctx.actor).commit();
+    return { ...publicSso({ ...cfg, enforced }, ctx.origin), tokenSessionsEnded: revoked };
+  });
+
   // --- reports ------------------------------------------------------------
-  route('GET', /^\/api\/reports\/revocation$/, async ctx => {
-    const days = Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 365);
+  async function revocationFor(ctx, days) {
     const now = Date.now();
     const since = now - days * 86400e3;
     // Walk back through the chain until the window (plus 1 day of lead-in
@@ -563,6 +803,118 @@ function createApi({
     const report = revocationReport(events, { credentials: snap.credentials, now, since, lockVisible: id => ctx.scope.lock(id) });
     if (!ctx.scope.all) delete report.triggers; // other sites' leavers are not yours to count
     return { windowDays: days, generatedAt: new Date(now).toISOString(), ...report };
+  }
+  route('GET', /^\/api\/reports\/revocation$/, async ctx => revocationFor(ctx, Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 365)));
+
+  // --- audit anchoring, export, retention -----------------------------------
+  const ops = () => {
+    if (!auditOps) throw new HttpError(501, 'audit anchoring is not available in this deployment');
+    return auditOps;
+  };
+  const allSitesOnly = (ctx, what) => { if (!ctx.scope.all) throw outOfScope(`${what} needs all-site scope`); };
+  const publicAuditSettings = s => ({ retentionDays: s.retentionDays || null, anchorWebhookHost: s.anchorWebhook ? new URL(s.anchorWebhook).host : null, minRetentionDays: 365 });
+
+  route('GET', /^\/api\/audit\/anchors$/, async ctx => {
+    allSitesOnly(ctx, 'audit anchors');
+    const [anchors, checkpoint, publicKey, settings] = await Promise.all([
+      ctx.t.anchors({ limit: Number(ctx.query.get('limit')) || 30 }), ctx.t.auditCheckpoint(), ops().publicKey(), ops().auditSettings(ctx.tenantId)]);
+    return { anchors, checkpoint, publicKey, settings: publicAuditSettings(settings) };
+  });
+  route('POST', /^\/api\/audit\/anchor$/, async ctx => ops().anchor(ctx.tenantId, { actor: ctx.actor, force: ctx.body.force === true }));
+  route('GET', /^\/api\/audit\/export$/, async ctx => {
+    allSitesOnly(ctx, 'exporting the audit trail');
+    const q = ctx.query;
+    const out = await ops().exportRange(ctx.tenantId, { fromSeq: Number(q.get('fromSeq')) || 0, toSeq: Number(q.get('toSeq')) || null, limit: Number(q.get('limit')) || 5000 });
+    // Who took a copy of the log is itself on the record.
+    await ctx.t.unit().audit('audit.export', out.range ? `seq ${out.range.fromSeq}..${out.range.toSeq} (${out.entries.length} entries)` : 'empty', ctx.actor).commit();
+    return out;
+  });
+  route('GET', /^\/api\/audit\/settings$/, async ctx => ({ settings: publicAuditSettings(await ops().auditSettings(ctx.tenantId)) }));
+  route('PUT', /^\/api\/audit\/settings$/, async ctx => ({ settings: publicAuditSettings(await ops().saveSettings(ctx.tenantId, ctx.body, ctx.actor)) }));
+  route('POST', /^\/api\/audit\/purge$/, async ctx => ops().purge(ctx.tenantId, { actor: ctx.actor, acknowledgeExport: ctx.body.acknowledgeExport === true }));
+
+  /**
+   * Evidence pack for ISO 27001 / SOC 2 audits: one document per period
+   * with access removal times, who administers what, identity setup and
+   * the state of the audit chain. "Supports evidence for" — not a
+   * compliance claim.
+   */
+  route('GET', /^\/api\/reports\/evidence$/, async ctx => {
+    allSitesOnly(ctx, 'the evidence pack');
+    const days = Math.min(Math.max(Number(ctx.query.get('days')) || 30, 1), 366);
+    const now = Date.now();
+    const since = new Date(now - days * 86400e3).toISOString();
+    const snap = await ctx.snap();
+    const [revocation, verification, operators, settings, vendorAccount, fleet] = await Promise.all([
+      revocationFor(ctx, days), ctx.t.auditVerify(), ctx.t.operators(), store.tenantSettings(ctx.tenantId),
+      vendorAccounts ? vendorAccounts.status(ctx.tenantId) : null, ctx.vendor.listLocks().catch(() => []),
+    ]);
+    const anchors = auditOps ? (await ctx.t.anchors({ limit: 1000 })).filter(a => a.createdAt >= since) : [];
+    const roleName = id => (rbac.roleFor(snap, id) || {}).name || id;
+    const siteName = id => (snap.sites.find(x => x.id === id) || {}).name || id;
+    const live = operators.filter(o => !o.revokedAt);
+    const ageDays = t => (t ? Math.floor((now - Date.parse(t)) / 86400e3) : null);
+    const people = live.filter(o => o.role !== 'r_provisioner').map(o => {
+      const flags = [];
+      if (!o.lastLoginAt && ageDays(o.createdAt) > 14) flags.push('never signed in');
+      if (o.lastLoginAt && ageDays(o.lastLoginAt) > 90) flags.push('no sign-in for 90+ days');
+      if (o.breakGlass) flags.push('break-glass (token kept for emergencies)');
+      else if (o.role === 'r_owner' && !o.ssoLinked) flags.push('owner without single sign-on');
+      return { id: o.id, name: o.name, email: o.email || null, role: roleName(o.role), sites: (o.siteIds || []).length ? o.siteIds.map(siteName) : ['all'],
+        signIn: o.ssoLinked ? 'sso' : o.email ? 'sso (invited)' : 'token', lastLoginAt: o.lastLoginAt || null, createdAt: o.createdAt, flags };
+    });
+    const pending = snap.credentials.filter(c => c.status === 'pending_removal').map(c => ({
+      credentialId: c.id, lockId: c.lockId, userId: c.userId, since: c.revokedAt, ageHours: c.revokedAt ? Math.round((now - Date.parse(c.revokedAt)) / 36e5) : null }));
+    const scimUsers = snap.users.filter(u => u.source === 'scim');
+    const sso = (settings || {}).sso;
+    const auditSettings = auditOps ? await auditOps.auditSettings(ctx.tenantId) : {};
+    const apprRows = await store.sql.all('SELECT status, COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND requested_at >= ? GROUP BY status', [ctx.tenantId, since]);
+    const fourEyesStats = Object.fromEntries(apprRows.map(r => [r.status, Number(r.n)]));
+    const evidence = {
+      period: { days, from: since, to: new Date(now).toISOString() },
+      tenant: snap.tenant,
+      generatedBy: ctx.actor,
+      accessRemoval: {
+        remote: revocation.remote, onSite: revocation.onsite, triggers: revocation.triggers ? revocation.triggers.length : undefined,
+        stillOpen: revocation.open, pendingOnSite: pending, slaHours: reconciler.REMOVAL_SLA_HOURS,
+        overdueOnSite: pending.filter(p => p.ageHours >= reconciler.REMOVAL_SLA_HOURS).length,
+      },
+      administrators: { people, machineIdentities: live.filter(o => o.role === 'r_provisioner').map(o => ({ id: o.id, name: o.name, createdAt: o.createdAt })),
+        bootstrap: auth.envOperators(ctx.tenantId).map(o => ({ id: o.id, name: o.name, role: roleName(o.role), note: 'server configuration (env token)' })),
+        revokedInPeriod: operators.filter(o => o.revokedAt && o.revokedAt >= since).map(o => ({ id: o.id, name: o.name, revokedAt: o.revokedAt })) },
+      identity: {
+        singleSignOn: sso ? { issuer: sso.issuer, domains: sso.domains || [], verifiedDomains: verifiedDomains(sso), enforced: Boolean(sso.enforced) } : null,
+        directorySync: { connections: live.filter(o => o.role === 'r_provisioner').length, people: scimUsers.length, deactivated: scimUsers.filter(u => u.directoryStatus === 'inactive').length,
+          mappedGroups: snap.directoryGroups.filter(g => g.userGroupId).length, unmappedGroups: snap.directoryGroups.filter(g => !g.userGroupId).length },
+      },
+      doors: { total: fleet.length, withoutGateway: fleet.filter(l => !l.hasGateway).length, vendorAccount: vendorAccount && vendorAccount.connected ? { status: vendorAccount.status, lockCount: vendorAccount.lockCount } : null,
+        clockChanges: reconciler.dstNotices(snap, fleet, { now, days: 30, lockFilter: () => true }) },
+      fourEyes: {
+        sensitiveDoorGroups: snap.doorGroups.filter(g => g.sensitive).map(g => ({ id: g.id, name: g.name, doors: (g.lockIds || []).length })),
+        requestsInPeriod: fourEyesStats,
+      },
+      auditTrail: {
+        verification, retentionDays: auditSettings.retentionDays || null, anchorWebhookHost: auditSettings.anchorWebhook ? new URL(auditSettings.anchorWebhook).host : null,
+        anchors: { inPeriod: anchors.length, signed: anchors.filter(a => a.signature).length, deliveredOutside: anchors.filter(a => a.deliveryStatus === 'delivered').length, last: anchors[0] || null },
+        publicKey: auditOps ? await auditOps.publicKey() : null,
+      },
+      controls: [
+        { framework: 'ISO/IEC 27001:2022', control: 'A.7.2', title: 'Physical entry', evidence: ['doors', 'accessRemoval'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.5.18', title: 'Access rights (provision, review, removal)', evidence: ['accessRemoval', 'identity.directorySync', 'administrators'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.5.16', title: 'Identity management', evidence: ['identity'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.8.2', title: 'Privileged access rights', evidence: ['administrators'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.5.3', title: 'Segregation of duties', evidence: ['fourEyes'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.8.15', title: 'Logging', evidence: ['auditTrail'] },
+        { framework: 'ISO/IEC 27001:2022', control: 'A.8.17', title: 'Clock synchronisation', evidence: ['doors.clockChanges'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.4', title: 'Restricts physical access to facilities', evidence: ['doors', 'accessRemoval'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.2', title: 'Registration and removal of users', evidence: ['identity.directorySync', 'accessRemoval'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC6.3', title: 'Role-based access, removal on change', evidence: ['administrators', 'accessRemoval'] },
+        { framework: 'SOC 2 (TSC 2017)', control: 'CC7.2', title: 'Monitoring of system components (logs)', evidence: ['auditTrail'] },
+      ],
+      disclaimer: 'Supports evidence for the listed controls; it is not a certification or a compliance claim.',
+    };
+    await ctx.t.unit().audit('report.evidence', `window=${days}d`, ctx.actor).commit();
+    return { evidence };
   });
 
   // --- directory (SCIM) overview + group mapping ---------------------------
@@ -587,6 +939,10 @@ function createApi({
     if (!ctx.scope.all) throw outOfScope('mapping directory groups needs all-site scope');
     const target = ctx.body.userGroupId === null || ctx.body.userGroupId === '' ? null : String(ctx.body.userGroupId || '');
     if (target === '') throw new HttpError(400, 'userGroupId is required (or null to unmap)');
+    if (target) {
+      const gate = await fourEyes(ctx, locksOfUserGroups(await ctx.snap(), [target]), `directory group ${id} -> user group ${target}`);
+      if (gate) return gate;
+    }
     const out = await ctx.t.transact((snap, uow) => {
       const g = snap.directoryGroups.find(x => x.id === id);
       if (!g) throw new HttpError(404, 'not found');
@@ -605,6 +961,20 @@ function createApi({
 
   // --- vendor / mirror / health ---------------------------------------------
   route('GET', /^\/api\/vendor$/, async ctx => ctx.vendor.info());
+
+  // Per-tenant TTLock account (owner only: it controls every door).
+  const accounts = () => {
+    if (!vendorAccounts) throw new HttpError(501, 'vendor accounts are not available in this deployment');
+    return vendorAccounts;
+  };
+  route('GET', /^\/api\/vendor-account$/, async ctx => ({ account: await accounts().status(ctx.tenantId) }));
+  route('PUT', /^\/api\/vendor-account$/, async ctx => {
+    const account = await accounts().connect(ctx.tenantId, ctx.body, ctx.actor);
+    // Codes issued on the previous fleet: the reconciler decides what must come off.
+    const reconcile = await reconcileAfter(ctx, {});
+    return { account, reconcile };
+  });
+  route('DELETE', /^\/api\/vendor-account$/, async ctx => ({ account: await accounts().disconnect(ctx.tenantId, ctx.actor) }));
   const mirrorOf = ctx => {
     if (!ctx.vendor.mirror) throw new HttpError(501, 'record mirror is not available for this tenant yet');
     return ctx.vendor.mirror;
@@ -727,19 +1097,23 @@ function createApi({
   async function tenantForDomain(domain) {
     if (!DOMAIN_RE.test(domain)) return null;
     for (const t of await store.listTenants()) {
-      const sso = ((await store.tenantSettings(t.id)) || {}).sso;
-      if (sso && (sso.domains || []).includes(domain)) return t.id;
+      // Only DNS-verified domains route: otherwise anyone could claim
+      // "bigcorp.com" and receive BigCorp's sign-ins.
+      if (verifiedDomains(((await store.tenantSettings(t.id)) || {}).sso).includes(domain)) return t.id;
     }
     return null;
   }
 
   const sessionRoutes = {
     async 'POST /api/auth/login'(req, body) {
-      const result = await auth.login({ token: body.token, ip: req.ip || 'unknown' });
+      const result = await auth.login({ token: body.token, ip: req.ip || 'unknown', allow: (op, tenantId) => ssoRequiredFor(tenantId, op, 'token') });
       if (result.error) return result.error;
+      if (result.status) return result; // vetoed: single sign-on required
+      const cfg = await ssoSettings(result.tenantId);
+      const glass = Boolean(cfg && cfg.enforced && result.operator.role !== 'r_provisioner');
       await store.tenant(result.tenantId).unit()
         .raw('UPDATE operators SET last_login_at = ? WHERE tenant_id = ? AND id = ?', [new Date().toISOString(), result.tenantId, result.operator.id])
-        .audit('operator.login', 'via token', result.operator.id).commit();
+        .audit(glass ? 'operator.break_glass' : 'operator.login', glass ? `token sign-in while single sign-on is enforced${result.operator.env ? ' (server bootstrap token)' : ''}` : 'via token', result.operator.id).commit();
       return {
         status: 200,
         cookies: [sessionCookie(result.cookieValue, { ...cookieOpts(req), maxAgeSec: result.maxAgeSec })],
@@ -858,7 +1232,35 @@ function createApi({
     if (!rbac.hasPermission(await t.snapshot(), who.operator, 'directory.sync')) return fail(403, 'this token lacks the directory.sync permission');
     if (!/^\/scim\/v2(\/|$)/.test(path)) return fail(404, 'SCIM lives under /scim/v2');
     const query = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
-    return scim.handle({ t, tenantId: who.tenantId, method, path, query, body: req.body, origin: req.origin || '', actor: who.operator.id });
+    const adoptDomains = verifiedDomains(await ssoSettings(who.tenantId));
+    return scim.handle({ t, tenantId: who.tenantId, method, path, query, body: req.body, origin: req.origin || '', actor: who.operator.id, adoptDomains });
+  }
+
+  /** Request context for route handlers (also used to re-run an approved request). */
+  function buildCtx({ t, vendor, tenantId, operator, signIn = null, body, query, origin = '', method, path, approval = null }) {
+    let snapPromise = null;
+    let locksPromise = null;
+    const ctx = {
+      body, query, t, vendor, origin, tenantId, operator, method, path, approval,
+      actor: operator ? operator.id : 'system',
+      signIn,
+      snap: () => (snapPromise ||= t.snapshot()),
+      scope: null,
+      /** The lock must belong to THIS tenant's fleet — site scope alone is
+       *  not enough (an all-site owner's scope is "everything"). */
+      requireLock: async lockId => {
+        locksPromise ||= vendor.listLocks();
+        const lock = (await locksPromise).find(l => Number(l.lockId) === Number(lockId));
+        if (!lock) throw new HttpError(404, 'unknown lock');
+        return lock;
+      },
+      visibleLocks: async () => {
+        const snap = await ctx.snap();
+        locksPromise ||= vendor.listLocks();
+        return (await locksPromise).filter(l => rbac.canAccessLock(snap, operator, l.lockId));
+      },
+    };
+    return ctx;
   }
 
   async function handle(req) {
@@ -896,32 +1298,11 @@ function createApi({
       }
 
       const t = store.tenant(who.tenantId);
-      const vendor = vendorFor(who.tenantId);
-      let snapPromise = null;
-      let locksPromise = null;
-      const ctx = {
-        body, query, t, vendor,
-        origin: req.origin || '',
-        tenantId: who.tenantId,
-        operator: who.operator,
-        actor: who.operator ? who.operator.id : 'system',
-        snap: () => (snapPromise ||= t.snapshot()),
-        scope: null,
-        /** The lock must belong to THIS tenant's fleet — site scope alone is
-         *  not enough (an all-site owner's scope is "everything"). */
-        requireLock: async lockId => {
-          locksPromise ||= vendor.listLocks();
-          const lock = (await locksPromise).find(l => Number(l.lockId) === Number(lockId));
-          if (!lock) throw new HttpError(404, 'unknown lock');
-          return lock;
-        },
-        visibleLocks: async () => {
-          const snap = await ctx.snap();
-          locksPromise ||= vendor.listLocks();
-          return (await locksPromise).filter(l => rbac.canAccessLock(snap, who.operator, l.lockId));
-        },
-      };
+      const vendor = await resolveVendor(who.tenantId);
+      const ctx = buildCtx({ t, vendor, tenantId: who.tenantId, operator: who.operator, signIn: who.signIn, body, query, origin: req.origin || '', method, path });
       if (!(await t.info())) return { status: 403, body: { ok: false, error: 'tenant not found' } };
+      const ssoBlock = await ssoRequiredFor(who.tenantId, who.operator, who.signIn);
+      if (ssoBlock) return ssoBlock;
       const snap = await ctx.snap();
       // Roles live in the tenant's own table, so authorization happens here.
       if (!rbac.hasPermission(snap, who.operator, who.perm)) {
@@ -929,19 +1310,56 @@ function createApi({
       }
       ctx.scope = scopeFor(snap, who.operator);
       const out = await found.fn(ctx, params);
+      if (out && out._status) {
+        const { _status, ...rest } = out;
+        return { status: _status, body: { ok: true, demo: vendor.demo, ...rest } };
+      }
       return { status: 200, body: { ok: true, demo: vendor.demo, ...out } };
     } catch (error) {
       if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
       if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
+      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError')) return { status: error.status, body: { ok: false, error: error.message } };
       if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' } };
       if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
+      // Lock vendor unusable (token revoked, TTLock down): say why, never a 500 or an empty fleet.
+      if (error && error.status === 503) return { status: 503, body: { ok: false, error: error.message, reason: error.reason || 'unavailable' } };
       log('api error', error);
       return { status: 500, body: { ok: false, error: String((error && error.message) || error) } };
     }
   }
 
+  /** Daily housekeeping per tenant: anchor the audit head, apply retention. */
+  async function maintenance() {
+    await whenReady();
+    if (!auditOps) return [];
+    const results = [];
+    for (const tenant of await store.listTenants()) {
+      if (!tenant.seeded) continue;
+      try {
+        const a = await auditOps.maybeAnchor(tenant.id);
+        const p = await auditOps.maybePurge(tenant.id);
+        results.push({ tenantId: tenant.id, anchored: a.anchor && !a.skipped ? a.anchor.seq : null, delivery: a.anchor && !a.skipped ? a.anchor.deliveryStatus : undefined, purged: p.purged || 0 });
+      } catch (error) {
+        log(`maintenance ${tenant.id} failed`, error);
+        results.push({ tenantId: tenant.id, error: String(error.message || error) });
+      }
+    }
+    return results;
+  }
+
   // `routes` is exported for the cross-tenant fuzz gate (test/isolation.fuzz.test.js).
-  return { handle, reconcileAll, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  /** Tenant whose write queue this request belongs to; null for reads and unknown callers. */
+  async function writeKey(req) {
+    const method = String(req.method || 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return null;
+    const path = String(req.path || '');
+    const headers = req.headers || {};
+    try {
+      return await auth.tenantHint({ authorization: headers.authorization || '', cookie: path.startsWith('/scim/') ? '' : headers.cookie || '' });
+    } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
+  }
+
+  return { handle, writeKey, reconcileAll, maintenance, reconcileTenant, whenReady, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };

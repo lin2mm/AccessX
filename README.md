@@ -130,8 +130,31 @@ Operators (people who administer the system) are separate from door users.
 - **Tamper-evident audit** — one hash chain per tenant in `audit_events`,
   written in the same transaction as the change, with UPDATE/DELETE-blocking
   triggers.
-  `GET /api/audit/verify` checks the chain and returns the head hash; export it
-  regularly to storage the app cannot write to.
+  `GET /api/audit/verify` checks the chain and returns the head hash.
+- **Signed anchors, export, retention** — the head is signed (Ed25519,
+  `AUDIT_SIGNING_KEY` from `npm run audit:keygen`) daily and sent to a webhook
+  you control; `GET /api/audit/export` + `npm run audit:verify` let an auditor
+  check the trail offline, including a full rewrite of the chain. Retention
+  (≥ 365 days) purges only below a delivered anchor, via a checkpoint.
+- **Four-eyes approvals** — mark a door group *sensitive* and every new way
+  into its doors (code, rule, group membership, directory mapping) waits for
+  a second operator; approved requests are re-checked before they run.
+- **48 h removal SLA** — a code that still has to be removed at an offline
+  lock is flagged *over 48 h* in the revocation report and evidence pack, and
+  escalated once in the audit log (`credential.removal_overdue`).
+- **Local times mean the site's clock** — passcode end dates and schedules
+  are converted in the door's time zone; on a daylight-saving fall-back the
+  ambiguous hour uses the *earlier* instant, a skipped hour moves forward
+  (RFC 5545 / Temporal "compatible").
+- **Burst-safe writes** — each tenant's writes run one at a time (a Durable
+  Object per tenant on Cloudflare, an in-process queue on Node), so a
+  2,000-person SCIM sync completes with zero failed writes
+  (`npm run load:scim`, numbers in docs/ARCHITECTURE.md).
+- **RBAC coverage gate** — `test/rbac-coverage.test.js` fails when a new API
+  route has no explicit permission rule, a rule is stale, or an anonymous
+  demo visitor could reach a write.
+- **Evidence pack** — Activity → *Evidence pack* (`/evidence.html`): one
+  printable page per period for ISO 27001 / SOC 2 access-control evidence.
 - **GDPR-ready audit** — entries about people carry ids only, so deleting a
   person erases their personal data without breaking the chain.
   `GET /api/users/:id/export` answers a subject access request.
@@ -152,10 +175,13 @@ Operators (people who administer the system) are separate from door users.
   (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM`, optional `IDP` env vars; see `support/worker-smoke.js`).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after
   pulling — `0003_multitenant.sql` adds the relational multi-tenant schema,
-  `0004_identity.sql` sessions, SSO and directory tables. Set `SECRETS_KEY`
+  `0004_identity.sql` sessions, SSO and directory tables, `0005` per-tenant
+  vendor accounts, `0006` audit anchors and retention checkpoints, `0007`
+  break-glass operators, `0008` approvals and sensitive door groups. Set `SECRETS_KEY`
   as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
-connecting real locks or real user data: per-tenant vendor accounts, verify
-TTLock capability flags per lock model, anchor the audit head externally,
-DNS-verify SSO domains, and complete an independent security review.
+connecting real locks or real user data: run `npm run ttlock:check` against
+each lock model on site, set `AUDIT_SIGNING_KEY` and an anchor webhook,
+verify your SSO domains (TXT record) and turn on *Require single sign-on*
+with a break-glass owner, and complete an independent security review.

@@ -118,7 +118,7 @@ test('removing a person revokes their codes; offline locks go to pending removal
 
   const del = await api.call('DELETE', '/api/users/u3', owner);
   assert.equal(del.status, 200);
-  assert.deepEqual(del.body.reconcile, { revoked: 1, expired: 0, pendingRemoval: 1, failed: 0 });
+  assert.deepEqual(del.body.reconcile, { revoked: 1, expired: 0, pendingRemoval: 1, failed: 0, overdue: 0, escalated: 0 });
 
   const creds = (await api.call('GET', '/api/credentials', owner)).body.credentials;
   const status = id => creds.find(c => c.id === id).status;

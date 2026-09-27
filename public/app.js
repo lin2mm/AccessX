@@ -60,8 +60,12 @@ $$('nav button').forEach(b=>b.onclick=()=>{
   $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
 });
 const batClass=n=>n>50?'hi':n>25?'mid':'lo';
-const errText=r=>r._status===401?'Sign in first':r._status===403?`No permission${r.required?` (needs ${r.required})`:''}${r.detail?': '+r.detail:''}`:(r.error||'Request failed');
+const errText=r=>r._status===401?'Sign in first':r.code==='sso_required'?r.error:r._status===403?`No permission${r.required?` (needs ${r.required})`:''}${r.detail?': '+r.detail:''}`:(r.error||'Request failed');
 
+async function loadMode(){
+  const st=await api('/api/status');
+  $('#mode').textContent=st.reason?'Reconnect TTLock':(st.mode||'').startsWith('DEMO')?'Demo data':'Live';
+}
 async function init(){
   const auth=await api('/api/auth/session');
   showSession(auth);
@@ -70,15 +74,15 @@ async function init(){
     $('#admin-status').textContent=auth.operatorsConfigured||auth.sso?'Sign in for live data':'Set ADMIN_TOKEN on server';
     return;
   }
-  const st=await api('/api/status');
-  $('#mode').textContent=(st.mode||'').startsWith('DEMO')?'Demo data':'Live';
+  await loadMode();
   const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();
+  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 async function loadDoors(){
   const d=await api('/api/doors');DOORS=d.doors||[];
+  if(d._status===503){$('#doors').innerHTML=`<div class="empty"><span class="tag r">lock vendor unavailable</span> ${esc(d.error)}</div>`;return;}
   $('#doors').innerHTML=DOORS.length?DOORS.map(l=>{
     const cls=!l.hasGateway?'off':(l.electricQuantity<=25?'warn':'');
     const bat=Number(l.electricQuantity)||0;
@@ -146,7 +150,7 @@ async function loadAdmin(){
   $('#ops').innerHTML=`<table><tr><th>Operator</th><th>Role</th><th>Sites</th><th>Sign-in</th><th>Last login</th><th></th></tr>`+
     live.map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">${esc(x.email||'')}</div></td><td>${esc(x.role)}</td>
     <td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td>
-    <td>${x.ssoLinked?'<span class="tag g">SSO</span>':x.email?'<span class="tag o">SSO invited</span>':'<span class="tag">token</span>'}</td>
+    <td>${x.ssoLinked?'<span class="tag g">SSO</span>':x.email?'<span class="tag o">SSO invited</span>':'<span class="tag">token</span>'}${x.breakGlass?' <span class="tag r">break-glass</span>':''}</td>
     <td class="meta">${when(x.lastLoginAt)}</td>
     <td><button class="btn2 sm" type="button" data-revoke-op="${esc(x.id)}">Revoke</button></td></tr>`).join('')+
     (o.bootstrap||[]).map(x=>`<tr><td><b>${esc(x.name)}</b><div class="meta">server configuration</div></td><td>${esc(x.role)}</td><td>${(x.siteIds||[]).length?x.siteIds.map(i=>'<span class="chip">'+esc(siteName(i))+'</span>').join(''):'all'}</td><td><span class="tag">env token</span></td><td></td><td></td></tr>`).join('')+'</table>';
@@ -168,8 +172,47 @@ async function loadAdmin(){
       :`Not configured. Register this redirect URI at your identity provider: ${sso.redirectUri}`;
     if(c){$('#s-issuer').value=c.issuer;$('#s-client').value=c.clientId;$('#s-domains').value=(c.domains||[]).join(', ');}
     $('#sso-remove').hidden=!c;
+    $('#sso-domains').innerHTML=c&&(c.domainStatus||[]).length?`<table><tr><th>Domain</th><th>Status</th><th>DNS record to add</th><th></th></tr>`+
+      c.domainStatus.map(d=>`<tr><td><b>${esc(d.domain)}</b></td>
+      <td>${d.verified?'<span class="tag g">verified</span>':'<span class="tag o">not verified</span>'}</td>
+      <td class="meta">${d.verified?esc(when(d.verifiedAt)):d.record?`TXT <code>${esc(d.record.name)}</code> = <code>${esc(d.record.value)}</code>`:'save again to get a record'}</td>
+      <td>${d.verified?'':`<button class="btn2 sm" type="button" data-verify-domain="${esc(d.domain)}">Check DNS</button>`}</td></tr>`).join('')+
+      '</table><div class="hint">Only verified domains route sign-ins by email and let directory sync adopt existing people.</div>':'';
+    $('#sso-enforce-box').hidden=!c;
+    if(c){
+      $('#sso-enforce').textContent=c.enforced?'Stop requiring single sign-on':'Require single sign-on';
+      $('#sso-enforce').dataset.on=c.enforced?'1':'';
+      if(!$('#sso-enforce-msg').dataset.keep)$('#sso-enforce-msg').textContent=c.enforced?'Single sign-on is required for people.':'';
+      $('#sso-enforce-msg').dataset.keep='';
+    }
+  }
+  const va=await api('/api/vendor-account');
+  $('#vendor-box').hidden=!va.ok;
+  if(va.ok){
+    const a=va.account;
+    $('#vendor-state').innerHTML=a.connected
+      ?`${a.status==='connected'?'<span class="tag g">connected</span>':'<span class="tag r">reconnect required</span>'} ${esc(a.account)} · ${esc(a.region)} · ${Number(a.lockCount)||0} locks · ${a.usesPlatformApp?'platform app':'own app'} · token valid until ${esc(String(a.tokenExpiresAt).slice(0,10))}${a.lastError?' · '+esc(a.lastError):''}`
+      :`Not connected — this account uses ${DOORS.length?'the demo fleet':'no locks'}.${a.secretsKeyConfigured?'':' <span class="tag o">server has no SECRETS_KEY</span>'}${a.platformAppConfigured?'':' <span class="tag o">no platform TTLock app: enter your own client ID/secret</span>'}`;
+    if(a.connected){$('#v-user').value=a.account;$('#v-region').value=a.region;}
+    $('#vendor-remove').hidden=!a.connected;
   }
 }
+$('#vendor-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const body={region:$('#v-region').value,username:$('#v-user').value.trim(),password:$('#v-pass').value};
+  if($('#v-cid').value||$('#v-csec').value){body.clientId=$('#v-cid').value.trim();body.clientSecret=$('#v-csec').value;}
+  $('#vendor-msg').textContent='Connecting to TTLock…';
+  const r=await api('/api/vendor-account',{method:'PUT',body:JSON.stringify(body)});
+  $('#v-pass').value='';$('#v-csec').value='';
+  $('#vendor-msg').textContent=r.ok?`Connected: ${Number(r.account.lockCount)} locks. The password was used once and discarded.`:errText(r);
+  if(r.ok){loadMode();loadDoors();loadHealth();loadAdmin();loadAudit();}
+});
+$('#vendor-remove').addEventListener('click',async()=>{
+  if(!confirm('Disconnect the TTLock account? Doors from that account disappear from AccessX; codes already on the locks keep working until removed.'))return;
+  const r=await api('/api/vendor-account',{method:'DELETE'});
+  $('#vendor-msg').textContent=r.ok?'Disconnected.':errText(r);
+  loadMode();loadDoors();loadHealth();loadAdmin();loadAudit();
+});
 $('#ops').addEventListener('click',async e=>{
   const b=e.target.closest('[data-revoke-op]');if(!b)return;
   if(!confirm('Revoke this operator? Their sessions end immediately.'))return;
@@ -204,6 +247,27 @@ $('#sso-form').addEventListener('submit',async e=>{
   $('#sso-msg').textContent=r.ok?'Saved. Discovery document verified.':errText(r);
   if(r.ok){loadAdmin();loadAudit();}
 });
+$('#sso-domains').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-verify-domain]');if(!b)return;
+  b.disabled=true;
+  const r=await post('/api/sso/domains/verify',{domain:b.dataset.verifyDomain});
+  $('#sso-msg').textContent=r.ok?`${b.dataset.verifyDomain} verified.`:errText(r);
+  if(r.ok)loadAdmin();else b.disabled=false;
+});
+$('#sso-enforce').addEventListener('click',async()=>{
+  const on=!$('#sso-enforce').dataset.on;
+  if(on&&!confirm('Require single sign-on? Token sign-ins of people end now. Keep the break-glass token somewhere safe.'))return;
+  const r=await api('/api/sso/enforcement',{method:'PUT',body:JSON.stringify({enforced:on})});
+  $('#sso-enforce-msg').textContent=r.ok?(on?`Single sign-on is now required · ${Number(r.tokenSessionsEnded)} token session(s) ended.`:'Token sign-in allowed again.'):errText(r);
+  $('#sso-enforce-msg').dataset.keep='1';
+  loadAdmin();loadAudit();
+});
+$('#glass-create').addEventListener('click',async()=>{
+  const r=await post('/api/operators',{name:'Break-glass owner',role:'r_owner',breakGlass:true});
+  $('#sso-enforce-msg').textContent=r.ok?`Break-glass token (shown once — store it offline, e.g. in a safe or a sealed password-manager entry): ${r.token}`:errText(r);
+  $('#sso-enforce-msg').dataset.keep='1';
+  loadAdmin();loadAudit();
+});
 $('#sso-remove').addEventListener('click',async()=>{
   if(!confirm('Remove single sign-on? Everyone signed in via SSO is signed out.'))return;
   const r=await api('/api/sso',{method:'DELETE'});
@@ -223,7 +287,7 @@ async function loadRevocation(){
   const door=id=>(DOORS.find(d=>Number(d.lockId)===Number(id))||{}).lockAlias||`Lock ${Number(id)}`;
   $('#ttr-open').innerHTML=(o.items||[]).length?`<table><tr><th>Door</th><th>Why</th><th>Status</th><th>Open for</th></tr>`+
     o.items.map(i=>`<tr><td>${esc(door(i.lockId))}</td><td>${esc(i.trigger)}</td>
-    <td>${i.outcome==='open_remote'?'<span class="tag r">code still works — revoke failing</span>':'<span class="tag o">remove at the lock</span>'}</td>
+    <td>${i.outcome==='open_remote'?'<span class="tag r">code still works — revoke failing</span>':'<span class="tag o">remove at the lock</span>'}${i.ageSec>=48*3600?' <span class="tag r">over 48 h</span>':''}</td>
     <td>${dur(i.ageSec)}</td></tr>`).join('')+'</table>'
     :`<div class="meta">Nothing open. ${Number(r.credentials)||0} credentials of ${r.triggers??'—'} leavers were removed in this window.</div>`;
 }
@@ -233,7 +297,7 @@ async function loadRules(){
   const n=(arr,id)=>((arr||[]).find(x=>x.id===id)||{}).name||'24/7';
   $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th></tr>`+
     (a.assignments||[]).map(r=>`<tr><td>${esc(n(ug.userGroups,r.userGroupId))}</td>
-    <td>${esc(n(dg.doorGroups,r.doorGroupId))}</td><td>${esc(n(s.schedules,r.scheduleId))}</td></tr>`).join('')+`</table>`;
+    <td>${esc(n(dg.doorGroups,r.doorGroupId))}${((dg.doorGroups||[]).find(x=>x.id===r.doorGroupId)||{}).sensitive?' <span class="tag r">sensitive · 4-eyes</span>':''}</td><td>${esc(n(s.schedules,r.scheduleId))}</td></tr>`).join('')+`</table>`;
 }
 async function evaluate(){
   const r=await post('/api/evaluate',{userId:$('#e-user').value,lockId:$('#e-door').value,localTime:$('#e-when').value});
@@ -283,11 +347,40 @@ async function confirmRemoved(id,b){
 }
 $('#cm-notices').addEventListener('click',e=>{const b=e.target.closest('[data-confirm]');if(b)confirmRemoved(b.dataset.confirm,b);});
 
+/* ---- four-eyes approvals ---- */
+async function loadApprovals(){
+  const r=await api('/api/approvals');
+  const list=r.ok?(r.approvals||[]):[];
+  $('#appr-card').hidden=!list.length&&!$('#appr-msg').textContent;
+  const who=id=>((USERS||[]).find(u=>u.id===id)||{}).name;
+  const pretty=t=>esc(t).replace(/\buser (\w+)/g,(m,id)=>who(id)?`user ${esc(who(id))}`:m);
+  $('#appr-list').innerHTML=list.length?`<table><tr><th>Request</th><th>Requested by</th><th>Expires</th><th></th></tr>`+
+    list.map(a=>`<tr><td>${pretty(a.summary)}<div class="meta">doors ${a.locks.map(Number).join(', ')}</div></td>
+    <td>${esc(a.requestedBy)}<div class="meta">${esc(new Date(a.requestedAt).toLocaleString())}</div></td>
+    <td class="meta">${esc(new Date(a.expiresAt).toLocaleString())}</td>
+    <td>${a.canDecide?`<button class="btn sm" type="button" data-appr="approve" data-id="${esc(a.id)}">Approve</button> <button class="btn2 sm" type="button" data-appr="reject" data-id="${esc(a.id)}">Reject</button>`:''}
+    ${a.canCancel?`<button class="btn2 sm" type="button" data-appr="cancel" data-id="${esc(a.id)}">Cancel</button>`:''}
+    ${!a.canDecide&&!a.canCancel?'<span class="meta">needs someone else</span>':''}</td></tr>`).join('')+'</table>'
+    :'<div class="meta">Nothing waiting.</div>';
+}
+$('#appr-list').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-appr]');if(!b)return;
+  const verb=b.dataset.appr;
+  const note=verb==='reject'?(prompt('Reason (optional)')||''):'';
+  b.disabled=true;
+  const r=await post(`/api/approvals/${encodeURIComponent(b.dataset.id)}/${verb}`,{note});
+  const msg=$('#appr-msg');
+  if(!r.ok)msg.textContent=errText(r);
+  else if(verb==='approve'&&r.result&&r.result.passcode)msg.innerHTML=`Approved. Passcode (shown once — hand it to the person): <b class="code" style="font-size:18px">${esc(r.result.passcode.keyboardPwd)}</b>`;
+  else msg.textContent=`Request ${verb==='approve'?'approved and applied':verb==='reject'?'rejected':'cancelled'}.`;
+  loadApprovals();loadAudit();loadCreds();loadRules();
+});
+
 /* ---- passcodes ---- */
 async function issuePasscode(acknowledge=false){
   const end=$('#p-end').value;
   const body={userId:$('#p-user').value,lockId:Number($('#p-door').value),acknowledgeScheduleGap:acknowledge};
-  if(end)body.endAt=new Date(end+'T23:59:00').toISOString();
+  if(end)body.endLocal=end+'T23:59'; // converted in the door's time zone on the server
   const r=await post('/api/passcode',body);
   const out=$('#p-res');
   if(r._status===409&&r.needs==='acknowledgeScheduleGap'){
@@ -297,6 +390,10 @@ async function issuePasscode(acknowledge=false){
     return;
   }
   if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
+  if(r._status===202){
+    out.innerHTML=`<div class="res n"><b>Sent for approval</b><div style="margin-top:5px">${esc(r.message)}</div><div class="meta" style="margin-top:4px">Request ${esc(r.approval.id)} · expires ${esc(new Date(r.approval.expiresAt).toLocaleString())}</div></div>`;
+    loadApprovals();loadAudit();return;
+  }
   const c=r.credential;
   out.innerHTML=`<div class="res y"><div class="code">${esc(r.passcode.keyboardPwd)}</div>
     <div class="meta" style="margin-top:6px">Shown once — the system only keeps ${esc(c.codeHint)}.</div>
@@ -352,6 +449,32 @@ $('#a-verify').addEventListener('click',async()=>{
   $('#a-verify-res').textContent=!r.ok?errText(r):v.ok
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
+});
+async function loadAnchors(){
+  const r=await api('/api/audit/anchors?limit=1');
+  const el=$('#a-anchor-state');
+  if(!r.ok){el.textContent=r._status===403?'Anchors need all-site audit access.':errText(r);return;}
+  const a=(r.anchors||[])[0], st=r.settings||{};
+  const parts=[a?`Last anchor #${a.seq} · ${new Date(a.createdAt).toLocaleString()} · ${a.signature?'signed':'unsigned'} · ${a.deliveredTo?`${a.deliveredTo}: ${a.deliveryStatus}`:'kept in AccessX only'}`:'No anchor yet.'];
+  parts.push(st.retentionDays?`Retention ${st.retentionDays} days (purged only below an anchor delivered outside AccessX).`:'Retention: keep everything.');
+  if(r.checkpoint)parts.push(`Entries up to #${r.checkpoint.seq} purged by policy.`);
+  if(!st.anchorWebhookHost)parts.push('Tip: send anchors to a webhook you control, so a rewrite of history can be proven.');
+  el.textContent=parts.join(' ');
+}
+$('#a-anchor').addEventListener('click',async()=>{
+  const r=await post('/api/audit/anchor',{});
+  $('#a-anchor-res').textContent=!r.ok?errText(r):r.skipped?r.skipped:`Anchored #${r.anchor.seq}${r.anchor.deliveredTo?` · ${r.anchor.deliveryStatus}`:''}`;
+  loadAnchors();loadAudit();
+});
+$('#a-export').addEventListener('click',async()=>{
+  const r=await api('/api/audit/export?limit=10000');
+  if(!r.ok){$('#a-anchor-res').textContent=errText(r);return;}
+  delete r._status;delete r.ok;delete r.demo;
+  const url=URL.createObjectURL(new Blob([JSON.stringify(r,null,1)],{type:'application/json'}));
+  const a=document.createElement('a');a.href=url;a.download=`accessx-audit-${r.tenant.id}-${(r.range||{}).fromSeq||0}-${(r.range||{}).toSeq||0}.json`;
+  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  $('#a-anchor-res').textContent=`Exported ${r.entries.length} entries${r.nextFromSeq?` (more from #${r.nextFromSeq})`:''} · verify with: npm run audit:verify -- file.json`;
+  loadAudit();
 });
 /* ---- Copilot ---- */
 function addBubble(t,me){

@@ -137,20 +137,113 @@ test('SSO: revoking the operator or removing SSO ends sessions and blocks new lo
   } finally { await ctx.close(); }
 });
 
-test('SSO: email-domain routing picks the tenant; domains cannot be claimed twice', async () => {
+test('SSO: only DNS-verified domains route sign-ins; a verified domain cannot be taken by another tenant', async () => {
   const ctx = await boot({ ADMIN_TOKEN: OWNER, MOCK_IDP: '1', SECRETS_KEY: KEY, PLATFORM_TOKEN: 'plat' });
   try {
     const t2 = await ctx.call('POST', '/api/tenants', { token: 'plat', body: { name: 'Second Co' } });
     const owner2 = t2.body.owner.token;
     const put2 = await ctx.call('PUT', '/api/sso', { token: owner2, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'second', domains: ['riverside.example'] } });
     assert.equal(put2.status, 200);
-    const clash = await ctx.call('PUT', '/api/sso', { token: OWNER, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'accessx-test', domains: ['riverside.example'] } });
+    const rec2 = put2.body.sso.domainStatus[0];
+    assert.equal(rec2.verified, false);
+    assert.equal(rec2.record.name, '_accessx.riverside.example');
+    // Anyone can CLAIM a domain; claims alone route nothing.
+    const squat = await ctx.call('PUT', '/api/sso', { token: OWNER, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'accessx-test', domains: ['riverside.example'] } });
+    assert.equal(squat.status, 200);
+    let start = await ctx.call('GET', '/api/auth/sso/start?email=alice@riverside.example');
+    assert.doesNotMatch(start.headers.get('location'), /client_id=second/, 'unverified: falls back to the default tenant');
+    // Verification needs the exact TXT value.
+    ctx.server.dns.set(rec2.record.name, ['v=spf1 -all', 'accessx-verification=wrong']);
+    const notYet = await ctx.call('POST', '/api/sso/domains/verify', { token: owner2, body: { domain: 'riverside.example' } });
+    assert.equal(notYet.status, 409);
+    assert.equal(notYet.body.expected.value, rec2.record.value);
+    assert.deepEqual(notYet.body.found, ['v=spf1 -all', 'accessx-verification=wrong']);
+    ctx.server.dns.set(rec2.record.name, [rec2.record.value, squat.body.sso.domainStatus[0].record.value]);
+    const ok = await ctx.call('POST', '/api/sso/domains/verify', { token: owner2, body: { domain: 'riverside.example' } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.sso.domainStatus[0].verified, true);
+    // Even with its own record present, the other tenant cannot verify or claim it now.
+    const late = await ctx.call('POST', '/api/sso/domains/verify', { token: OWNER, body: { domain: 'riverside.example' } });
+    assert.equal(late.status, 409);
+    assert.match(late.body.error, /already verified by another account/);
+    const clash = await ctx.call('PUT', '/api/sso', { token: OWNER, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'accessx-test', domains: ['riverside.example', 'other.example'] } });
     assert.equal(clash.status, 409);
+    // Re-saving keeps the proof (same token, still verified).
+    const resave = await ctx.call('PUT', '/api/sso', { token: owner2, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'second', domains: ['riverside.example'] } });
+    assert.equal(resave.body.sso.domainStatus[0].verified, true);
+
     await ctx.call('POST', '/api/operators', { token: owner2, body: { name: 'Alice2', role: 'r_view', email: 'alice@riverside.example', auth: 'sso' } });
-    const start = await ctx.call('GET', '/api/auth/sso/start?email=alice@riverside.example');
+    start = await ctx.call('GET', '/api/auth/sso/start?email=alice@riverside.example');
     assert.match(start.headers.get('location'), /client_id=second/);
     const res = await ssoLogin(ctx, 'mock|alice', { query: '?email=alice@riverside.example' });
     const me = await ctx.call('GET', '/api/auth/session', { headers: { cookie: res.cookie } });
     assert.equal(me.body.tenant.id, t2.body.tenant.id);
+    const audit = (await ctx.call('GET', '/api/audit?action=sso.domain_verified', { token: owner2 })).body.log;
+    assert.equal(audit.length, 1);
+  } finally { await ctx.close(); }
+});
+
+test('SSO enforcement: people must use SSO; break-glass and SCIM tokens still work; turning it on is guarded', async () => {
+  const ctx = await boot({ MOCK_IDP: '1', SECRETS_KEY: KEY, PLATFORM_TOKEN: 'plat' });
+  try {
+    const t2 = await ctx.call('POST', '/api/tenants', { token: 'plat', body: { name: 'Enforced Co' } });
+    const tid = t2.body.tenant.id;
+    const owner = t2.body.owner.token; // a token owner (not from server config)
+    await ctx.call('PUT', '/api/sso', { token: owner, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'enforced', domains: ['riverside.example'] } });
+    await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'Alice', role: 'r_owner', email: 'alice@riverside.example', auth: 'sso' } });
+    const manager = (await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'Token manager', role: 'r_manager' } })).body.token;
+    const scimToken = (await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'Entra', role: 'r_provisioner' } })).body.token;
+    const managerSession = (await ctx.call('POST', '/api/auth/login', { body: { token: manager } })).cookies[0].split(';')[0];
+
+    const enforce = async (cookie, enforced = true) => {
+      const s = await ctx.call('GET', '/api/auth/session', { headers: { cookie } });
+      return ctx.call('PUT', '/api/sso/enforcement', { headers: { cookie, 'x-csrf-token': s.body.csrf }, body: { enforced } });
+    };
+    // 1) a token-signed-in owner cannot switch it on (prove SSO works for you first)
+    const ownerSession = (await ctx.call('POST', '/api/auth/login', { body: { token: owner } })).cookies[0].split(';')[0];
+    assert.match((await enforce(ownerSession)).body.error, /sign in with single sign-on yourself/);
+    // 2) signed in via SSO, but no break-glass owner yet
+    const alice = (await ssoLogin(ctx, 'mock|alice', { query: `?tenant=${tid}` })).cookie;
+    assert.ok(alice);
+    const noGlass = await enforce(alice);
+    assert.equal(noGlass.status, 409);
+    assert.match(noGlass.body.error, /break-glass/);
+    assert.equal((await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'x', role: 'r_manager', breakGlass: true } })).status, 400, 'break-glass must be an owner');
+    const glass = await ctx.call('POST', '/api/operators', { token: owner, body: { name: 'Break glass (safe)', role: 'r_owner', breakGlass: true } });
+    assert.equal(glass.body.operator.breakGlass, true);
+    // 3) on — existing token sessions of people end immediately
+    const on = await enforce(alice);
+    assert.equal(on.status, 200, JSON.stringify(on.body));
+    assert.equal(on.body.sso.enforced, true);
+    assert.ok(on.body.tokenSessionsEnded >= 2, 'owner + manager token sessions ended');
+    assert.equal((await ctx.call('GET', '/api/auth/session', { headers: { cookie: managerSession } })).body.authenticated, false);
+
+    // Token people: no login, no bearer API
+    const denied = await ctx.call('POST', '/api/auth/login', { body: { token: manager } });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, 'sso_required');
+    assert.equal(denied.cookies.length, 0, 'no session was created');
+    assert.equal((await ctx.call('GET', '/api/users', { token: owner })).body.code, 'sso_required');
+    // SSO people, SCIM machines and break-glass still work
+    assert.equal((await ctx.call('GET', '/api/users', { headers: { cookie: alice } })).status, 200);
+    assert.equal((await ctx.call('GET', '/scim/v2/Users', { token: scimToken })).status, 200);
+    const bg = await ctx.call('POST', '/api/auth/login', { body: { token: glass.body.token } });
+    assert.equal(bg.status, 200);
+    const audit = (await ctx.call('GET', '/api/audit?action=operator.break_glass', { headers: { cookie: alice } })).body.log;
+    assert.equal(audit.length, 1, 'every break-glass sign-in is on the record');
+    assert.match(audit[0].detail, /while single sign-on is enforced/);
+
+    // Guards: cannot remove the last break-glass owner or SSO itself while enforced
+    assert.equal((await ctx.call('DELETE', `/api/operators/${glass.body.operator.id}`, { token: glass.body.token })).status, 409, 'cannot revoke yourself');
+    const s = await ctx.call('GET', '/api/auth/session', { headers: { cookie: alice } });
+    const del = await ctx.call('DELETE', `/api/operators/${glass.body.operator.id}`, { headers: { cookie: alice, 'x-csrf-token': s.body.csrf } });
+    assert.equal(del.status, 409);
+    assert.match(del.body.error, /last break-glass owner/);
+    assert.equal((await ctx.call('DELETE', '/api/sso', { headers: { cookie: alice, 'x-csrf-token': s.body.csrf } })).status, 409);
+    // Off again → tokens work
+    assert.equal((await enforce(alice, false)).body.sso.enforced, false);
+    assert.equal((await ctx.call('POST', '/api/auth/login', { body: { token: manager } })).status, 200);
+    const actions = (await ctx.call('GET', '/api/audit?action=sso.enforce', { token: owner })).body.log.map(x => x.detail);
+    assert.deepEqual(actions, ['off', `on (token sessions ended: ${on.body.tokenSessionsEnded})`]);
   } finally { await ctx.close(); }
 });

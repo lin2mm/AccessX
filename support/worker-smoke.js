@@ -241,6 +241,17 @@ if (process.env.IDP) {
     assert.deepEqual(me.body.operator.siteIds, ['site_river']);
   });
 }
+check('writes run in the tenant Durable Object (serialized), reads do not', async () => {
+  const w = await raw('POST', '/api/reconcile', { token: OWNER, body: { dryRun: true } });
+  assert.equal(w.status, 200);
+  assert.equal(w.headers.get('x-accessx-writer'), 'durable-object');
+  const r = await raw('GET', '/api/users', { token: OWNER });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('x-accessx-writer'), null);
+  const bad = await raw('POST', '/api/reconcile', { token: 'nope', body: {} });
+  assert.equal(bad.status, 401, 'unknown credentials are rejected at the edge, never reach a DO');
+  assert.equal(bad.headers.get('x-accessx-writer'), null);
+});
 check('wrong token is rejected', async () => {
   assert.equal((await call('GET', '/api/me', 'nope')).status, 401);
 });

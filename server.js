@@ -14,6 +14,9 @@ const { createApi } = require('./api-core');
 const { createDemoVendor } = require('./vendor-demo');
 const { createTTLockVendor, fileMirror } = require('./vendor-ttlock');
 const { TTLock } = require('./ttlock');
+const { createVendorAccounts } = require('./vendor-accounts');
+const { createAuditOps } = require('./audit-ops');
+const { createDnsTxtResolver } = require('./dns-core');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data', 'runtime');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -59,6 +62,15 @@ const liveVendor = tt.demo ? null : createTTLockVendor(tt);
 // account, and one tenant must never see (let alone open) another's doors.
 const emptyVendor = createDemoVendor({ locks: [] });
 const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? liveVendor || demoVendor : emptyVendor);
+// Per-tenant TTLock accounts (owners connect their own; tokens sealed with SECRETS_KEY).
+// A connected account overrides vendorFor() for that tenant.
+const vendorAccounts = createVendorAccounts({
+  store,
+  secretsKey: process.env.SECRETS_KEY || '',
+  apiBase: process.env.TTLOCK_API_BASE || '', // deployment-level override (tests, egress proxy) — never per tenant
+  platformApp: { clientId: process.env.TTLOCK_CLIENT_ID || '', clientSecret: process.env.TTLOCK_CLIENT_SECRET || '' },
+  log: (...a) => console.error(...a),
+});
 
 const auth = createAuthenticator({
   store,
@@ -67,8 +79,15 @@ const auth = createAuthenticator({
   platformToken: process.env.PLATFORM_TOKEN || '',
   openReads: process.env.AUTH_OPEN_READS === undefined ? tt.demo : process.env.AUTH_OPEN_READS === '1',
 });
+// Signed audit anchors (AUDIT_SIGNING_KEY, Ed25519 JWK) + retention.
+const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: process.env.ALLOW_HTTP_WEBHOOKS === '1' });
+// SSO domain proof (TXT over DoH). Tests set overrides via `dns.set()`.
+const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
+const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
+const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
+const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const api = createApi({
-  store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a),
+  store, auth, vendorFor, vendorAccounts, auditOps, dns, ensureReady, log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
   // The bundled mock IdP runs on plain http; real issuers must be https.
@@ -103,7 +122,7 @@ app.use(['/api', '/scim'], async (req, res) => {
   // overwrites it. Behind a proxy, configure Express "trust proxy" instead.
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
   const proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http')).split(',')[0].trim();
-  const out = await api.handle({
+  const request = {
     method: req.method,
     path: req.originalUrl.split('?')[0],
     query: new URLSearchParams(req.originalUrl.split('?')[1] || ''),
@@ -112,7 +131,18 @@ app.use(['/api', '/scim'], async (req, res) => {
     ip,
     secure: proto === 'https',
     origin: process.env.PUBLIC_URL || `${proto}://${req.headers['x-forwarded-host'] || req.headers.host}`,
-  });
+  };
+  // Writes of one tenant run one at a time (tenant-queue.js); reads never wait.
+  let out;
+  try {
+    // WRITE_QUEUE=off exists for tests that must exercise the in-transaction
+    // guards directly (the queue would serialize the race away).
+    const key = WRITE_QUEUE_OFF ? null : await api.writeKey(request);
+    out = await writeQueue.run(key, () => api.handle(request));
+  } catch (error) {
+    if (!(error instanceof QueueFullError)) throw error;
+    out = busyResponse(error, request.path);
+  }
   for (const c of out.cookies || []) res.append('Set-Cookie', c);
   if (out.headers) res.set(out.headers);
   if (out.redirect) return res.redirect(302, out.redirect);
@@ -138,9 +168,13 @@ function startReconciler(minutes = Number(process.env.RECONCILE_INTERVAL_MIN ?? 
   if (!minutes) return null;
   const timer = setInterval(() => {
     api.reconcileAll()
-      .then(results => results.filter(r => r.revoked || r.expired || r.pendingRemoval || r.failed || r.error)
+      .then(results => results.filter(r => r.revoked || r.expired || r.pendingRemoval || r.failed || r.escalated || r.error)
         .forEach(r => console.log('reconcile', JSON.stringify(r))))
       .catch(error => console.error('reconcile failed', error));
+    // Anchors at most daily per tenant; retention only below delivered anchors.
+    api.maintenance()
+      .then(results => results.filter(r => r.anchored || r.purged || r.error).forEach(r => console.log('maintenance', JSON.stringify(r))))
+      .catch(error => console.error('maintenance failed', error));
   }, minutes * 60e3);
   timer.unref();
   return timer;
@@ -155,7 +189,9 @@ async function autoconfigureMockSso(port) {
   const settings = (await store.tenantSettings(DEFAULT_TENANT)) || {};
   if (settings.sso) return;
   const issuer = `http://127.0.0.1:${port}/mock-idp`;
-  const sso = { issuer, clientId: 'accessx-demo', domains: ['riverside.example'], trustUnverifiedEmail: false, clientSecretEnc: null, updatedAt: new Date().toISOString() };
+  // Demo only: the domain is marked verified (there is no real DNS for riverside.example).
+  const at = new Date().toISOString();
+  const sso = { issuer, clientId: 'accessx-demo', domains: ['riverside.example'], domainVerification: { 'riverside.example': { token: 'mock-autoconfigure', verifiedAt: at } }, enforced: false, trustUnverifiedEmail: false, clientSecretEnc: null, updatedAt: at };
   const t = store.tenant(DEFAULT_TENANT);
   const uow = t.unit().raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...settings, sso }), DEFAULT_TENANT])
     .audit('sso.configure', `issuer=${issuer} client=accessx-demo domains=riverside.example secret=none (mock autoconfigure)`, 'system');
@@ -173,7 +209,8 @@ async function autoconfigureMockSso(port) {
   console.log(`SSO autoconfigured against the mock IdP (${issuer}); invited alice@riverside.example`);
 }
 
-module.exports = { app, api, store, startReconciler, autoconfigureMockSso };
+module.exports = {
+  writeQueue, app, api, store, dns, startReconciler, autoconfigureMockSso };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;

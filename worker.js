@@ -11,6 +11,10 @@ import { seedTenant } from './store/bootstrap.js';
 import { createAuthenticator, DEFAULT_TENANT } from './auth-core.js';
 import { createApi } from './api-core.js';
 import { createDemoVendor, staticMirror } from './vendor-demo.js';
+import { createVendorAccounts } from './vendor-accounts.js';
+import { createAuditOps } from './audit-ops.js';
+import { createDnsTxtResolver } from './dns-core.js';
+import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
 
 const MAX_BODY = 64 * 1024;
 
@@ -36,7 +40,7 @@ async function appState(sql, key) {
  */
 let cached = null;
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -71,12 +75,22 @@ function apiFor(env) {
     });
   };
 
-  const api = createApi({ store, auth, vendorFor, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const vendorAccounts = createVendorAccounts({
+    store,
+    secretsKey: env.SECRETS_KEY || '',
+    apiBase: env.TTLOCK_API_BASE || '',
+    platformApp: { clientId: env.TTLOCK_CLIENT_ID || '', clientSecret: env.TTLOCK_CLIENT_SECRET || '' },
+    log: (...a) => console.error(...a),
+  });
+  const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
+  const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
 
-async function handleApi(request, env) {
+/** Parse an /api or /scim request into api.handle() input (or an error Response). */
+async function parseRequest(request, env) {
   const url = new URL(request.url);
   let body;
   // Okta/Entra may PUT a group with its full member list: larger limit for SCIM only.
@@ -89,7 +103,7 @@ async function handleApi(request, env) {
       try { body = JSON.parse(text); } catch { return json({ ok: false, error: 'invalid JSON body' }, 400); }
     }
   }
-  const out = await apiFor(env).handle({
+  return {
     method: request.method,
     path: url.pathname,
     query: url.searchParams,
@@ -102,8 +116,58 @@ async function handleApi(request, env) {
     ip: request.headers.get('cf-connecting-ip') || 'unknown',
     secure: url.protocol === 'https:',
     origin: env.PUBLIC_URL || url.origin,
-  });
-  return toResponse(out);
+  };
+}
+
+async function handleApi(request, env) {
+  const req = await parseRequest(request, env);
+  if (req instanceof Response) return req;
+  const api = apiFor(env);
+  // Writes go to the tenant's Durable Object, which runs them one at a time
+  // (tenant-queue.js explains why). Reads, and writes whose tenant can't be
+  // told from the credential (login, platform calls), are handled right here.
+  if (env.TENANT_WRITER) {
+    const tenantId = await api.writeKey(req);
+    if (tenantId) {
+      const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+      const headers = new Headers(request.headers);
+      headers.delete('content-length'); // the body is re-serialized below
+      return stub.fetch(new Request(request.url, {
+        method: request.method,
+        headers,
+        body: req.body === undefined ? undefined : JSON.stringify(req.body),
+      }));
+    }
+  }
+  return toResponse(await api.handle(req));
+}
+
+/**
+ * One instance per tenant, worldwide. Serializes the tenant's writes so the
+ * optimistic audit-head check never has to fight a burst (a 2,000-user SCIM
+ * sync failed ~1.3 % of writes with 409 without this). It keeps no state of
+ * its own: the data stays in D1, so the DO can be dropped at any time.
+ */
+export class TenantWriter {
+  constructor(state, env) {
+    this.env = env;
+    this.queue = createTenantQueue({ maxDepth: Number(env.WRITE_QUEUE_MAX || 256) });
+  }
+
+  async fetch(request) {
+    const req = await parseRequest(request, this.env);
+    if (req instanceof Response) return req;
+    let out;
+    try {
+      out = await this.queue.run('tenant', () => apiFor(this.env).handle(req));
+    } catch (error) {
+      if (!(error instanceof QueueFullError)) throw error;
+      out = busyResponse(error, req.path);
+    }
+    const res = toResponse(out);
+    res.headers.set('x-accessx-writer', 'durable-object');
+    return res;
+  }
 }
 
 export default {
@@ -114,6 +178,8 @@ export default {
   },
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(apiFor(env).reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
+    const api = apiFor(env);
+    ctx.waitUntil(api.reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
+    ctx.waitUntil(api.maintenance().then(results => console.log('maintenance', JSON.stringify(results))));
   },
 };

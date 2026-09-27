@@ -114,19 +114,41 @@ test('SCIM Users: Entra create/filter/patch quirks, data minimisation, uniquenes
   } finally { await ctx.close(); }
 });
 
-test('SCIM: POST links an existing manual user by email instead of duplicating', async () => {
-  const ctx = await setup();
+/** SSO with a DNS-verified domain (TXT answered by the resolver override). */
+async function verifyDomain(ctx, domain) {
+  const put = await ctx.call('PUT', '/api/sso', { token: OWNER, body: { issuer: `${ctx.base}/mock-idp`, clientId: 'accessx-test', domains: [domain] } });
+  assert.equal(put.status, 200, JSON.stringify(put.body));
+  const rec = put.body.sso.domainStatus.find(d => d.domain === domain).record;
+  ctx.server.dns.set(rec.name, [rec.value]);
+  const v = await ctx.call('POST', '/api/sso/domains/verify', { token: OWNER, body: { domain } });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+}
+
+test('SCIM: POST links an existing manual user by email only on a DNS-verified domain', async () => {
+  const ctx = await setup({ MOCK_IDP: '1' });
   try {
-    const linked = await ctx.scim('POST', '/Users', entraUser('dev@acme.co.uk'));
+    // Unverified domain: a directory must not be able to claim Dev by sending his address.
+    const unverified = await ctx.scim('POST', '/Users', entraUser('dev@acme.co.uk'));
+    assert.equal(unverified.status, 201);
+    assert.notEqual(unverified.body.id, 'u2', 'not adopted');
+    const log = (await ctx.call('GET', '/api/audit?action=scim.link_skipped', { token: OWNER })).body.log;
+    assert.match(log[0].detail, /u2: email domain not verified/);
+    assert.equal((await ctx.call('GET', '/api/users', { token: OWNER })).body.users.find(u => u.id === 'u2').source || 'manual', 'manual');
+  } finally { await ctx.close(); }
+
+  const ctx2 = await setup({ MOCK_IDP: '1' });
+  try {
+    await verifyDomain(ctx2, 'acme.co.uk');
+    const linked = await ctx2.scim('POST', '/Users', entraUser('dev@acme.co.uk'));
     assert.equal(linked.status, 201);
     assert.equal(linked.body.id, 'u2', 'Dev Patel (manual) was adopted');
-    const users = (await ctx.call('GET', '/api/users', { token: OWNER })).body.users;
+    const users = (await ctx2.call('GET', '/api/users', { token: OWNER })).body.users;
     assert.equal(users.filter(u => u.email === 'dev@acme.co.uk').length, 1);
     const dev = users.find(u => u.id === 'u2');
     assert.equal(dev.source, 'scim');
     assert.deepEqual(dev.groupIds, ['ug_staff', 'ug_it'], 'manual groups survive the link');
-    assert.equal((await ctx.call('DELETE', '/api/users/u2', { token: OWNER })).status, 409, 'directory-managed people are removed in the directory');
-  } finally { await ctx.close(); }
+    assert.equal((await ctx2.call('DELETE', '/api/users/u2', { token: OWNER })).status, 409, 'directory-managed people are removed in the directory');
+  } finally { await ctx2.close(); }
 });
 
 test('SCIM lifecycle: mapped group grants doors; deactivation revokes the code on the lock in the same request', async () => {

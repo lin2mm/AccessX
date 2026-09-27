@@ -66,7 +66,7 @@ function createAuthenticator({
   /** Operator behind a session: env (bootstrap) or database, never revoked. */
   async function operatorFor(tenantId, operatorId) {
     const env = directory.find(op => op.tenantId === tenantId && op.id === operatorId);
-    if (env) { const { tokenSha256, ...safe } = env; return safe; }
+    if (env) { const { tokenSha256, ...safe } = env; return { ...safe, env: true }; }
     return store.operatorById(tenantId, operatorId);
   }
 
@@ -99,18 +99,24 @@ function createAuthenticator({
   }
 
   /** Exchange a bearer token for a browser session. Same rate limit as API auth. */
-  async function login({ token, ip = 'unknown' }) {
+  /** `allow(operator)` may veto before a session exists (enforced SSO). */
+  async function login({ token, ip = 'unknown', allow = null }) {
     const failed = failures.get(ip);
     if (failed && Date.now() > failed.resetAt) failures.delete(ip);
     if (failed && failed.count >= maxFails && Date.now() <= failed.resetAt) return err(429, 'too many failed auth attempts, try later');
     const hash = sha256Hex(String(token || '').trim());
-    const operator = token ? (rbac.findOperator(directory, hash) || (await store.operatorByTokenHash(hash))) : null;
+    const fromEnv = token ? rbac.findOperator(directory, hash) : null;
+    const operator = fromEnv ? { ...fromEnv, env: true } : token ? await store.operatorByTokenHash(hash) : null;
     if (!operator) {
       if (noteFail(ip) >= maxFails) return err(429, 'too many failed auth attempts, try later');
       return err(401, 'unauthorized');
     }
     failures.delete(ip);
     const { tokenSha256, ...safe } = operator;
+    if (allow) {
+      const veto = await allow(safe, operator.tenantId);
+      if (veto) return veto;
+    }
     return { operator: safe, tenantId: operator.tenantId, ...(await startSession(safe, operator.tenantId, 'token')) };
   }
 
@@ -130,7 +136,7 @@ function createAuthenticator({
         if (UNSAFE.has(method) && !rbac.constantTimeEqual(String(csrf || ''), found.session.csrf)) {
           return err(403, 'CSRF token missing or invalid');
         }
-        return { operator: found.operator, tenantId: found.session.tenantId, perm, via: 'session' };
+        return { operator: found.operator, tenantId: found.session.tenantId, perm, via: 'session', signIn: found.session.via };
       }
     }
     if (!match) {
@@ -159,14 +165,33 @@ function createAuthenticator({
       return err(platformHash ? 401 : 404, platformHash ? 'unauthorized' : 'not found');
     }
 
-    const operator = rbac.findOperator(directory, hash) || (await store.operatorByTokenHash(hash));
+    const fromEnv = rbac.findOperator(directory, hash);
+    const operator = fromEnv ? { ...fromEnv, env: true } : await store.operatorByTokenHash(hash);
     if (!operator) {
       if (noteFail(ip) >= maxFails) return err(429, 'too many failed auth attempts, try later');
       return err(401, 'unauthorized');
     }
     failures.delete(ip);
     const { tokenSha256, ...safe } = operator; // never let the hash travel further
-    return { operator: safe, tenantId: operator.tenantId, perm };
+    return { operator: safe, tenantId: operator.tenantId, perm, via: 'bearer', signIn: 'token' };
+  }
+
+  /**
+   * Which tenant a request acts for — without side effects (no failed-attempt
+   * counting, no session touch). Used only to pick the tenant's write queue;
+   * authenticate() still decides whether the request is allowed.
+   */
+  async function tenantHint({ authorization = '', cookie = '' } = {}) {
+    const match = String(authorization).match(/^Bearer\s+(.+)$/i);
+    if (match) {
+      const hash = sha256Hex(match[1].trim());
+      const operator = rbac.findOperator(directory, hash) || await store.operatorByTokenHash(hash);
+      return operator && operator.tenantId ? operator.tenantId : null;
+    }
+    const id = sessionIdFrom(cookie);
+    if (!id) return null;
+    const session = await store.findSession(sha256Hex(id));
+    return session ? session.tenantId : null;
   }
 
   function status() {
@@ -186,7 +211,7 @@ function createAuthenticator({
       .map(({ id, name, role, siteIds }) => ({ id, name, role, siteIds, source: 'env (bootstrap)' }));
   }
 
-  return { authenticate, status, envOperators, defaultTenant, login, logout, sessionFrom, startSession, operatorFor };
+  return { authenticate, tenantHint, status, envOperators, defaultTenant, login, logout, sessionFrom, startSession, operatorFor };
 }
 
 module.exports = { createAuthenticator, DEFAULT_TENANT };

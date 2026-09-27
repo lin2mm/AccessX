@@ -96,7 +96,7 @@ const perms = () => (v, field) => {
 
 const SCHEMAS = {
   sites: { name: str(100, { required: true }), address: str(200), timezone: timezone() },
-  doorGroups: { name: str(100, { required: true }), siteId: ref('sites', { required: true }), lockIds: lockIds() },
+  doorGroups: { name: str(100, { required: true }), siteId: ref('sites', { required: true }), lockIds: lockIds(), sensitive: bool() },
   // siteId: the site this group belongs to (omit = cross-site group, managed by all-site operators only)
   userGroups: { name: str(100, { required: true }), siteId: ref('sites') },
   users: {

@@ -91,10 +91,14 @@ function seal(head, entries) {
   });
 }
 
-/** Verify entries sorted by seq ascending, starting at seq 1. */
-function verify(entries) {
-  let prevHash = GENESIS;
-  let expectedSeq = 1;
+/**
+ * Verify entries sorted by seq ascending. Starts at seq 1 (GENESIS), or
+ * after a retention checkpoint {seq, hash}: entries up to the checkpoint
+ * were purged, and the first remaining entry must chain onto its hash.
+ */
+function verify(entries, start = null) {
+  let prevHash = start ? start.hash : GENESIS;
+  let expectedSeq = start ? start.seq + 1 : 1;
   for (const e of entries) {
     if (e.seq !== expectedSeq) return { ok: false, count: entries.length, brokenAt: expectedSeq, problem: `missing or reordered entry (found seq ${e.seq})` };
     if (e.prevHash !== prevHash) return { ok: false, count: entries.length, brokenAt: e.seq, problem: 'prevHash does not match previous entry' };
@@ -102,7 +106,7 @@ function verify(entries) {
     prevHash = e.hash;
     expectedSeq++;
   }
-  return { ok: true, count: entries.length, head: { seq: expectedSeq - 1, hash: prevHash } };
+  return { ok: true, count: entries.length, head: { seq: expectedSeq - 1, hash: prevHash }, ...(start ? { checkpoint: { seq: start.seq, hash: start.hash } } : {}) };
 }
 
 /**

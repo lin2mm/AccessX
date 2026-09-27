@@ -56,10 +56,55 @@
   as the tenant's version number — no per-row version columns. Measured on
   local D1: 8 parallel PATCHes on one group all land, the slowest after
   ~730 ms (they serialise).
-- `audit_events` has triggers that reject UPDATE/DELETE. Someone with raw
-  database access can drop them — the hash chain still pinpoints the edit
-  (`GET /api/audit/verify`). Anchor the head hash daily somewhere the app
-  cannot write (object-lock bucket, signed email, transparency log).
+- `audit_events` has triggers that reject UPDATE/DELETE (DELETE only below a
+  retention checkpoint, see below). Someone with raw database access can
+  drop them — the hash chain pinpoints a single edit, and anchors catch a
+  rewrite of the whole chain.
+
+## Audit anchors, export and retention
+
+A hash chain proves nothing against whoever controls the database: they can
+edit an entry and **re-hash everything after it**, and `/api/audit/verify`
+still says OK (the test suite does exactly this). What catches it is a copy
+of the head hash held by someone else.
+
+- **Anchor** (`audit-ops.js`, `audit-anchor-core.js`, migration 0006): the
+  tenant's head `(seq, hash)` plus a timestamp, signed with Ed25519
+  (`AUDIT_SIGNING_KEY`, a JWK; `npm run audit:keygen`). Signed bytes:
+  `accessx-anchor-v1\n{tenant}\n{seq}\n{hash}\n{createdAt}` — the tenant
+  is inside, so an anchor cannot be replayed for another tenant. Stored in
+  `audit_anchors` (append-only), recorded in the chain as `audit.anchor`,
+  and POSTed to the tenant's `anchorWebhook` (https, public host, no
+  credentials, 5 s timeout, redirects not followed). Daily from the
+  maintenance job when the chain moved; `POST /api/audit/anchor` on demand.
+  The anchor's own chain entry does not count as activity (no daily
+  self-perpetuating anchors).
+- **Export** (`GET /api/audit/export?fromSeq&toSeq&limit`, audit.read,
+  all-site scope, max 10 000 per page, `nextFromSeq` to continue): entries,
+  anchors in range, the retention checkpoint, the public key. Every export is
+  itself an `audit.export` entry.
+- **Offline verification** (`npm run audit:verify -- export.json
+  --anchors held.json --pubkey key.json`): recomputes every hash, checks the
+  start (genesis / checkpoint / segment), verifies anchor signatures against a
+  **pinned** key, and compares the anchors the customer kept with the chain.
+  Without `--anchors` it warns that a full rewrite would go unnoticed.
+- **Retention** (`PUT /api/audit/settings {retentionDays}`, owner, 365–3650
+  or null = forever): the purge deletes entries older than the period, but
+  only up to the newest anchor that was *delivered outside AccessX* (or any
+  anchor, if an owner confirms `acknowledgeExport:true`). In one batch it
+  writes `audit.purge`, inserts a checkpoint `(seq, hash)` into
+  `audit_checkpoints` (append-only) and deletes the rows; the DELETE trigger
+  only allows rows at or below a checkpoint. Verification then starts from
+  the checkpoint instead of genesis. Anchors are kept forever (small).
+- **Evidence pack** (`GET /api/reports/evidence?days=30`, `/evidence.html`,
+  print → PDF): time-to-revoke, codes waiting for a site visit, administrators
+  with flags (never signed in, 90 days idle, owner without SSO), SSO/SCIM
+  state, doors without gateways and upcoming clock changes, audit chain and
+  anchor status, and a mapping to ISO/IEC 27001:2022 A.5.16, A.5.18, A.7.2,
+  A.8.2, A.8.15, A.8.17 and SOC 2 CC6.2–CC6.4, CC7.2. It says "supports
+  evidence for", never "compliant".
+- Key rotation: anchors carry `keyId`; publish the new public key before
+  switching, and keep old public keys so old anchors still verify.
 
 ## GDPR
 
@@ -108,15 +153,152 @@
   user groups of directory-managed people; manual members are untouched.
   Stored attributes: userName, externalId, name, one email.
 
+## Domain proof and enforced SSO
+
+- **Domain verification**: saving SSO settings gives every domain a token;
+  the owner publishes `TXT _accessx.<domain> = accessx-verification=<token>`
+  and presses *Check DNS* (`POST /api/sso/domains/verify`, DoH via
+  `dns-core.js`, `DOH_URL` to change the resolver). Unverified claims block
+  nobody; the first tenant to prove a domain owns it, and after that nobody
+  else can claim or verify it. Only verified domains (a) route
+  `/api/auth/sso/start?email=` to a tenant and (b) let SCIM adopt a manually
+  created person by email (otherwise a new record is created and
+  `scim.link_skipped` is audited — a directory could otherwise take over
+  anyone by sending their address).
+- **Enforcement** (`PUT /api/sso/enforcement`): people must sign in through
+  the IdP; token login and bearer API calls return 403 `sso_required`.
+  Exempt: SCIM machine tokens (`r_provisioner`), break-glass owners
+  (`operators.break_glass`, migration 0007) and bootstrap operators from the
+  server config (`ADMIN_TOKEN`/`OPERATORS` — treat them as break-glass and
+  keep them offline). Switching on requires the owner to be signed in via SSO
+  right now and a break-glass owner to exist; token sessions of people end
+  immediately. While on, the last break-glass owner cannot be revoked and SSO
+  cannot be removed. Every break-glass sign-in is audited as
+  `operator.break_glass`.
+
+## Four-eyes approvals
+
+- A door group can be `sensitive` (migration 0008). Sensitivity is per
+  **lock**: a lock is sensitive if any sensitive group contains it, so an
+  unflagged "alias" group around the same lock does not bypass the rule
+  (creating one needs approval itself).
+- Requests that would grant new access to a sensitive lock return **202**
+  with an approval record instead of running: passcodes, assignments, new
+  users in groups that reach it, directory-group mapping, unflagged door
+  groups containing it, and deleting a sensitive group. Removing access
+  never waits.
+- `POST /api/approvals/:id/approve` — a different operator holding the
+  original route's permission (and scope). The decision is taken inside
+  `tenant.transact` (audit-head CAS): racing approvers → one wins. The
+  stored request is then re-run **as the requester** through the same route
+  handler, so policy, scope and validation are re-checked against current
+  data (a person suspended meanwhile gets nothing; `approval.failed`).
+  A passcode is shown once to the approver, who hands it over.
+- `reject` (with note), `cancel` (requester only), 72 h expiry
+  (`approval.expire`). All steps are audit entries; the action's own entry
+  carries `approval=<id> approvedBy=<op>`.
+- Not covered yet: unsuspending a person, and changes to schedules that widen
+  a sensitive assignment's hours.
+
+## Time, SLAs and the RBAC gate
+
+**Local times.** Anything a person types as a wall-clock time (schedule
+windows, holiday dates, a passcode's last day) is interpreted in the door's
+site time zone, never the browser's or the server's. `zonedTimeToDate` in
+`policy-core.js` follows RFC 5545 / Temporal `disambiguation: 'compatible'`:
+in the repeated fall-back hour the **earlier** instant wins (a code "valid
+until 02:30" on the first Sunday of April in Sydney ends at the first 02:30,
+not an hour later), and a time inside the spring-forward gap moves forward by
+the gap. The passcode API takes `endLocal` (`YYYY-MM-DDTHH:mm`, site time);
+`endAt` (an absolute instant) is still accepted.
+
+**48 h removal SLA.** A revoked code on a lock the cloud cannot reach stays
+`pending_removal` until someone confirms it was removed at the door.
+`overdueRemovals()` (reconcile-core) lists those older than
+`REMOVAL_SLA_HOURS` (48). Each reconcile run adds `removal_overdue` notices
+to the plan, and the first run that sees a credential overdue writes one
+`credential.removal_overdue` audit entry (deduplicated on the credential id),
+so webhook/anchor consumers and SIEMs see it. The revocation report tags the
+row *over 48 h*; the evidence pack counts `overdueOnSite`.
+
+**RBAC coverage gate.** `rbac-core.js` fails closed: a path matching no rule
+needs the owner. That is safe but hides mistakes — a new manager-level route
+would silently be owner-only, or an intended owner-only route would change
+meaning if a broad rule were added above it. `test/rbac-coverage.test.js`
+walks every route in the API table and fails if any resolves through the
+default (owner-only routes are listed explicitly), if a rule matches no route,
+if a permission is used by nothing, or if a non-GET route becomes reachable
+with the anonymous demo permissions.
+
+## Write serialization (per-tenant queue / Durable Object)
+
+Every write appends to the tenant's audit chain, and `transact()` uses the
+chain head as the tenant's version number (optimistic concurrency, no lost
+updates). That is correct under any load, but under a burst the writers keep
+invalidating each other. `npm run load:scim` (support/scim-load.js) replays an
+IdP's first sync of 2,000 people; on the Worker with local D1:
+
+| 2,000-user SCIM sync, 8 in flight | before | per-tenant Durable Object |
+|---|---|---|
+| failed writes (409 "conflicting change") | 25 creates + 3 deactivations | **0** |
+| create throughput | 7.7 req/s | 10.5 req/s |
+| create p99 | 5.1 s | 1.6 s |
+| deactivate p99 | 10.7 s | 2.7 s |
+
+A failed SCIM write is not retried soon: Entra ID parks it ("escrow") for a
+later cycle and quarantines the job if many fail, so a failed deactivation
+means a leaver's code keeps working for another cycle or longer.
+
+Now writes go through `tenant-queue.js`, one at a time per tenant, FIFO,
+bounded (429 + `Retry-After` past `WRITE_QUEUE_MAX`, default 256):
+
+- **Cloudflare:** the front Worker resolves the tenant from the bearer token
+  or session (`auth.tenantHint`, no side effects) and forwards writes to
+  `TenantWriter` (`idFromName(tenantId)`), which runs the normal `api.handle`
+  under the queue. A Durable Object is one instance worldwide, so this holds
+  across isolates and colos. It keeps no state; data stays in D1. Reads and
+  writes without a resolvable tenant (login, platform calls, bad tokens) are
+  handled at the edge — bad credentials never reach a DO.
+- **Node:** the same queue in-process (a single Node process; several
+  processes behind a load balancer fall back to optimistic retries).
+- `transact()` stays: the cron reconciler and unqueued paths still rely on it,
+  and `test/approvals.api.test.js` runs with `WRITE_QUEUE=off` so the
+  in-transaction guard keeps its own race test.
+
+Remaining limit: every write still loads the whole tenant snapshot (O(people)),
+so throughput falls as a tenant grows (Node: 99 req/s at 300 people, 22 req/s
+at 2,000). The DO is the natural place for the next step — cache the snapshot
+in memory and invalidate it on its own commits — or targeted queries per
+route. Not needed for the 5–200-door target; revisit past ~10k people.
+
 ## Vendors
 
 - Interface: `listLocks, unlock, createPasscode, deletePasscode, records,
-  info, status, mirror?` (`vendor-demo.js`, `vendor-ttlock.js`).
-- **Limitation:** TTLock credentials are per deployment, so only the default
-  tenant can use the live vendor and the record mirror. Next step: a
-  `vendor_accounts` table (per tenant, secrets encrypted with a KMS key or
-  Cloudflare secrets store) and `vendorFor(tenantId)` reading from it.
-- Other tenants get an empty simulated fleet.
+  info, status, mirror?` (`vendor-demo.js`, `vendor-ttlock-core.js`).
+- **Per-tenant TTLock accounts** (`vendor-accounts.js`, table
+  `vendor_accounts`): an owner connects the tenant's own TTLock account
+  (`PUT /api/vendor-account`). The password is used once (OAuth password
+  grant) and discarded; only the access/refresh tokens are stored, sealed
+  with `SECRETS_KEY` (AAD = tenant). The platform's TTLock app
+  (`TTLOCK_CLIENT_ID/SECRET`) is used unless the tenant brings its own.
+- One TTLock account (uid) belongs to one tenant (unique index): lock ids
+  are global at TTLock.
+- Tokens are refreshed 7 days before expiry and on a rejected token; the
+  refreshed tokens are written back with compare-and-swap so other
+  instances pick them up. If TTLock refuses the refresh (password changed,
+  access revoked) the account becomes `needs_reconnect`: lock calls return
+  **503 with a reason**, the rest of the app keeps working.
+- The lock list is cached for 60 s per instance (TTLock rate limit 30006).
+- The TTLock client (`ttlock.js`, `md5.js`) runs in Node and Workers.
+  OAuth uses snake_case `client_id/client_secret` (the v3 API uses
+  `clientId`) — the old client got this wrong, so the legacy live mode could
+  never log in.
+- Legacy: the server's default tenant can still use env credentials
+  (`TTLOCK_USER/PASS`); a connected account overrides them. The record
+  mirror is file-based and default-tenant only (501 elsewhere).
+- `scripts/ttlock-check.js`: run on site with the real account — login,
+  lock clocks vs server clock (DST), and with `--write <lockId>` a
+  create → delete(deleteType=2) round trip to confirm on the keypad.
 
 ## Reconciler
 
@@ -141,7 +323,8 @@
   per-tenant version counter + cache when it shows up in latency.
 - Auth rate limiting is in-memory (per process / per isolate). Use a
   Durable Object or Cloudflare rate-limiting rules in production.
-- SSO email domains are first-come, not DNS-verified. SAML is not supported
-  (OIDC covers Entra, Okta, Google; add SAML only when a customer needs it).
+- SAML is not supported (OIDC covers Entra, Okta, Google; add SAML only when
+  a customer needs it). DNS proof is checked once; re-check periodically and
+  un-verify domains whose TXT record disappears (domain sold/expired).
 - SCIM has no ETags and no `/Bulk`; filters are `attr eq "value"` only.
 - The mock IdP (`support/mock-idp.js`) must never be enabled in production.

@@ -51,7 +51,10 @@ function plan(snapshot, locks, { now = Date.now(), userId = null, lockFilter = (
     });
   }
 
-  return { at: new Date(now).toISOString(), actions, notices: dstNotices(snapshot, locks, { now, days: dstHorizonDays, lockFilter }) };
+  return {
+    at: new Date(now).toISOString(), actions,
+    notices: [...dstNotices(snapshot, locks, { now, days: dstHorizonDays, lockFilter }), ...overdueRemovals(snapshot, { now, lockFilter })],
+  };
 }
 
 /** First day in the horizon where the site's UTC offset differs from today. */
@@ -71,6 +74,23 @@ function nextOffsetChange(timeZone, now, days) {
  * themselves; locks synced in UTC (or with no clock sync) drift by an
  * hour. Warn before it happens, not after the cleaner is locked out.
  */
+/**
+ * A code that could not be removed remotely (no gateway) still opens the
+ * door until someone visits the lock. After REMOVAL_SLA_HOURS it is overdue:
+ * a notice every run, and one `credential.removal_overdue` audit entry.
+ */
+const REMOVAL_SLA_HOURS = 48;
+function overdueRemovals(snapshot, { now, lockFilter = () => true, slaHours = REMOVAL_SLA_HOURS }) {
+  return (snapshot.credentials || [])
+    .filter(c => c.status === 'pending_removal' && c.revokedAt && lockFilter(c.lockId))
+    .map(c => ({ c, hours: Math.floor((now - Date.parse(c.revokedAt)) / 36e5) }))
+    .filter(x => x.hours >= slaHours)
+    .map(({ c, hours }) => ({
+      type: 'removal_overdue', credentialId: c.id, lockId: c.lockId, userId: c.userId, since: c.revokedAt, ageHours: hours, slaHours,
+      advice: 'This code still opens the door. Visit the lock, delete the code on the keypad or in the TTLock app, then confirm the removal here.',
+    }));
+}
+
 function dstNotices(snapshot, locks, { now, days, lockFilter }) {
   const notices = [];
   for (const site of snapshot.sites || []) {
@@ -143,4 +163,4 @@ async function execute(planned, { vendor, uow, snapshot, actor = ACTOR, now = Da
   };
 }
 
-module.exports = { plan, execute, dstNotices, nextOffsetChange, ACTOR };
+module.exports = { plan, execute, dstNotices, overdueRemovals, nextOffsetChange, ACTOR, REMOVAL_SLA_HOURS };

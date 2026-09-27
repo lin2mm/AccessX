@@ -23,7 +23,10 @@ const SCIM_CT = 'application/scim+json';
 const A = 't_default';
 
 function materialize(pattern, { ids, locks }) {
-  const src = pattern.source.replace(/^\^/, '').replace(/\$$/, '').replace(/\\\//g, '/');
+  let src = pattern.source.replace(/^\^/, '').replace(/\$$/, '').replace(/\\\//g, '/');
+  // Alternations of plain words, e.g. (approve|reject|cancel): try every one.
+  const alt = src.match(/\(([a-z-]+(?:\|[a-z-]+)+)\)/);
+  if (alt) return alt[1].split('|').flatMap(word => materialize(new RegExp(`^${src.replace(alt[0], word)}$`), { ids, locks }));
   const variants = [];
   if (src.includes('([^/]+)')) for (const id of ids) variants.push({ path: src.split('([^/]+)').join(encodeURIComponent(id)), id });
   else if (src.includes('(\\d+)')) for (const l of locks) variants.push({ path: src.split('(\\d+)').join(String(l)), id: String(l) });
@@ -62,6 +65,10 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     const sg = (await scimA('POST', '/Groups', { displayName: 'SG-TenantA-Secret-Group', members: [{ value: su.id }] })).body;
     await call('PUT', `/api/directory/groups/${sg.id}`, { ...ownerA, body: { userGroupId: 'ug_it' } });
     await call('POST', '/api/users/u4/suspend', ownerA);
+    // A pending four-eyes request (sensitive door group around lock 9003).
+    await call('POST', '/api/doorGroups', { ...ownerA, body: { name: 'A Vault Sensitive Doors', siteId: 'site_river', lockIds: [9003], sensitive: true } });
+    const aprA = (await call('POST', '/api/passcode', { ...ownerA, body: { lockId: 9003, userId: 'u3', acknowledgeScheduleGap: true } })).body.approval;
+    assert.ok(aprA && aprA.id, 'tenant A has a pending approval');
     const loginA = await call('POST', '/api/auth/login', { body: { token: OWNER_A } });
     const cookieA = loginA.cookies[0].split(';')[0];
 
@@ -91,7 +98,7 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     collect(snapA0.users); collect(snapA0.userGroups); collect(snapA0.doorGroups); collect(snapA0.sites); collect(snapA0.schedules);
     collect(snapA0.assignments); collect(snapA0.holidays); collect(snapA0.roles); collect(snapA0.credentials); collect(snapA0.directoryGroups);
     collect(opsA0.map(o => ({ id: o.id, name: o.name, email: o.email })));
-    strings.add('tenant-a-client-7731'); strings.add('tenant-a-sso-secret');
+    strings.add('tenant-a-client-7731'); strings.add('tenant-a-sso-secret'); strings.add(aprA.id);
     const markers = [...strings].filter(s => !bJson.includes(s));
     assert.ok(markers.length > 60, `expected plenty of A-only markers, got ${markers.length}`);
 
@@ -104,7 +111,7 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     const ids = [...new Set([
       ...pick(a.userIds, 4), su.id, ...pick(a.userGroupIds), ...pick(a.doorGroupIds), ...pick(a.siteIds), ...pick(a.scheduleIds),
       ...pick(snapA0.assignments.map(x => x.id)), ...pick(snapA0.holidays.map(x => x.id).filter(Boolean)), ...snapA0.roles.map(r => r.id).filter(id => !/^r_(owner|manager|installer|view|provisioner)$/.test(id)),
-      ...snapA0.credentials.map(c => c.id), sg.id, ...opsA0.map(o => o.id),
+      ...snapA0.credentials.map(c => c.id), sg.id, ...opsA0.map(o => o.id), aprA.id,
     ])];
     const locks = [9001, 9002, 9004, 9101];
 

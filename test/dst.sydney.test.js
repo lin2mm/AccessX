@@ -76,8 +76,24 @@ test('fall-back (5 April 2026): the repeated hour is evaluated on the wall clock
   // 03:00 AEDT → 02:00 AEST. 02:30 local occurs at 15:30Z and at 16:30Z.
   assert.equal(policy.localParts(Z('2026-04-04T15:30:00Z'), TZ).label, '2026-04-05 02:30 Australia/Sydney');
   assert.equal(policy.localParts(Z('2026-04-04T16:30:00Z'), TZ).label, '2026-04-05 02:30 Australia/Sydney');
-  // Ambiguous input resolves to the later (standard-time) instant.
-  assert.equal(policy.zonedTimeToDate('2026-04-05T02:30', TZ).toISOString(), '2026-04-04T16:30:00.000Z');
+  // Ambiguous input resolves to the EARLIER instant (RFC 5545 / Temporal
+  // "compatible"): an end time of 02:30 must not grant the repeated hour.
+  assert.equal(policy.zonedTimeToDate('2026-04-05T02:30', TZ).toISOString(), '2026-04-04T15:30:00.000Z');
+  assert.equal(policy.zonedTimeToDate('2026-04-05T02:30', TZ, { prefer: 'later' }).toISOString(), '2026-04-04T16:30:00.000Z');
+  // Edges of the repeated hour: 02:00 is ambiguous, 03:00 is not.
+  assert.equal(policy.zonedTimeToDate('2026-04-05T02:00', TZ).toISOString(), '2026-04-04T15:00:00.000Z');
+  assert.equal(policy.zonedTimeToDate('2026-04-05T03:00', TZ).toISOString(), '2026-04-04T17:00:00.000Z');
+  assert.equal(policy.zonedTimeToDate('2026-04-05T01:59', TZ).toISOString(), '2026-04-04T14:59:00.000Z');
+});
+
+test('spring-forward gap (4 October 2026): 02:30 does not exist and resolves to 03:30 AEDT', () => {
+  const t = policy.zonedTimeToDate('2026-10-04T02:30', TZ);
+  assert.equal(t.toISOString(), '2026-10-03T16:30:00.000Z');
+  assert.equal(policy.localParts(t, TZ).label, '2026-10-04 03:30 Australia/Sydney');
+  assert.equal(policy.zonedTimeToDate('2026-10-04T03:00', TZ).toISOString(), '2026-10-03T16:00:00.000Z');
+  // Southern and northern hemisphere, and a 30-minute DST zone (Lord Howe).
+  assert.equal(policy.zonedTimeToDate('2026-10-25T01:30', 'Europe/London').toISOString(), '2026-10-25T00:30:00.000Z', 'London fall-back: earlier (BST)');
+  assert.equal(policy.zonedTimeToDate('2026-04-05T01:45', 'Australia/Lord_Howe').toISOString(), '2026-04-04T14:45:00.000Z', 'Lord Howe: earlier (+11)');
 });
 
 test('reconciler warns a week ahead, naming the locks that cannot get a clock correction', () => {
@@ -92,4 +108,15 @@ test('reconciler warns a week ahead, naming the locks that cannot get a clock co
   assert.match(n.advice, /without a gateway/);
   // After the change there is no notice until April.
   assert.equal(reconciler.plan(db, locks, { now: Date.parse('2026-10-05T00:00:00Z') }).notices.filter(x => x.type === 'dst').length, 0);
+});
+
+test('passcode endLocal is converted in the door\'s time zone, not the admin\'s', async t => {
+  const { boot } = require('../support/boot');
+  const api = await boot({ ADMIN_TOKEN: 'o', TZ: 'America/Los_Angeles' });
+  t.after(api.close);
+  // Riverside (seed) is Europe/London: 20 Oct is still BST (+1) → 22:59Z, whatever the server/admin zone.
+  const r = await api.call('POST', '/api/passcode', { token: 'o', body: { lockId: 9002, userId: 'u2', endLocal: '2026-10-20T23:59' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.credential.endAt, '2026-10-20T22:59:00.000Z');
+  assert.equal((await api.call('POST', '/api/passcode', { token: 'o', body: { lockId: 9002, userId: 'u2', endLocal: 'soon' } })).status, 400);
 });

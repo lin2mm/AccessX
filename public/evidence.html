@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AccessX · Access control evidence</title>
+<style>
+  :root{--txt:#16181d;--txt2:#4a4f59;--line:#dde0e6;--ok:#127a3e;--bad:#b42318;--warn:#9a6700}
+  *{box-sizing:border-box}
+  body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--txt);max-width:960px;margin:0 auto;padding:24px}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:16px;margin:28px 0 8px;padding-bottom:4px;border-bottom:2px solid var(--txt)}
+  .meta{color:var(--txt2);font-size:12px}
+  table{width:100%;border-collapse:collapse;margin:6px 0 10px;font-size:13px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--txt2)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+  .kpi{border:1px solid var(--line);border-radius:8px;padding:10px}
+  .kpi b{display:block;font-size:20px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .flag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;background:#fdecea;color:var(--bad);margin:1px 2px}
+  .bar{display:flex;gap:8px;align-items:center;margin:12px 0}
+  .bar select,.bar button{font:inherit;padding:6px 10px}
+  code{font-size:12px;word-break:break-all}
+  .disclaimer{margin-top:28px;font-size:12px;color:var(--txt2);border-top:1px solid var(--line);padding-top:8px}
+  @media print{.bar{display:none} body{padding:0} h2{break-after:avoid} table{break-inside:auto} tr{break-inside:avoid}}
+</style>
+</head>
+<body>
+<h1>Access control evidence</h1>
+<div class="meta" id="sub">Loading…</div>
+<div class="bar">
+  <label>Period <select id="days"><option value="30">last 30 days</option><option value="90">last 90 days</option><option value="365">last 12 months</option></select></label>
+  <button type="button" id="print">Print / save as PDF</button>
+  <button type="button" id="json">Download JSON</button>
+</div>
+<div id="out"></div>
+<script src="evidence.js"></script>
+</body>
+</html>

@@ -16,6 +16,11 @@
       "migrations_dir": "migrations"
     }
   ],
+  // One TenantWriter per tenant serializes that tenant's writes (worker.js).
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT_WRITER", "class_name": "TenantWriter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantWriter"] }],
   // Reconcile credentials against policy every 15 minutes (worker.js scheduled()).
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {

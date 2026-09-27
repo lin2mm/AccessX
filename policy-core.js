@@ -67,17 +67,24 @@ function offsetMs(instant, timeZone) {
 
 /**
  * Convert a site-local wall-clock time ("2026-09-28T21:00") to an instant.
- * Non-existent times (DST spring-forward gap) resolve to the later offset.
+ * Same rule as RFC 5545 and Temporal's "compatible" disambiguation:
+ *  - non-existent (spring-forward gap) → shifted forward past the gap;
+ *  - ambiguous (fall-back, the hour happens twice) → the EARLIER instant, so
+ *    an end time never grants the repeated hour. `{ prefer: 'later' }` picks
+ *    the second occurrence (e.g. for a start time that should not open early).
  */
-function zonedTimeToDate(localIso, timeZone = DEFAULT_TZ) {
+function zonedTimeToDate(localIso, timeZone = DEFAULT_TZ, { prefer = 'earlier' } = {}) {
   const match = String(localIso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
   if (!match) return new Date(NaN);
   const [, y, mo, d, h, mi] = match.map(Number);
   const guess = Date.UTC(y, mo - 1, d, h, mi);
-  let instant = guess - offsetMs(guess, timeZone);
-  const corrected = guess - offsetMs(instant, timeZone);
-  if (corrected !== instant) instant = corrected;
-  return new Date(instant);
+  // Offsets a day either side cover every real-world transition (≤ 1 per day).
+  const candidates = [...new Set([guess - offsetMs(guess - 864e5, timeZone), guess - offsetMs(guess + 864e5, timeZone)])]
+    .filter(t => t + offsetMs(t, timeZone) === guess)
+    .sort((a, b) => a - b);
+  if (candidates.length) return new Date(prefer === 'later' ? candidates[candidates.length - 1] : candidates[0]);
+  // Gap: resolve with the offset in force before it (lands after the gap).
+  return new Date(guess - offsetMs(guess - 864e5, timeZone));
 }
 
 function siteTimeZone(db, siteId) {

@@ -1,16 +1,21 @@
 /**
- * TTLock Cloud API v3 client
+ * TTLock Cloud API v3 client — runs in Node and in Cloudflare Workers
+ * (no node:crypto, no process.env unless it exists).
  * Docs: https://euopen.ttlock.com/document/doc
  *
- * REAL endpoints, REAL parameter names, taken from the live TTLock docs.
- * Set TTLOCK_CLIENT_ID / TTLOCK_CLIENT_SECRET / TTLOCK_USER / TTLOCK_PASS
- * to run against the real cloud. Without them the server runs in DEMO mode.
+ * Two ways to authenticate:
+ *  - legacy single-tenant server: TTLOCK_CLIENT_ID / TTLOCK_CLIENT_SECRET /
+ *    TTLOCK_USER / TTLOCK_PASS env vars (password grant, token kept in memory);
+ *  - per-tenant accounts (vendor-accounts.js): `tokenProvider` hands out an
+ *    access token that was obtained once and is stored encrypted — the
+ *    customer's TTLock password is never stored.
  */
-const crypto = require('crypto');
+const { md5Hex } = require('./md5');
 
+const ENV = typeof process !== 'undefined' && process.env ? process.env : {};
 const REGION = {
-  eu: { api: 'https://euapi.ttlock.com', oauth: 'https://euapi.ttlock.com' },
-  cn: { api: 'https://api.sciener.com',  oauth: 'https://api.sciener.com'  },
+  eu: { api: 'https://euapi.ttlock.com' },
+  cn: { api: 'https://api.sciener.com' },
 };
 
 /** TTLock answers HTTP 200 with {errcode, errmsg}; keep the code for callers. */
@@ -22,60 +27,93 @@ class TTLockError extends Error {
   }
 }
 // https://euopen.ttlock.com/doc/api/error
-const ERR = { NO_GATEWAY: -2012, RATE_LIMIT: 30006, CLOCK_SKEW: 80000 };
+const ERR = {
+  NO_GATEWAY: -2012, RATE_LIMIT: 30006, CLOCK_SKEW: 80000,
+  INVALID_CLIENT: 10001, INVALID_TOKEN: 10003, INVALID_GRANT: 10004,
+  APP_NOT_REVIEWED: 10006, INVALID_ACCOUNT: 10007, INVALID_REFRESH: 10011,
+};
+const TOKEN_ERRORS = new Set([ERR.INVALID_TOKEN, ERR.INVALID_GRANT]);
+
+function apiBase(region, override) {
+  if (override) return String(override).replace(/\/+$/, '');
+  const r = REGION[region || 'eu'];
+  if (!r) throw new Error(`unknown TTLock region ${region}`);
+  return r.api;
+}
+
+/**
+ * POST /oauth2/token. NOTE the snake_case client_id / client_secret: the
+ * OAuth endpoint differs from the v3 API (which takes clientId).
+ */
+async function oauthToken({ base, fetch, clientId, clientSecret, form }) {
+  const body = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, ...form });
+  const r = await fetch(`${base}/oauth2/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  let j;
+  try { j = await r.json(); } catch { throw new TTLockError('/oauth2/token', 90000, `HTTP ${r.status}, not JSON`); }
+  if (j.errcode || !j.access_token) throw new TTLockError('/oauth2/token', j.errcode || 1, j.errmsg || j.error_description || j.error || 'no access_token');
+  return {
+    accessToken: j.access_token, refreshToken: j.refresh_token || null, uid: j.uid === undefined ? null : String(j.uid),
+    expiresAt: Date.now() + (Number(j.expires_in) || 7776000) * 1000, scope: j.scope || null,
+  };
+}
 
 class TTLock {
   constructor(opts = {}) {
     this.fetch = opts.fetch || ((...a) => globalThis.fetch(...a));
-    this.clientId = opts.clientId || process.env.TTLOCK_CLIENT_ID || '';
-    this.clientSecret = opts.clientSecret || process.env.TTLOCK_CLIENT_SECRET || '';
-    this.username = opts.username || process.env.TTLOCK_USER || '';
-    this.password = opts.password || process.env.TTLOCK_PASS || '';
-    this.base = (REGION[opts.region || process.env.TTLOCK_REGION || 'eu']).api;
+    this.clientId = opts.clientId || ENV.TTLOCK_CLIENT_ID || '';
+    this.clientSecret = opts.clientSecret || ENV.TTLOCK_CLIENT_SECRET || '';
+    this.username = opts.username || ENV.TTLOCK_USER || '';
+    this.password = opts.password || ENV.TTLOCK_PASS || '';
+    this.base = apiBase(opts.region || ENV.TTLOCK_REGION || 'eu', opts.apiBase || ENV.TTLOCK_API_BASE);
+    this.tokenProvider = opts.tokenProvider || null;
     this.token = null;
     this.tokenExp = 0;
-    this.demo = !(this.clientId && this.clientSecret && this.username && this.password);
+    this.demo = !this.tokenProvider && !(this.clientId && this.clientSecret && this.username && this.password);
   }
 
   /** TTLock requires the password as a lowercase MD5 hex digest. */
-  static md5(s) { return crypto.createHash('md5').update(s).digest('hex'); }
+  static md5(s) { return md5Hex(s); }
+
+  /** One-time exchange of account credentials for tokens (password grant). */
+  static login({ region, apiBase: override, fetch = (...a) => globalThis.fetch(...a), clientId, clientSecret, username, password }) {
+    return oauthToken({ base: apiBase(region, override), fetch, clientId, clientSecret, form: { username, password: md5Hex(password) } });
+  }
+
+  static refresh({ region, apiBase: override, fetch = (...a) => globalThis.fetch(...a), clientId, clientSecret, refreshToken }) {
+    return oauthToken({ base: apiBase(region, override), fetch, clientId, clientSecret, form: { grant_type: 'refresh_token', refresh_token: refreshToken } });
+  }
 
   now() { return Date.now(); }
 
-  async getToken() {
+  async getToken({ force = false } = {}) {
     if (this.demo) return 'DEMO';
-    if (this.token && Date.now() < this.tokenExp - 60000) return this.token;
-    const body = new URLSearchParams({
-      clientId: this.clientId,
-      clientSecret: this.clientSecret,
-      username: this.username,
-      password: TTLock.md5(this.password),
+    if (this.tokenProvider) return this.tokenProvider({ force });
+    if (!force && this.token && Date.now() < this.tokenExp - 60000) return this.token;
+    const t = await oauthToken({
+      base: this.base, fetch: this.fetch, clientId: this.clientId, clientSecret: this.clientSecret,
+      form: { username: this.username, password: md5Hex(this.password) },
     });
-    const r = await this.fetch(`${this.base}/oauth2/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-    const j = await r.json();
-    if (j.errcode) throw new Error(`TTLock auth ${j.errcode}: ${j.errmsg}`);
-    this.token = j.access_token;
-    this.tokenExp = Date.now() + (j.expires_in || 7776000) * 1000;
+    this.token = t.accessToken;
+    this.tokenExp = t.expiresAt;
     return this.token;
   }
 
-  async call(path, params = {}, method = 'GET') {
+  async call(path, params = {}, method = 'GET', { retried = false } = {}) {
     if (this.demo) return { __demo: true };
-    const token = await this.getToken();
+    const token = await this.getToken({ force: retried });
     const all = { clientId: this.clientId, accessToken: token, date: this.now(), ...params };
     const qs = new URLSearchParams(
-      Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined && v !== null))
+      Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined && v !== null && v !== ''))
     );
     const url = method === 'GET' ? `${this.base}${path}?${qs}` : `${this.base}${path}`;
     const init = method === 'GET'
       ? { method }
       : { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: qs };
     const r = await this.fetch(url, init);
-    const j = await r.json();
+    let j;
+    try { j = await r.json(); } catch { throw new TTLockError(path, 90000, `HTTP ${r.status}, not JSON`); }
+    // A token revoked elsewhere (password change, re-login): get a fresh one once.
+    if (j.errcode && TOKEN_ERRORS.has(Number(j.errcode)) && !retried) return this.call(path, params, method, { retried: true });
     if (j.errcode) throw new TTLockError(path, j.errcode, j.errmsg);
     return j;
   }
@@ -140,6 +178,20 @@ class TTLock {
     });
   }
 
+  /** Lock clock (needs a gateway). Used to check DST/clock drift on real devices. */
+  queryDate(lockId) { return this.call('/v3/lock/queryDate', { lockId }); }
+
+  /** All locks of the account (pages of 100). */
+  async listAllLocks({ maxPages = 50 } = {}) {
+    const out = [];
+    for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+      const r = await this.listLocks(pageNo, 100);
+      out.push(...(r.list || []));
+      if ((r.list || []).length < 100 || pageNo >= (r.pages || Infinity)) break;
+    }
+    return out;
+  }
+
   // ---- Gateways --------------------------------------------------------
   listGateways(pageNo = 1, pageSize = 100) {
     return this.call('/v3/gateway/list', { pageNo, pageSize });
@@ -154,4 +206,4 @@ const RECORD_TYPES = {
   '-5': 'Face unlock', '-4': 'QR code unlock', 123: 'Network exception',
 };
 
-module.exports = { TTLock, TTLockError, ERR, RECORD_TYPES };
+module.exports = { TTLock, TTLockError, ERR, TOKEN_ERRORS, RECORD_TYPES, apiBase };

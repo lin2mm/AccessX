@@ -26,7 +26,7 @@ const b = { bool: true };
 const i = { int: true };
 const COLLECTIONS = {
   sites: { table: 'sites', fields: { name: 'name', address: 'address', timezone: 'timezone' } },
-  doorGroups: { table: 'door_groups', fields: { siteId: 'site_id', name: 'name', lockIds: ['lock_ids', j] } },
+  doorGroups: { table: 'door_groups', fields: { siteId: 'site_id', name: 'name', lockIds: ['lock_ids', j], sensitive: ['sensitive', b] } },
   userGroups: { table: 'user_groups', fields: { name: 'name', siteId: 'site_id' } },
   users: {
     table: 'users',
@@ -237,16 +237,47 @@ function createStore(sql) {
       return row ? Number(row.n) : 0;
     }
 
+    /** Latest retention checkpoint (entries up to it were purged), or null. */
+    async function auditCheckpoint() {
+      const r = await sql.first('SELECT seq, hash, created_at, anchor_seq FROM audit_checkpoints WHERE tenant_id = ? ORDER BY seq DESC LIMIT 1', [tenantId]);
+      return r ? { seq: r.seq, hash: r.hash, createdAt: r.created_at, anchorSeq: r.anchor_seq } : null;
+    }
+
     async function auditVerify() {
+      const cp = await auditCheckpoint();
       const rows = await sql.all('SELECT * FROM audit_events WHERE tenant_id = ? ORDER BY seq ASC', [tenantId]);
-      return auditCore.verify(rows.map(rowToAudit));
+      return auditCore.verify(rows.map(rowToAudit), cp);
+    }
+
+    /** Oldest-first slice of the chain, for export. */
+    async function auditRange({ fromSeq = 0, toSeq = null, limit = 5000 } = {}) {
+      const params = [tenantId, Number(fromSeq) || 0];
+      let where = 'tenant_id = ? AND seq >= ?';
+      if (toSeq) { where += ' AND seq <= ?'; params.push(Number(toSeq)); }
+      params.push(Math.min(Math.max(Number(limit) || 5000, 1), 10000));
+      return (await sql.all(`SELECT * FROM audit_events WHERE ${where} ORDER BY seq ASC LIMIT ?`, params)).map(rowToAudit);
+    }
+
+    async function auditEntry(seq) {
+      const r = await sql.first('SELECT * FROM audit_events WHERE tenant_id = ? AND seq = ?', [tenantId, Number(seq)]);
+      return r ? rowToAudit(r) : null;
+    }
+
+    async function anchors({ limit = 100, fromSeq = null, toSeq = null } = {}) {
+      const params = [tenantId];
+      let where = 'tenant_id = ?';
+      if (fromSeq !== null) { where += ' AND seq >= ?'; params.push(Number(fromSeq)); }
+      if (toSeq !== null) { where += ' AND seq <= ?'; params.push(Number(toSeq)); }
+      params.push(Math.min(Math.max(Number(limit) || 100, 1), 1000));
+      const rows = await sql.all(`SELECT * FROM audit_anchors WHERE ${where} ORDER BY seq DESC LIMIT ?`, params);
+      return rows.map(r => ({ seq: r.seq, hash: r.hash, createdAt: r.created_at, keyId: r.key_id, signature: r.signature, deliveredTo: r.delivered_to, deliveryStatus: r.delivery_status }));
     }
 
     async function operators() {
-      const rows = await sql.all('SELECT id, name, role, site_ids, email, sso_subject, last_login_at, created_by, created_at, revoked_at FROM operators WHERE tenant_id = ? ORDER BY created_at', [tenantId]);
+      const rows = await sql.all('SELECT id, name, role, site_ids, email, sso_subject, break_glass, last_login_at, created_by, created_at, revoked_at FROM operators WHERE tenant_id = ? ORDER BY created_at', [tenantId]);
       return rows.map(r => ({
         id: r.id, name: r.name, role: r.role, siteIds: r.site_ids ? JSON.parse(r.site_ids) : undefined,
-        email: r.email || undefined, ssoLinked: Boolean(r.sso_subject), lastLoginAt: r.last_login_at,
+        email: r.email || undefined, ssoLinked: Boolean(r.sso_subject), breakGlass: Boolean(r.break_glass), lastLoginAt: r.last_login_at,
         createdBy: r.created_by, createdAt: r.created_at, revokedAt: r.revoked_at,
       }));
     }
@@ -255,13 +286,13 @@ function createStore(sql) {
       return sql.first('SELECT id, name, seeded, settings FROM tenants WHERE id = ?', [tenantId]);
     }
 
-    return { id: tenantId, snapshot, unit, transact, auditRecent, auditCount, auditVerify, auditHead, operators, info };
+    return { id: tenantId, snapshot, unit, transact, auditRecent, auditCount, auditVerify, auditHead, auditCheckpoint, auditRange, auditEntry, anchors, operators, info };
   }
 
-  const OP_COLS = 'tenant_id, id, name, role, site_ids, email, sso_issuer, sso_subject';
+  const OP_COLS = 'tenant_id, id, name, role, site_ids, email, sso_issuer, sso_subject, break_glass';
   const toOperator = r => (r ? {
     tenantId: r.tenant_id, id: r.id, name: r.name, role: r.role, siteIds: r.site_ids ? JSON.parse(r.site_ids) : undefined,
-    email: r.email || undefined, ssoIssuer: r.sso_issuer || undefined, ssoSubject: r.sso_subject || undefined,
+    email: r.email || undefined, ssoIssuer: r.sso_issuer || undefined, ssoSubject: r.sso_subject || undefined, breakGlass: Boolean(r.break_glass),
   } : null);
 
   /** Token hash → operator (any tenant). Revoked operators never match. */
@@ -337,8 +368,8 @@ function createStore(sql) {
 /** Rows for an operator insert (token already hashed). */
 function operatorStatement(tenantId, op) {
   return {
-    sql: 'INSERT INTO operators (tenant_id, id, name, role, site_ids, token_sha256, email, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    params: [tenantId, op.id, op.name, op.role, op.siteIds && op.siteIds.length ? JSON.stringify(op.siteIds) : null, op.tokenSha256, op.email || null, op.createdBy || null],
+    sql: 'INSERT INTO operators (tenant_id, id, name, role, site_ids, token_sha256, email, created_by, break_glass) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    params: [tenantId, op.id, op.name, op.role, op.siteIds && op.siteIds.length ? JSON.stringify(op.siteIds) : null, op.tokenSha256, op.email || null, op.createdBy || null, op.breakGlass ? 1 : 0],
   };
 }
 

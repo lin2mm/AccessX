@@ -222,7 +222,7 @@ function createScim({ uid, reconcile = async () => {}, log = () => {} }) {
   }
 
   /* ---------------- handler ---------------- */
-  async function handle({ t, tenantId, method, path, query, body, origin, actor }) {
+  async function handle({ t, tenantId, method, path, query, body, origin, actor, adoptDomains = [] }) {
     const base = `${origin}/scim/v2`;
     const ok = (status, out, headers) => ({ status, body: out, contentType: CONTENT_TYPE, headers });
     const sub = path.replace(/^\/scim\/v2/, '') || '/';
@@ -257,8 +257,14 @@ function createScim({ uid, reconcile = async () => {}, log = () => {} }) {
         const result = await t.transact((snap, uow) => {
           if (managedUsers(snap).some(u => ci(u.userName, input.userName))) throw new ScimError(409, `userName ${input.userName} already exists`, 'uniqueness');
           const w = userWrite(input);
-          // Adopt a manually created person with the same email instead of duplicating them.
-          const existing = w.email && snap.users.find(u => u.source !== 'scim' && ci(u.email, w.email) && !u.userName);
+          // Adopt a manually created person with the same email instead of
+          // duplicating them — but only on a DNS-verified domain. Otherwise a
+          // directory could claim anyone by sending their email address and
+          // then deactivate or re-enable them.
+          const sameEmail = w.email && snap.users.find(u => u.source !== 'scim' && ci(u.email, w.email) && !u.userName);
+          const domainOk = sameEmail && adoptDomains.includes(String(w.email).split('@').pop().toLowerCase());
+          const existing = domainOk ? sameEmail : null;
+          if (sameEmail && !domainOk) uow.audit('scim.link_skipped', `${sameEmail.id}: email domain not verified`, actor);
           if (existing) {
             if (userNameTaken(snap, w.userName, existing.id)) throw new ScimError(409, `userName ${input.userName} already exists`, 'uniqueness');
             uow.update('users', existing.id, { ...w, source: 'scim' }).audit('scim.user_linked', existing.id, actor);

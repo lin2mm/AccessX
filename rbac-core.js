@@ -77,11 +77,22 @@ const ROUTES = [
   ['POST', /^\/api\/evaluate$/, 'report.read'],
   ['GET', /^\/api\/users\/[^/]+\/doors$/, 'report.read'],
   ['POST', /^\/api\/passcode$/, 'credential.issue'],
+  // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
+  // the RBAC coverage gate fails for any route that falls through to the default.
+  ['GET', /^\/api\/sso$/, OWNER], ['PUT', /^\/api\/sso$/, OWNER], ['DELETE', /^\/api\/sso$/, OWNER],
+  ['POST', /^\/api\/sso\/domains\/verify$/, OWNER], ['PUT', /^\/api\/sso\/enforcement$/, OWNER],
+  ['POST', /^\/api\/audit\/anchor$/, OWNER], ['PUT', /^\/api\/audit\/settings$/, OWNER], ['POST', /^\/api\/audit\/purge$/, OWNER],
+  ['GET', /^\/api\/vendor-account$/, OWNER], ['PUT', /^\/api\/vendor-account$/, OWNER], ['DELETE', /^\/api\/vendor-account$/, OWNER],
+  // Four-eyes: listing is operational; deciding re-checks the ORIGINAL route's permission inside.
+  ['GET', /^\/api\/approvals$/, 'door.read'],
+  ['POST', /^\/api\/approvals\/[^/]+\/(approve|reject|cancel)$/, AUTHENTICATED],
   ['GET', /^\/api\/credentials$/, 'report.read'],
   ['DELETE', /^\/api\/credentials\/[^/]+$/, 'credential.issue'],
   ['GET', /^\/api\/compile$/, 'report.read'],
   ['GET', /^\/api\/records\/\d+$/, 'report.read'],
   ['GET', /^\/api\/audit(\/verify)?$/, 'audit.read'],
+  ['GET', /^\/api\/audit\/(anchors|export|settings)$/, 'audit.read'],
+  ['GET', /^\/api\/reports\/evidence$/, 'audit.read'],
   ['POST', /^\/api\/mirror\/sync$/, 'mirror.sync'],
   ['GET', /^\/api\/mirror\/(coverage|records)$/, 'report.read'],
   ['POST', /^\/api\/ai$/, 'report.read'],
@@ -92,19 +103,24 @@ const ROUTES = [
   ...['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(m => [m, /^\/scim\/v2(\/|$)/, 'directory.sync']),
 ];
 
-function requiredPermission(method, pathname) {
+/** Which rule decides a request: { perm, source: 'route' | 'collection' | 'default', rule }. */
+function resolvePermission(method, pathname) {
   const m = String(method || 'GET').toUpperCase() === 'HEAD' ? 'GET' : String(method || 'GET').toUpperCase();
   const path = String(pathname || '').replace(/\/+$/, '') || '/';
-  for (const [routeMethod, pattern, perm] of ROUTES) {
-    if (routeMethod === m && pattern.test(path)) return perm;
+  for (const rule of ROUTES) {
+    const [routeMethod, pattern, perm] = rule;
+    if (routeMethod === m && pattern.test(path)) return { perm, source: 'route', rule };
   }
   const collection = path.match(/^\/api\/([^/]+)(?:\/[^/]+)?$/);
   if (collection && COLLECTION_PERMS[collection[1]]) {
-    if (m === 'GET' && !path.slice(5).includes('/')) return 'report.read';
-    if (m === 'POST' || m === 'DELETE') return COLLECTION_PERMS[collection[1]];
+    if (m === 'GET' && !path.slice(5).includes('/')) return { perm: 'report.read', source: 'collection' };
+    if (m === 'POST' || m === 'DELETE') return { perm: COLLECTION_PERMS[collection[1]], source: 'collection' };
   }
-  return OWNER;
+  // Fail closed: an unlisted route is owner-only. The coverage gate
+  // (test/rbac-coverage.test.js) makes sure no real route ends up here.
+  return { perm: OWNER, source: 'default' };
 }
+const requiredPermission = (method, pathname) => resolvePermission(method, pathname).perm;
 
 function roleFor(db, roleId) {
   const custom = ((db && db.roles) || []).find(role => role.id === roleId);
@@ -219,6 +235,7 @@ function describe(db, operator) {
 }
 
 module.exports = {
+  resolvePermission, COLLECTION_PERMS,
   PERMS, DEFAULT_ROLES, PUBLIC_PERMS, OWNER, AUTHENTICATED, PUBLIC, PLATFORM, ANONYMOUS, ROUTES,
   requiredPermission, permsFor, hasPermission, canAccessSite, canAccessLock, allSites,
   parseOperators, findOperator, constantTimeEqual, describe, roleFor,
