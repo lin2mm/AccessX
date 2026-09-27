@@ -103,6 +103,12 @@ const ROUTES = [
   ['GET', /^\/api\/visit-invites$/, 'visitor.manage'],
   ['POST', /^\/api\/visit-invites$/, 'visitor.manage'],
   ['POST', /^\/api\/visit-invites\/[^/]+\/(revoke|approve|reject)$/, 'visitor.manage'],
+  // Front-desk kiosk (R16): pairing and switching off a reception tablet, and its walk-ins.
+  ['GET', /^\/api\/kiosks$/, 'visitor.manage'],
+  ['POST', /^\/api\/kiosks$/, 'visitor.manage'],
+  ['POST', /^\/api\/kiosks\/[^/]+\/revoke$/, 'visitor.manage'],
+  ['GET', /^\/api\/walkins$/, 'visitor.manage'],
+  ['POST', /^\/api\/walkins\/[^/]+\/(dismiss|erase)$/, 'visitor.manage'],
   ['POST', /^\/api\/visits\/sms-test$/, OWNER],
   // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
   // the RBAC coverage gate fails for any route that falls through to the default.

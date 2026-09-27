@@ -37,17 +37,34 @@
         <select id="tz">${zones.map(z => `<option${z === zone ? ' selected' : ''}>${esc(z)}</option>`).join('')}</select>
         <div class="trap" aria-hidden="true"><label for="website">Leave empty</label><input id="website" tabindex="-1" autocomplete="off"></div>
         <label class="check"><input type="checkbox" id="terms"> <span>I accept the ${info.termsUrl ? `<a href="${esc(info.termsUrl)}" target="_blank" rel="noopener">terms of service</a>` : 'terms of service'} and confirm I may set up door access for this company.</span></label>
+        ${info.turnstileSiteKey ? '<div id="ts"></div>' : ''}
         <p id="err" class="bad" role="alert"></p>
         <button id="go" type="submit">Email me a confirmation link</button>
       </form>
       <p class="meta">Already have an account? <a href="/">Sign in</a></p>`);
+    // Optional Cloudflare Turnstile (R16): the page's CSP allows it only when configured.
+    let human = '';
+    let widget = null;
+    if (info.turnstileSiteKey) {
+      const s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      s.async = true;
+      s.onload = () => {
+        widget = window.turnstile.render('#ts', { sitekey: info.turnstileSiteKey, callback: t => { human = t; }, 'expired-callback': () => { human = ''; }, 'error-callback': () => { human = ''; } });
+      };
+      s.onerror = () => { document.getElementById('err').textContent = 'The human check could not load. Check your connection or ad blocker, then reload.'; };
+      document.head.appendChild(s);
+    }
     document.getElementById('f').addEventListener('submit', async e => {
       e.preventDefault();
       const v = id => document.getElementById(id).value;
       const err = document.getElementById('err');
       const go = document.getElementById('go');
       go.disabled = true; go.textContent = 'Sending…'; err.textContent = '';
-      const r = await post('/api/signup', { company: v('company'), name: v('name'), email: v('email'), timeZone: v('tz'), website: v('website'), acceptTerms: document.getElementById('terms').checked });
+      if (info.turnstileSiteKey && !human) { go.disabled = false; go.textContent = 'Email me a confirmation link'; err.textContent = 'Please complete the human check first.'; return; }
+      const r = await post('/api/signup', { company: v('company'), name: v('name'), email: v('email'), timeZone: v('tz'), website: v('website'), acceptTerms: document.getElementById('terms').checked, turnstileToken: human || undefined });
+      // Tokens are single-use: get a fresh one for the next attempt.
+      if (widget !== null && window.turnstile) { window.turnstile.reset(widget); human = ''; }
       if (!r.ok) { go.disabled = false; go.textContent = 'Email me a confirmation link'; err.textContent = r.error || 'Something went wrong. Please try again.'; return; }
       show(`<h1 class="ok">Check your inbox</h1><p>${esc(r.message)}</p><p class="meta">Sent to <b>${esc(v('email'))}</b>. Nothing arrived after a few minutes? Check spam, or <a href="/signup">try again</a>.</p>`);
     });

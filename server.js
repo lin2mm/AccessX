@@ -78,7 +78,7 @@ const vendorAccounts = createVendorAccounts({
 });
 
 const { checkConfig, resolveOpenReads } = require('./doctor-core');
-const { signupConfigFromEnv } = require('./signup-core');
+const { signupConfigFromEnv, withTurnstile } = require('./signup-core');
 const startupEnv = { ...process.env };
 // Anonymous read-only (the public demo) is refused once real locks are configured.
 const openReads = resolveOpenReads(process.env, { demoDefault: tt.demo });
@@ -129,9 +129,11 @@ app.disable('x-powered-by');
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; " +
   "base-uri 'none'; form-action 'self'";
+const TURNSTILE_ON = Boolean(signupConfigFromEnv(process.env).turnstileSiteKey);
+const CSP_SIGNUP = withTurnstile(CSP); // R16: only the signup page may load the Turnstile widget
 app.use((req, res, next) => {
   res.set({
-    'Content-Security-Policy': CSP,
+    'Content-Security-Policy': TURNSTILE_ON && (req.path === '/signup' || req.path === '/signup.html') ? CSP_SIGNUP : CSP,
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
@@ -171,7 +173,7 @@ app.post('/api/stripe/webhook', express.raw({ type: () => true, limit: '256kb' }
 // Visitor pre-registration: no login; the invite token (in the body) is the only credential.
 // Self-service signup and its emailed link (R15): no login; rate-limited per address.
 for (const [path, fn, what, kind] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out', 'visitorLink'], ['/api/visit-invite', 'visitInvitePublic', 'Registration', 'visitorLink'],
-  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup']]) {
+  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup'], ['/api/kiosk', 'kioskPublic', 'Kiosk', 'kiosk']]) {
   app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
     if (!(await allow(limiterFor, kind, peerIp(req)))) return tooMany(res, true);
     try {

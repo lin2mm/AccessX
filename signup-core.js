@@ -46,7 +46,42 @@ function signupConfigFromEnv(env = {}) {
     enabled: env.SIGNUP_ENABLED === '1',
     dailyLimit: n(env.SIGNUP_DAILY_LIMIT, DEFAULTS.dailyLimit),
     termsUrl: env.SIGNUP_TERMS_URL || '',
+    // R16: optional Cloudflare Turnstile (both keys, or neither).
+    turnstileSiteKey: env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY ? env.TURNSTILE_SITE_KEY : '',
+    turnstileSecret: env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY ? env.TURNSTILE_SECRET_KEY : '',
+    turnstileVerifyUrl: env.TURNSTILE_VERIFY_URL || TURNSTILE_VERIFY_URL,
   };
+}
+
+const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+/** Content-Security-Policy additions for a page that shows the Turnstile widget. */
+const TURNSTILE_CSP = { script: 'https://challenges.cloudflare.com', frame: 'https://challenges.cloudflare.com' };
+/** The site CSP plus Turnstile's script and frame origin (signup page only). */
+function withTurnstile(csp) {
+  const parts = String(csp || '').split(';').map(s => s.trim()).filter(Boolean);
+  const has = name => parts.findIndex(p => p.split(/\s+/)[0] === name);
+  const add = (name, src) => {
+    const i = has(name);
+    if (i === -1) parts.push(`${name} 'self' ${src}`);
+    else if (!parts[i].split(/\s+/).includes(src)) parts[i] += ` ${src}`;
+  };
+  add('script-src', TURNSTILE_CSP.script);
+  add('frame-src', TURNSTILE_CSP.frame);
+  return parts.join('; ');
+}
+/**
+ * Siteverify: tokens are single-use and valid 5 minutes. Fails closed.
+ * @returns {Promise<{ok:boolean, reason?:string}>}
+ */
+async function verifyTurnstile({ secret, token, ip, url = TURNSTILE_VERIFY_URL, fetchImpl = globalThis.fetch }) {
+  if (typeof token !== 'string' || !token || token.length > 2048) return { ok: false, reason: 'missing' };
+  let res;
+  try {
+    res = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret, response: token, ...(ip && ip !== 'unknown' ? { remoteip: ip } : {}) }), signal: AbortSignal.timeout(8000) });
+  } catch (error) { return { ok: false, reason: 'unavailable', detail: String(error && error.message) }; }
+  const out = await res.json().catch(() => null);
+  if (!res.ok || !out) return { ok: false, reason: 'unavailable', detail: `HTTP ${res.status}` };
+  return out.success === true ? { ok: true } : { ok: false, reason: 'rejected', detail: (out['error-codes'] || []).join(',') };
 }
 
 function verificationEmail({ company, name, link, hours = DEFAULTS.linkHours }) {
@@ -67,4 +102,4 @@ function verificationEmail({ company, name, link, hours = DEFAULTS.linkHours }) 
   };
 }
 
-module.exports = { DEFAULTS, SignupError, validateSignup, signupConfigFromEnv, verificationEmail };
+module.exports = { DEFAULTS, SignupError, validateSignup, signupConfigFromEnv, verificationEmail, verifyTurnstile, withTurnstile, TURNSTILE_CSP, TURNSTILE_VERIFY_URL };

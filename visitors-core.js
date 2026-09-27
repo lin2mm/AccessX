@@ -35,6 +35,8 @@ function settingsOf(settings) {
     maxHours: int(v.maxHours, 1, LIMITS.maxHoursCap, LIMITS.maxHours),
     retentionDays: int(v.retentionDays, LIMITS.retentionMin, LIMITS.retentionMax, LIMITS.retentionDays),
     notifyHost: v.notifyHost !== false, // email the host when their visitor first opens a door
+    // R16: shown at the kiosk; visitors must accept it (the SHA-256 of the text is stored with the visit).
+    notice: typeof v.notice === 'string' ? v.notice : '',
   };
 }
 
@@ -53,6 +55,9 @@ function validateSettings(body) {
     if (typeof body.notifyHost !== 'boolean') return { ok: false, error: 'notifyHost must be true or false' };
     out.notifyHost = body.notifyHost;
   }
+  const n = require('./kiosk-core').validateNotice(body.notice);
+  if (!n.ok) return { ok: false, error: n.error };
+  if (!n.skip) out.notice = n.value;
   return { ok: true, value: out };
 }
 
@@ -133,6 +138,7 @@ function rowToVisit(r) {
     createdBy: r.created_by, createdAt: r.created_at, endedAt: r.ended_at, endedBy: r.ended_by,
     erased: Boolean(r.erased_at), erasedAt: r.erased_at,
     arrivedAt: r.arrived_at || null, arrivedLock: r.arrived_lock === null || r.arrived_lock === undefined ? null : Number(r.arrived_lock),
+    checkedInAt: r.checked_in_at || null, noticeAccepted: Boolean(r.notice_sha256),
   };
 }
 

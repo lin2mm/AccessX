@@ -825,7 +825,7 @@ function nextDay(ymd){const d=new Date(ymd+'T00:00:00Z');d.setUTCDate(d.getUTCDa
 const hh=h=>String(h).padStart(2,'0')+':00';
 $('#p-start-h').innerHTML=Array.from({length:24},(_,h)=>`<option value="${hh(h)}"${h===8?' selected':''}>${hh(h)}</option>`).join('');
 $('#p-start').addEventListener('change',()=>{refreshTzNotes();if($('#p-end').value&&$('#p-end').value<$('#p-start').value)$('#p-end').value='';});
-let VIS={hosts:[],settings:null};
+let VIS={hosts:[],settings:null,walkinId:null};
 function visDoors(){return DOORS.filter(d=>d.siteId);}
 /** Doors of one site per visit: once a door is ticked, other sites' doors are disabled. */
 function renderVisDoors(checked=$$('#vi-doors input:checked').map(i=>i.value)){
@@ -873,7 +873,7 @@ async function loadVisitors(){
   const s=await api('/api/visits/settings');
   // Owner-only (also enforced by the server).
   $('#vis-settings').hidden=!(s.ok&&ME&&ME.role==='r_owner');
-  if(s.ok){$('#vs-max').value=s.maxHours;$('#vs-ret').value=s.retentionDays;$('#vs-notify').checked=s.notifyHost;
+  if(s.ok){$('#vs-max').value=s.maxHours;$('#vs-ret').value=s.retentionDays;$('#vs-notify').checked=s.notifyHost;if(document.activeElement!==$('#vs-notice'))$('#vs-notice').value=s.notice||'';
     const a=s.arrivals||{};
     $('#vs-arrivals').textContent=!a.enabled?'Arrival detection is off: SECRETS_KEY is not set on the server.'
       :a.callback?'Arrivals: reported by TTLock within seconds (record callback), doors with a gateway.'
@@ -882,7 +882,7 @@ async function loadVisitors(){
     $('#vs-arrivals').textContent+=s.checkoutLinks?' Visitors get a self check-out link with their code.':' Set PUBLIC_URL to send visitors a self check-out link.';
     $('#vs-sms').hidden=!s.smsAvailable;
     if(s.smsUsage)$('#vs-sms-usage').textContent=`Text messages this month (${s.smsUsage.period}): ${s.smsUsage.sent}${s.smsUsage.cap?` of ${s.smsUsage.cap}`:''} · ${s.smsUsage.segments} billed segment${s.smsUsage.segments===1?'':'s'}`;}
-  loadInvites();
+  loadInvites();loadWalkins();loadKiosks();
   const DELIVERY={emailed:'code emailed',email_failed:'email failed',texted:'code texted',sms_failed:'text failed'};
   const stateTag={scheduled:'<span class="tag">scheduled</span>',active:'<span class="tag g">visit window</span>',ended:'<span class="tag">ended</span>',checked_out:'<span class="tag">checked out</span>',cancelled:'<span class="tag">cancelled</span>'};
   const codeTag=c=>c.status==='active'?'<span class="tag g">active</span>':c.status==='pending_removal'?'<span class="tag o">remove at lock</span>':`<span class="tag">${esc(c.status)}</span>`;
@@ -892,7 +892,7 @@ async function loadVisitors(){
     const who=v.erased?'<span class="meta">details erased</span>':`<b>${esc(v.visitorName)}</b><div class="meta">${esc([v.company,v.visitorEmail,v.visitorPhone].filter(Boolean).join(' · '))}</div>`;
     const doors=v.codes.map(c=>{const d=DOORS.find(x=>Number(x.lockId)===Number(c.lockId));return `<div>${esc(d?d.lockAlias:c.lockId)} ${codeTag(c)}</div>`;}).join('');
     return `<tr><td>${who}</td><td>${esc(v.hostName||v.hostUserId)}</td><td>${doors}</td>
-      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.arrivedAt?`<div class="meta">arrived ${esc(atDoor(v.arrivedAt,v.arrivedLock||lock))}${(()=>{const d=DOORS.find(x=>Number(x.lockId)===Number(v.arrivedLock));return d?' · '+esc(d.lockAlias):'';})()}</div>`:''}${v.delivery&&v.delivery!=='shown'?`<div class="meta">${esc(v.delivery.split('+').map(d=>DELIVERY[d]||d).join(' · '))}</div>`:''}</td>
+      <td>${esc(atDoor(v.startAt,lock))}<div class="meta">→ ${esc(atDoor(v.endAt,lock))}</div></td><td>${stateTag[v.state]||esc(v.state)}${v.arrivedAt?`<div class="meta">arrived ${esc(atDoor(v.arrivedAt,v.arrivedLock||lock))}${(()=>{const d=DOORS.find(x=>Number(x.lockId)===Number(v.arrivedLock));return d?' · '+esc(d.lockAlias):'';})()}</div>`:''}${v.checkedInAt?`<div class="meta">signed in ${esc(atDoor(v.checkedInAt,lock))}${v.noticeAccepted?' · notice accepted':''}</div>`:''}${v.delivery&&v.delivery!=='shown'?`<div class="meta">${esc(v.delivery.split('+').map(d=>DELIVERY[d]||d).join(' · '))}</div>`:''}</td>
       <td style="white-space:nowrap">${open?`<button class="btn2 sm" data-vact="${v.state==='scheduled'?'cancel':'checkout'}" data-vid="${esc(v.id)}">${v.state==='scheduled'?'Cancel':'Check out'}</button> `:''}${v.erased?'':`<button class="btn2 sm" data-vact="erase" data-vid="${esc(v.id)}" title="Erase this visitor's personal details now">Erase details</button>`}</td></tr>`;
   }).join('');
   $('#vis-list').innerHTML=rows?`<table><tr><th>Visitor</th><th>Host</th><th>Doors</th><th>When (door time)</th><th>State</th><th></th></tr>${rows}</table>`:'<div class="meta">No visitors in this period.</div>';
@@ -957,9 +957,11 @@ $('#vi-form').addEventListener('submit',async e=>{
     $('#vi-email').value='';$('#vi-phone').value='';
     loadVisitors();loadAudit();return;
   }
+  if(VIS.walkinId)body.walkinId=VIS.walkinId;
   $('#vi-submit').disabled=true;
   const r=await post('/api/visits',body);
   $('#vi-submit').disabled=false;
+  if(r.ok)VIS.walkinId=null;
   if(!r.ok){out.innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
   const v=r.visit,lock=v.lockIds[0];
   const co=r.checkoutUrl?`<div class="meta" style="margin-top:6px">Self check-out link${/emailed|texted/.test(r.delivery)?' (sent to the visitor)':' — give it to the visitor'}: <span style="word-break:break-all">${esc(r.checkoutUrl)}</span></div>`:'';
@@ -990,8 +992,71 @@ $('#vs-sms-form').addEventListener('submit',async e=>{
 });
 $('#vs-form').addEventListener('submit',async e=>{
   e.preventDefault();
-  const r=await api('/api/visits/settings',{method:'PUT',body:JSON.stringify({maxHours:Number($('#vs-max').value),retentionDays:Number($('#vs-ret').value),notifyHost:$('#vs-notify').checked})});
+  const r=await api('/api/visits/settings',{method:'PUT',body:JSON.stringify({maxHours:Number($('#vs-max').value),retentionDays:Number($('#vs-ret').value),notifyHost:$('#vs-notify').checked,notice:$('#vs-notice').value})});
   $('#vs-msg').textContent=r.ok?`Saved: visits up to ${r.maxHours} h, details kept ${r.retentionDays} days after the visit.`:errText(r);
+});
+// --- Front-desk kiosk (R16) ---
+async function loadWalkins(){
+  const r=await api('/api/walkins');
+  const list=r.ok?r.walkins:[];
+  $('#walk-card').hidden=!list.length;
+  if(!list.length)return;
+  $('#walk-list').innerHTML=`<table><tr><th>Visitor</th><th>Asked for</th><th>Signed in</th><th></th></tr>${list.map(w=>`<tr>
+    <td><b>${esc(w.name)}</b><div class="meta">${esc([w.company,w.email].filter(Boolean).join(' · '))}</div></td>
+    <td>${w.hostName?esc(w.hostName)+(w.hostNotified==='delivered'?' <span class="tag g">told by email</span>':''):'<span class="meta">not matched: ask the visitor</span>'}</td>
+    <td>${esc(new Date(w.createdAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))}<div class="meta">${esc(w.siteName||'')}${w.noticeAccepted?' · notice accepted':''}</div></td>
+    <td style="white-space:nowrap"><button class="btn sm" data-wact="issue" data-wid="${esc(w.id)}">Issue code</button> <button class="btn2 sm" data-wact="dismiss" data-wid="${esc(w.id)}">Dismiss</button></td></tr>`).join('')}</table>`;
+  VIS.walkins=list;
+}
+$('#walk-list').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-wact]');if(!b)return;
+  const w=(VIS.walkins||[]).find(x=>x.id===b.dataset.wid);if(!w)return;
+  if(b.dataset.wact==='dismiss'){
+    if(!confirm(`Dismiss ${w.name}? They get no code.`))return;
+    b.disabled=true;
+    const r=await post(`/api/walkins/${encodeURIComponent(w.id)}/dismiss`,{});
+    if(!r.ok)alert(errText(r));
+    loadWalkins();loadAudit();return;
+  }
+  // Fill the register form; the server links the visit to the walk-in.
+  VIS.walkinId=w.id;
+  $('#vi-invite').checked=false;renderInviteMode();
+  $('#vi-name').value=w.name||'';$('#vi-company').value=w.company||'';$('#vi-email').value=w.email||'';
+  if(w.hostUserId&&[...$('#vi-host').options].some(o=>o.value===w.hostUserId))$('#vi-host').value=w.hostUserId;
+  $('#vi-res').innerHTML=`<div class="res y">Issuing a code for walk-in <b>${esc(w.name)}</b>${w.siteName?' at '+esc(w.siteName):''}: choose the doors and the end time, then <b>Register &amp; create code</b>. <button class="btn2 sm" type="button" id="walk-cancel">Not now</button></div>`;
+  $('#walk-cancel').addEventListener('click',()=>{VIS.walkinId=null;$('#vi-res').innerHTML='';});
+  $('#vi-form').scrollIntoView({behavior:'smooth',block:'start'});
+});
+async function loadKiosks(){
+  const r=await api('/api/kiosks');
+  $('#kiosk-card').hidden=!r.ok;
+  if(!r.ok)return;
+  if(!$('#kiosk-site').options.length)$('#kiosk-site').innerHTML=r.sites.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  const act=r.kiosks.filter(k=>!k.revokedAt);
+  $('#kiosk-list').innerHTML=act.length?`<table><tr><th>Kiosk</th><th>Site</th><th>Last seen</th><th></th></tr>${act.map(k=>`<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.siteName||k.siteId)}</td>
+    <td>${k.lastSeenAt?esc(new Date(k.lastSeenAt).toLocaleString()):'<span class="meta">not opened yet</span>'}</td>
+    <td><button class="btn2 sm" data-kact="revoke" data-kid="${esc(k.id)}">Switch off</button></td></tr>`).join('')}</table>`:'<div class="meta">No kiosks yet.</div>';
+}
+$('#kiosk-list').addEventListener('click',async e=>{
+  const b=e.target.closest('button[data-kact]');if(!b)return;
+  if(!confirm('Switch off this kiosk? The tablet stops working at once, and codes shown on it for phones stop working too.'))return;
+  b.disabled=true;
+  const r=await post(`/api/kiosks/${encodeURIComponent(b.dataset.kid)}/revoke`,{});
+  if(!r.ok)alert(errText(r));
+  loadKiosks();loadAudit();
+});
+$('#kiosk-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const r=await post('/api/kiosks',{siteId:$('#kiosk-site').value,name:$('#kiosk-name').value});
+  if(!r.ok){$('#kiosk-res').innerHTML=`<div class="res n">${esc(errText(r))}</div>`;return;}
+  const url=r.pairUrl.startsWith('/')?location.origin+r.pairUrl:r.pairUrl;
+  let qr='';try{qr=window.AccessQR.svg(url,{size:200});}catch{qr='';}
+  $('#kiosk-res').innerHTML=`<div class="res y"><b>${esc(r.kiosk.name)}</b> is ready. On the reception tablet, scan this code with the camera or open the link. <b>Shown once</b>: anyone with the link can use this kiosk until you switch it off.
+    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:8px"><div>${qr}</div><div class="meta" style="word-break:break-all;max-width:420px">${esc(url)}</div></div>
+    <button class="btn2 sm" type="button" id="kiosk-hide" style="margin-top:8px">Done: hide the link</button></div>`;
+  $('#kiosk-hide').addEventListener('click',()=>{$('#kiosk-res').innerHTML='';});
+  $('#kiosk-name').value='';
+  loadKiosks();loadAudit();
 });
 init();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});

@@ -11,7 +11,7 @@ import { seedTenant } from './store/bootstrap.js';
 import { createAuthenticator, DEFAULT_TENANT } from './auth-core.js';
 import { createApi } from './api-core.js';
 import { checkConfig, resolveOpenReads } from './doctor-core.js';
-import { signupConfigFromEnv } from './signup-core.js';
+import { signupConfigFromEnv, withTurnstile } from './signup-core.js';
 import { createDemoVendor, staticMirror } from './vendor-demo.js';
 import { createVendorAccounts } from './vendor-accounts.js';
 import { createAuditOps } from './audit-ops.js';
@@ -50,7 +50,7 @@ let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -276,11 +276,20 @@ export default {
     if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
     if (request.method === 'POST' && url.pathname === '/api/signup') return handlePublicJson(request, env, 'signupPublic', 'Signup', 'signup');
     if (request.method === 'POST' && url.pathname === '/api/signup/verify') return handlePublicJson(request, env, 'signupVerifyPublic', 'Signup', 'signup');
+    if (request.method === 'POST' && url.pathname === '/api/kiosk') return handlePublicJson(request, env, 'kioskPublic', 'Kiosk', 'kiosk');
     if (url.pathname === '/.well-known/security.txt') {
       const body = securityTxt(env);
       return new Response(body || 'not found', { status: body ? 200 : 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': body ? 'public, max-age=86400' : 'no-store' } });
     }
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
+    // The signup page may show the Cloudflare Turnstile widget (R16): only that
+    // page's policy allows its script and frame, and only when it is configured.
+    if (url.pathname === '/signup' && env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+      const res = await env.ASSETS.fetch(request);
+      const out = new Response(res.body, res);
+      out.headers.set('content-security-policy', withTurnstile(out.headers.get('content-security-policy')));
+      return out;
+    }
     return env.ASSETS.fetch(request);
   },
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */

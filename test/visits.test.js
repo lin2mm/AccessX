@@ -272,8 +272,9 @@ test('personal data: erased on request, and automatically after the retention pe
 });
 
 test('core: settings bounds and state', () => {
-  assert.deepEqual(visitors.settingsOf({}), { maxHours: 24, retentionDays: 30, notifyHost: true });
-  assert.deepEqual(visitors.settingsOf({ visitors: { maxHours: 999, retentionDays: 3, notifyHost: false } }), { maxHours: 24, retentionDays: 3, notifyHost: false });
+  assert.deepEqual(visitors.settingsOf({}), { maxHours: 24, retentionDays: 30, notifyHost: true, notice: '' });
+  assert.deepEqual(visitors.settingsOf({ visitors: { maxHours: 999, retentionDays: 3, notifyHost: false } }), { maxHours: 24, retentionDays: 3, notifyHost: false, notice: '' });
+  assert.equal(visitors.settingsOf({ visitors: { notice: 42 } }).notice, '', 'R16: a non-text notice is ignored');
   const v = { status: 'scheduled', startAt: '2026-10-05T08:00:00Z', endAt: '2026-10-05T17:00:00Z' };
   assert.equal(visitors.stateOf(v, Date.parse('2026-10-05T07:00:00Z')), 'scheduled');
   assert.equal(visitors.stateOf(v, Date.parse('2026-10-05T09:00:00Z')), 'active');

@@ -131,7 +131,14 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
       else if (!/^https:\/\//.test(val('SIGNUP_TERMS_URL'))) add(bad, 'SIGNUP_TERMS_URL', 'SIGNUP_TERMS_URL must be an https URL');
       if (val('BILLING_ENABLED') !== '1') add('warn', 'SIGNUP_ENABLED', 'signup is open and billing is off: every new account is free with no end date');
       add('ok', 'SIGNUP_ENABLED', `self-service signup is on (at most ${val('SIGNUP_DAILY_LIMIT') || 50} per day)`);
+      if (!has('TURNSTILE_SITE_KEY') && !has('TURNSTILE_SECRET_KEY')) add('warn', 'TURNSTILE_SITE_KEY', 'signup has no human check: scripted signups are only slowed by the rate limits', 'TURNSTILE_SITE_KEY + TURNSTILE_SECRET_KEY (Cloudflare dashboard → Turnstile, free)');
     }
+  }
+  // Cloudflare Turnstile on the signup page (R16): both keys or neither.
+  if (has('TURNSTILE_SITE_KEY') !== has('TURNSTILE_SECRET_KEY')) add('error', 'TURNSTILE_SECRET_KEY', 'Turnstile needs both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY: with one of them the human check stays off');
+  else if (has('TURNSTILE_SITE_KEY')) {
+    if (/^[123]x0{10,}/.test(val('TURNSTILE_SITE_KEY') || '') || /^[123]x0{20,}/.test(val('TURNSTILE_SECRET_KEY') || '')) add(bad, 'TURNSTILE_SITE_KEY', 'Turnstile uses Cloudflare\'s test keys: they let every request through (or none)');
+    else add('ok', 'TURNSTILE_SITE_KEY', 'signup asks for a Turnstile human check');
   }
 
   // --- billing

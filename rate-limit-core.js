@@ -21,6 +21,9 @@ const LIMITS = {
   // Self-service signup and its emailed link (R15). The daily caps per
   // address and in total are in signup-core (counted in the database).
   signup: { limit: 10, periodSec: 60, binding: 'RL_PUBLIC' },
+  // Reception tablet and the phones scanning its code (R16): one office IP, a morning rush.
+  // Per-kiosk walk-in caps are counted in the database.
+  kiosk: { limit: 120, periodSec: 60, binding: 'RL_NOTIFY' },
 };
 
 /** Rate-limit key for an address: IPv4 as is; IPv6 by its /64 (one host gets a whole /64). */

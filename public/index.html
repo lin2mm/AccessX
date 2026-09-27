@@ -263,6 +263,11 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
 
   <!-- VISITORS -->
   <section id="v-visitors" class="view">
+    <div class="card" id="walk-card" hidden>
+      <h2>Walk-ins waiting</h2>
+      <div class="hint">Signed in at a kiosk without an invitation. The kiosk never gives a door code: <b>Issue code</b> fills in the form below; <b>Dismiss</b> if they have left or were turned away.</div>
+      <div id="walk-list" style="overflow-x:auto"></div>
+    </div>
     <div class="card">
       <h2>Register a visitor</h2>
       <div class="hint">The visitor gets a code for each door, valid only for the visit — the lock itself ends it, even offline. Codes run on whole hours (a TTLock rule). Sensitive doors are not offered: those need a rule and a second operator's approval.</div>
@@ -299,7 +304,19 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="hint">Checking out ends the codes now (doors with a gateway). A door without a gateway keeps accepting the code until the end time unless it is removed at the lock. Visitor details are erased automatically after the retention period.</div>
       <label for="vis-range">Show</label>
       <select id="vis-range" style="max-width:260px"><option value="current">Today &amp; upcoming</option><option value="recent">Last 30 days</option><option value="all">All</option></select>
+      <a class="btn2 sm" href="/visitors-print" target="_blank" rel="noopener" style="margin-left:8px">Print who is on site</a>
       <div id="vis-list" style="margin-top:10px;overflow-x:auto"></div>
+    </div>
+    <div class="card" id="kiosk-card" hidden>
+      <h2>Kiosks</h2>
+      <div class="hint">A tablet at reception where visitors sign in (with their invitation), register as a walk-in, or sign out; visitors can also scan its code with their own phone. A kiosk can never show a door code or the visitor list. Lock the tablet to the page (iPad: Guided Access; Android: screen pinning).</div>
+      <div id="kiosk-list" style="overflow-x:auto"></div>
+      <form id="kiosk-form" class="grid c3" style="align-items:end;margin-top:10px">
+        <div><label for="kiosk-site">Site</label><select id="kiosk-site" required></select></div>
+        <div><label for="kiosk-name">Name (optional)</label><input id="kiosk-name" maxlength="60" placeholder="Main reception"></div>
+        <div><button class="btn2 sm" type="submit">Add kiosk</button></div>
+      </form>
+      <div id="kiosk-res"></div>
     </div>
     <div class="card" id="vis-settings" hidden>
       <h2>Visitor settings</h2>
@@ -307,6 +324,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
         <div><label for="vs-max">Longest visit (hours)</label><input id="vs-max" type="number" min="1" max="168" required></div>
         <div><label for="vs-ret">Keep visitor details (days after the visit)</label><input id="vs-ret" type="number" min="1" max="365" required></div>
         <div class="checks"><label><input type="checkbox" id="vs-notify"> Email the host when their visitor arrives</label></div>
+        <div style="grid-column:1/-1"><label for="vs-notice">Visitor notice (shown at the kiosk; visitors must accept it). House rules, safety, how you use their details. Leave empty for none.</label><textarea id="vs-notice" rows="4" maxlength="2000" style="width:100%"></textarea></div>
         <div><button class="btn2 sm" type="submit">Save</button></div>
       </form>
       <div id="vs-arrivals" class="meta" style="margin-top:6px"></div>
@@ -501,6 +519,7 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
   <button data-v="log"><span class="ic">≡</span>Activity</button>
 </nav>
 
+<script src="qr.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

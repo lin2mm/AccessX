@@ -20,11 +20,12 @@ const onboarding = require('./onboarding-core');
 const billingCore = require('./billing-core');
 const doctorCore = require('./doctor-core');
 const signupCore = require('./signup-core');
+const kioskCore = require('./kiosk-core');
 const { ipKey } = require('./rate-limit-core');
 // The newest migration this code needs. GET /api/healthz answers 503 until the
 // database has it ("always migrate before deploying"). A test keeps it equal
 // to the last file in migrations/.
-const SCHEMA_VERSION = '0022_signups';
+const SCHEMA_VERSION = '0023_kiosk';
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -792,7 +793,7 @@ function createApi({
     const next = { ...visitors.settingsOf((await store.tenantSettings(ctx.tenantId)) || {}), ...v.value };
     // json_set: only this key, a concurrent SSO/alerts change is never overwritten.
     await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.visitors', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
-      .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays} notifyHost=${next.notifyHost}`, ctx.actor).commit();
+      .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays} notifyHost=${next.notifyHost} notice=${next.notice ? kioskCore.noticeHash(next.notice).slice(0, 12) : 'none'}`, ctx.actor).commit();
     return { ...next, ...(await deliveryInfo(ctx.tenantId)) };
   });
 
@@ -812,6 +813,13 @@ function createApi({
       throw new HttpError(status, error, rest);
     }
     const v = plan.visit;
+    // R16: reception letting in a walk-in from the kiosk (checked before any code exists).
+    let walkin = null;
+    if (body.walkinId !== undefined && body.walkinId !== null) {
+      walkin = await loadWalkin(ctx, String(body.walkinId));
+      if (walkin.status !== 'waiting') throw new HttpError(409, `walk-in is already ${walkin.status}`);
+      if (walkin.site_id !== v.siteId) throw new HttpError(400, 'the doors must be at the site where the visitor signed in');
+    }
     const id = policy.uid('vis');
     const locks = await ctx.vendor.listLocks();
     const created = [];
@@ -856,6 +864,11 @@ function createApi({
       uow.insert('credentials', entry).audit('passcode.create', `${entry.id} lock ${lockId} user ${v.hostUserId} visit ${id} ${v.startAt}..${v.endAt} enforcement=lock`, ctx.actor);
       return entry;
     });
+    if (walkin) {
+      uow.raw('UPDATE visits SET checked_in_at = ?, notice_sha256 = ? WHERE tenant_id = ? AND id = ?', [walkin.created_at, walkin.notice_sha256, ctx.tenantId, id])
+        .raw("UPDATE walkins SET status = 'issued', visit_id = ?, decided_at = ?, decided_by = ? WHERE tenant_id = ? AND id = ? AND status = 'waiting'", [id, now, ctx.actor, ctx.tenantId, walkin.id])
+        .audit('walkin.issue', `${walkin.id} visit ${id}`, ctx.actor);
+    }
     // No personal data in the audit chain: it cannot be erased later.
     uow.audit('visit.create', `${id} host ${v.hostUserId} locks ${v.lockIds.join(',')} ${v.startAt}..${v.endAt} credentials ${entries.map(e => e.id).join(',')}` +
       (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), ctx.actor);
@@ -903,7 +916,8 @@ function createApi({
       for (const [action, detail] of events) u.audit(action, detail, ctx.actor);
       await u.commit();
     }
-    const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null };
+    const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null, arrivedAt: null, arrivedLock: null,
+      checkedInAt: walkin ? walkin.created_at : null, noticeAccepted: Boolean(walkin && walkin.notice_sha256), walkinId: walkin ? walkin.id : undefined };
     // The codes are returned exactly once and never stored.
     return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings, checkoutUrl };
   };
@@ -1210,9 +1224,222 @@ function createApi({
     await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, visitor_phone = NULL, company = NULL, checkout_token_hash = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
       .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
     if (alerts) await alerts.forget(ctx.tenantId, id);
-    await store.sql.batch([{ sql: 'UPDATE visit_invites SET contact = NULL, submitted_name = NULL, submitted_company = NULL, erased_at = ? WHERE tenant_id = ? AND visit_id = ?', params: [at, ctx.tenantId, id] }]);
+    await store.sql.batch([{ sql: 'UPDATE visit_invites SET contact = NULL, submitted_name = NULL, submitted_company = NULL, erased_at = ? WHERE tenant_id = ? AND visit_id = ?', params: [at, ctx.tenantId, id] },
+      { sql: 'UPDATE walkins SET visitor_name = NULL, company = NULL, visitor_email = NULL, erased_at = ? WHERE tenant_id = ? AND visit_id = ?', params: [at, ctx.tenantId, id] }]);
     return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, visitorPhone: null, company: null, erased: true, erasedAt: at }) };
   });
+
+  // --- front-desk kiosk (R16, docs/22-KIOSK.md) ----------------------------------
+  // A kiosk is a paired tablet at one site. Its key only reaches kioskPublic();
+  // it is never an operator. It can record check-ins, walk-ins and sign-outs;
+  // it can never issue a door code or read the visitor list.
+  const kioskView = (snap, r) => {
+    const site = snap.sites.find(x => x.id === r.site_id);
+    return { id: r.id, name: r.name, siteId: r.site_id, siteName: site ? site.name : null, createdBy: r.created_by, createdAt: r.created_at, lastSeenAt: r.last_seen_at || null, revokedAt: r.revoked_at || null };
+  };
+  const walkinView = (snap, r) => {
+    const host = r.host_user_id ? snap.users.find(u => u.id === r.host_user_id) : null;
+    const site = snap.sites.find(x => x.id === r.site_id);
+    return { id: r.id, kioskId: r.kiosk_id, siteId: r.site_id, siteName: site ? site.name : null, name: r.visitor_name, company: r.company, email: r.visitor_email,
+      hostUserId: r.host_user_id || null, hostName: host ? host.name : null, noticeAccepted: Boolean(r.notice_sha256), status: r.status, visitId: r.visit_id || null,
+      hostNotified: r.host_notified || null, createdAt: r.created_at, decidedAt: r.decided_at || null, decidedBy: r.decided_by || null, erased: Boolean(r.erased_at) };
+  };
+  const kioskPairUrl = token => (publicUrl ? `${publicUrl.replace(/\/+$/, '')}/kiosk#k=${token}` : `/kiosk#k=${token}`);
+
+  route('GET', /^\/api\/kiosks$/, async ctx => {
+    const snap = await ctx.snap();
+    const rows = await store.sql.all('SELECT * FROM kiosks WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 100', [ctx.tenantId]);
+    return { kiosks: rows.filter(r => ctx.scope.site(r.site_id)).map(r => kioskView(snap, r)), notice: visitors.settingsOf(snap.settings).notice,
+      sites: snap.sites.filter(x => ctx.scope.site(x.id)).map(x => ({ id: x.id, name: x.name })) };
+  });
+  route('POST', /^\/api\/kiosks$/, async ctx => {
+    const snap = await ctx.snap();
+    const b = ctx.body || {};
+    const site = snap.sites.find(x => x.id === b.siteId);
+    if (!site || !ctx.scope.site(site.id)) throw new HttpError(400, 'siteId must be one of your sites');
+    const name = kioskCore.clean(b.name, kioskCore.LIMITS.kioskName) || `${site.name} reception`;
+    const active = await store.sql.first('SELECT COUNT(*) AS n FROM kiosks WHERE tenant_id = ? AND revoked_at IS NULL', [ctx.tenantId]);
+    if (Number(active.n) >= 20) throw new HttpError(409, 'at most 20 active kiosks: revoke one first');
+    const id = policy.uid('ksk');
+    const token = `kx_${randomToken(32)}`;
+    const now = new Date().toISOString();
+    await ctx.t.unit().raw('INSERT INTO kiosks (tenant_id, id, site_id, name, token_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, site.id, name, kioskCore.tokenHash(token), ctx.actor, now])
+      .audit('kiosk.create', `${id} site ${site.id}`, ctx.actor).commit();
+    const row = await store.sql.first('SELECT * FROM kiosks WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    // The key is returned exactly once (inside the pairing link).
+    return { kiosk: kioskView(snap, row), pairUrl: kioskPairUrl(token) };
+  });
+  route('POST', /^\/api\/kiosks\/([^/]+)\/revoke$/, async (ctx, [id]) => {
+    const row = await store.sql.first('SELECT * FROM kiosks WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    if (!row || !ctx.scope.site(row.site_id)) throw new HttpError(404, 'not found');
+    if (!row.revoked_at) {
+      await ctx.t.unit().raw('UPDATE kiosks SET revoked_at = ?, revoked_by = ? WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL', [new Date().toISOString(), ctx.actor, ctx.tenantId, id])
+        .audit('kiosk.revoke', id, ctx.actor).commit();
+    }
+    const snap = await ctx.snap();
+    return { kiosk: kioskView(snap, await store.sql.first('SELECT * FROM kiosks WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id])) };
+  });
+
+  route('GET', /^\/api\/walkins$/, async ctx => {
+    const snap = await ctx.snap();
+    const all = ctx.query.get('status') === 'all';
+    const since = new Date(Date.now() - (all ? 30 : 1) * 864e5).toISOString();
+    const rows = await store.sql.all(`SELECT * FROM walkins WHERE tenant_id = ? AND created_at >= ?${all ? '' : " AND status = 'waiting'"} ORDER BY created_at DESC LIMIT 200`, [ctx.tenantId, since]);
+    return { walkins: rows.filter(r => ctx.scope.site(r.site_id)).map(r => walkinView(snap, r)) };
+  });
+  async function loadWalkin(ctx, id) {
+    const row = await store.sql.first('SELECT * FROM walkins WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    if (!row || !ctx.scope.site(row.site_id)) throw new HttpError(404, 'not found');
+    return row;
+  }
+  route('POST', /^\/api\/walkins\/([^/]+)\/(dismiss|erase)$/, async (ctx, [id, verb]) => {
+    const row = await loadWalkin(ctx, id);
+    const at = new Date().toISOString();
+    if (verb === 'dismiss') {
+      if (row.status !== 'waiting') throw new HttpError(409, `walk-in is already ${row.status}`);
+      await ctx.t.unit().raw("UPDATE walkins SET status = 'dismissed', decided_at = ?, decided_by = ? WHERE tenant_id = ? AND id = ? AND status = 'waiting'", [at, ctx.actor, ctx.tenantId, id])
+        .audit('walkin.dismiss', id, ctx.actor).commit();
+    } else if (!row.erased_at) {
+      await ctx.t.unit().raw('UPDATE walkins SET visitor_name = NULL, company = NULL, visitor_email = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+        .audit('walkin.erased', `${id} (on request)`, ctx.actor).commit();
+      if (alerts) await alerts.forget(ctx.tenantId, id);
+    }
+    return { walkin: walkinView(await ctx.snap(), await store.sql.first('SELECT * FROM walkins WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id])) };
+  });
+
+  /** Resolve a kiosk key or a phone pass to its (unrevoked) kiosk row. */
+  async function kioskFor(body) {
+    const key = body && body.kiosk;
+    if (typeof key === 'string' && kioskCore.KIOSK_TOKEN_RE.test(key)) {
+      const row = await store.sql.first('SELECT * FROM kiosks WHERE token_sha256 = ? AND revoked_at IS NULL', [kioskCore.tokenHash(key)]);
+      return row ? { row, via: 'kiosk' } : null;
+    }
+    const pass = kioskCore.parsePhonePass(body && body.pass);
+    if (!pass) return null;
+    const row = await store.sql.first('SELECT * FROM kiosks WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL', [pass.tenantId, pass.kioskId]);
+    if (!row || !(await kioskCore.verifyPhonePass(pass, row.token_sha256))) return null;
+    return { row, via: 'phone', expiresAt: new Date(pass.exp * 1000).toISOString() };
+  }
+  const kioskActor = k => `kiosk:${k.row.id}${k.via === 'phone' ? ':phone' : ''}`;
+  const KIOSK_NOT_FOUND = "We could not find an invitation for that address today. Please tap \"I don't have an invitation\", or ask reception.";
+
+  /** Expected visitor at this kiosk's site, by the email they were invited with. */
+  async function kioskVisitByEmail(row, email, { forCheckout = false } = {}) {
+    const now = Date.now();
+    const rows = await store.sql.all("SELECT * FROM visits WHERE tenant_id = ? AND site_id = ? AND status = 'scheduled' AND erased_at IS NULL AND visitor_email = ? AND end_at >= ? ORDER BY start_at LIMIT 5",
+      [row.tenant_id, row.site_id, email, new Date(now - (forCheckout ? 3600e3 : 0)).toISOString()]);
+    return rows.find(r => Date.parse(r.start_at) - kioskCore.EARLY_MS <= now) || null;
+  }
+
+  /** Inside the tenant's queue: everything that writes. Re-resolves the kiosk. */
+  async function kioskJob(tenantId, job) {
+    const k = await kioskFor(job.auth);
+    if (!k || k.row.tenant_id !== tenantId) return { ok: false, status: 401 };
+    const t = store.tenant(tenantId);
+    const snap = await t.snapshot();
+    const settings = visitors.settingsOf(snap.settings);
+    const notice = settings.notice;
+    const site = snap.sites.find(x => x.id === k.row.site_id);
+    const tz = policy.siteTimeZone(snap, k.row.site_id);
+    const at = new Date().toISOString();
+    const actor = kioskActor(k);
+    const canEmail = Boolean(alerts && alerts.emailAvailable);
+    if (job.action === 'checkin') {
+      const email = kioskCore.validateEmail(job.email);
+      if (!email) return { ok: false, status: 400, error: 'That email address does not look right.' };
+      if (notice && job.acceptNotice !== true) return { ok: false, status: 400, error: 'Please read and accept the visitor notice.' };
+      const r = await kioskVisitByEmail(k.row, email);
+      if (!r) return { ok: false, status: 404, error: KIOSK_NOT_FOUND };
+      const v = visitors.rowToVisit(r);
+      const host = snap.users.find(u => u.id === v.hostUserId);
+      let hostNotified = false;
+      if (!r.checked_in_at) {
+        await t.unit().raw('UPDATE visits SET checked_in_at = ?, notice_sha256 = ? WHERE tenant_id = ? AND id = ? AND checked_in_at IS NULL', [at, kioskCore.noticeHash(notice), tenantId, r.id])
+          .audit('visit.checked_in', `${r.id} kiosk ${k.row.id}${k.via === 'phone' ? ' (phone)' : ''}${notice ? ` notice ${kioskCore.noticeHash(notice).slice(0, 12)}` : ''}`, actor).commit();
+        // The host already heard if the visitor opened a door first.
+        if (!r.arrived_at && settings.notifyHost && host && host.email && canEmail) {
+          hostNotified = (await alerts.emailTo(host.email, kioskCore.checkinEmail({ visit: v, hostName: host.name, siteName: site && site.name, at, timeZone: tz, tenantName: snap.tenant && snap.tenant.name }), `checkin-${r.id}`)) === 'delivered';
+        }
+        if (alerts) {
+          await alerts.send(tenantId, 'visitor_arrived', {
+            title: 'Visitor signed in', text: `${v.visitorName || 'A visitor'}${v.company ? ` (${v.company})` : ''} for ${host ? host.name : v.hostUserId} signed in at ${k.row.name}.`,
+            facts: [['Kiosk', k.row.name], ['Time', policy.localParts(new Date(at), tz).label], ['Visit', r.id]], path: '/#visitors', ref: r.id,
+          }).catch(error => log('kiosk check-in alert', tenantId, error));
+        }
+      }
+      // Only the host's first name: whoever types an address learns nothing else.
+      return { ok: true, checkedIn: true, already: Boolean(r.checked_in_at), host: hostNotified ? kioskCore.firstName(host.name) : null };
+    }
+    if (job.action === 'walkin') {
+      const w = kioskCore.validateWalkin(job, { notice });
+      if (!w.ok) return { ok: false, status: 400, error: w.error };
+      const recent = await store.sql.first('SELECT COUNT(*) AS n FROM walkins WHERE tenant_id = ? AND kiosk_id = ? AND created_at >= ?', [tenantId, k.row.id, new Date(Date.now() - 3600e3).toISOString()]);
+      if (Number(recent.n) >= 30) return { ok: false, status: 429, error: 'Too many sign-ins from this kiosk. Please ask reception.' };
+      const host = w.value.host ? kioskCore.matchHost(snap.users, w.value.host) : null;
+      const id = policy.uid('wlk');
+      let hostNotified = null;
+      await t.unit().raw('INSERT INTO walkins (tenant_id, id, kiosk_id, site_id, visitor_name, company, visitor_email, host_user_id, notice_sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [tenantId, id, k.row.id, k.row.site_id, w.value.name, w.value.company, w.value.email, host ? host.id : null, kioskCore.noticeHash(notice), 'waiting', at])
+        .audit('walkin.create', `${id} kiosk ${k.row.id}${k.via === 'phone' ? ' (phone)' : ''} host ${host ? host.id : 'unknown'}`, actor).commit();
+      if (host && host.email && canEmail) {
+        hostNotified = await alerts.emailTo(host.email, kioskCore.walkinEmail({ walkin: w.value, hostName: host.name, siteName: site && site.name, at, timeZone: tz, tenantName: snap.tenant && snap.tenant.name }), `walkin-${id}`);
+        await store.sql.batch([{ sql: 'UPDATE walkins SET host_notified = ? WHERE tenant_id = ? AND id = ?', params: [String(hostNotified).slice(0, 120), tenantId, id] }]);
+      }
+      if (alerts) {
+        await alerts.send(tenantId, 'visitor_arrived', {
+          title: 'Walk-in visitor at reception', text: `${w.value.name}${w.value.company ? ` (${w.value.company})` : ''} is at ${k.row.name} without an invitation${host ? ` and asked for ${host.name}` : ''}.`,
+          facts: [['Kiosk', k.row.name], ['Time', policy.localParts(new Date(at), tz).label]], path: '/#visitors', ref: id,
+        }).catch(error => log('kiosk walk-in alert', tenantId, error));
+      }
+      return { ok: true, walkin: true, host: hostNotified === 'delivered' ? kioskCore.firstName(host.name) : null };
+    }
+    if (job.action === 'checkout') {
+      const email = kioskCore.validateEmail(job.email);
+      if (!email) return { ok: false, status: 400, error: 'That email address does not look right.' };
+      const r = await kioskVisitByEmail(k.row, email, { forCheckout: true });
+      if (!r) return { ok: false, status: 404, error: 'We could not find a visit for that address. Please see reception.' };
+      const out = await endVisit({ t, vendor: await resolveVendor(tenantId), tenantId, actor }, visitors.rowToVisit(r), 'checkout');
+      return { ok: true, checkedOut: true, pendingAtDoor: out.stillValid.map(s => s.door) };
+    }
+    return { ok: false, status: 400, error: 'unknown action' };
+  }
+
+  /**
+   * POST /api/kiosk {kiosk | pass, action, …} — no operator login.
+   * info (site, notice) · pass (mint a phone pass; kiosk key only) ·
+   * checkin {email, acceptNotice} · walkin {name, company, email?, host?, acceptNotice} · checkout {email}
+   */
+  async function kioskPublic(body, { dispatch = null } = {}) {
+    await whenReady();
+    body = body || {};
+    const k = await kioskFor(body);
+    if (!k) return { status: 401, body: { ok: false, error: 'This kiosk is not paired (or was switched off). Ask an administrator to pair it again.' } };
+    const tenantId = k.row.tenant_id;
+    const action = String(body.action || 'info');
+    if (action === 'info' || action === 'pass') {
+      if (k.via === 'kiosk') {
+        // At most one write a minute per kiosk ("last seen" for the admin list).
+        if (!k.row.last_seen_at || Date.now() - Date.parse(k.row.last_seen_at) > 60e3) {
+          await store.sql.batch([{ sql: 'UPDATE kiosks SET last_seen_at = ? WHERE tenant_id = ? AND id = ?', params: [new Date().toISOString(), tenantId, k.row.id] }]);
+        }
+      }
+      const snap = await store.tenant(tenantId).snapshot();
+      const site = snap.sites.find(x => x.id === k.row.site_id);
+      const out = { ok: true, mode: k.via, kiosk: k.row.name, site: site ? site.name : null, organisation: (snap.tenant && snap.tenant.name) || null,
+        notice: visitors.settingsOf(snap.settings).notice || '', expiresAt: k.expiresAt || null };
+      if (action === 'pass') {
+        if (k.via !== 'kiosk') return { status: 403, body: { ok: false, error: 'only the kiosk itself can show a check-in code' } };
+        Object.assign(out, await kioskCore.mintPhonePass({ tenantId, kioskId: k.row.id, secret: k.row.token_sha256 }));
+      }
+      return { status: 200, body: out };
+    }
+    if (!['checkin', 'walkin', 'checkout'].includes(action)) return { status: 400, body: { ok: false, error: 'unknown action' } };
+    const job = { type: 'kiosk', action, auth: { kiosk: body.kiosk, pass: body.pass }, email: body.email, name: body.name, company: body.company, host: body.host, acceptNotice: body.acceptNotice === true };
+    const r = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+    if (!r || !r.ok) return { status: (r && r.status) || 502, body: { ok: false, error: (r && r.error) || 'Please try again, or ask reception.' } };
+    return { status: 200, body: r };
+  }
 
   // --- visitor arrival --------------------------------------------------
   // TTLock reports unlocks (callback or record list) with the code that was
@@ -1327,6 +1554,7 @@ function createApi({
     if (job && job.type === 'checkout') return visitorCheckout(tenantId, job);
     if (job && job.type === 'invite_submit') return inviteSubmit(tenantId, job);
     if (job && job.type === 'billing') return applyBillingEvent(tenantId, job);
+    if (job && job.type === 'kiosk') return kioskJob(tenantId, job);
     return recordArrival(tenantId, job);
   }
 
@@ -2125,7 +2353,7 @@ function createApi({
   const signupOn = () => Boolean(signupCfg.enabled && alerts && alerts.emailAvailable && publicUrl);
   const signupOff = { status: 404, body: { ok: false, error: 'Self-service signup is not available here. Contact us for an account.' } };
   function signupInfo() {
-    return { status: 200, body: { ok: true, enabled: signupOn(), termsUrl: signupCfg.termsUrl || null, billing: billingOn(), linkHours: signupCore.DEFAULTS.linkHours } };
+    return { status: 200, body: { ok: true, enabled: signupOn(), termsUrl: signupCfg.termsUrl || null, billing: billingOn(), linkHours: signupCore.DEFAULTS.linkHours, turnstileSiteKey: signupCfg.turnstileSiteKey || null } };
   }
   async function signupPublic(body = {}, { ip = 'unknown' } = {}) {
     await whenReady();
@@ -2138,6 +2366,14 @@ function createApi({
     try { s = signupCore.validateSignup(body || {}); } catch (error) {
       if (error instanceof signupCore.SignupError) return { status: error.status, body: { ok: false, error: error.message } };
       throw error;
+    }
+    if (signupCfg.turnstileSecret) {
+      const human = await signupCore.verifyTurnstile({ secret: signupCfg.turnstileSecret, token: body.turnstileToken, ip, url: signupCfg.turnstileVerifyUrl });
+      if (human.reason === 'unavailable') {
+        log('signup: turnstile unavailable', human.detail);
+        return { status: 503, body: { ok: false, error: 'The human check is not reachable right now. Please try again in a minute.' }, headers: { 'retry-after': '60' } };
+      }
+      if (!human.ok) return { status: 400, body: { ok: false, error: 'Please complete the human check and try again.', retryHumanCheck: true } };
     }
     const now = Date.now();
     const since = new Date(now - 864e5).toISOString();
@@ -3002,6 +3238,9 @@ function createApi({
       await store.sql.batch([
         { sql: "UPDATE visit_invites SET status = 'expired', token_hash = NULL WHERE tenant_id = ? AND status IN ('open', 'submitted') AND expires_at <= ?", params: [tenantId, new Date().toISOString()] },
         { sql: 'UPDATE visit_invites SET contact = NULL, submitted_name = NULL, submitted_company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND expires_at < ?', params: [new Date().toISOString(), tenantId, cutoff] },
+        // Walk-ins (R16): nobody decided within a day → expired; details go after the same period as visits.
+        { sql: "UPDATE walkins SET status = 'expired' WHERE tenant_id = ? AND status = 'waiting' AND created_at < ?", params: [tenantId, new Date(Date.now() - 864e5).toISOString()] },
+        { sql: 'UPDATE walkins SET visitor_name = NULL, company = NULL, visitor_email = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND created_at < ?', params: [new Date().toISOString(), tenantId, cutoff] },
       ]);
     } catch (error) {
       log(`maintenance ${tenantId} visitor retention failed`, error);
@@ -3059,7 +3298,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, signupPublic, signupVerifyPublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, signupPublic, signupVerifyPublic, kioskPublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError, SCHEMA_VERSION };
