@@ -42,6 +42,17 @@ const wranglerLog = (() => {
 })();
 const logStart = wranglerLog && fs.existsSync(wranglerLog) ? fs.statSync(wranglerLog).size : 0;
 
+// Fake email provider for the whole run (MAIL_PORT, with EMAIL_API_BASE pointing at it in .dev.vars):
+// host notices from the kiosk and signup links land here instead of failing (a failure would be an [ERROR]).
+const mail = [];
+let mailServer = null;
+async function startMail() {
+  if (!process.env.MAIL_PORT) return;
+  const http = require('node:http');
+  mailServer = http.createServer((req, res) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { mail.push(JSON.parse(b || '{}')); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"id":"e"}'); }); });
+  await new Promise(r => mailServer.listen(Number(process.env.MAIL_PORT), '127.0.0.1', r));
+}
+
 check('public auth status', async () => {
   const r = await call('GET', '/api/auth');
   assert.equal(r.status, 200);
@@ -275,17 +286,15 @@ check('self-service signup: emailed link → new tenant + owner (or cleanly off)
     console.log('     (signup round trip skipped: needs SIGNUP_ENABLED=1, EMAIL_API_BASE=http://127.0.0.1:$MAIL_PORT and MAIL_PORT)');
     return;
   }
-  const http = require('node:http');
-  const got = [];
-  const srv = http.createServer((req, res) => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => { got.push(JSON.parse(b || '{}')); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"id":"e"}'); }); });
-  await new Promise(r => srv.listen(Number(process.env.MAIL_PORT), '127.0.0.1', r));
-  try {
+  const got = mail;
+  const before = mail.length;
+  {
     const email = `smoke-${Date.now().toString(36)}@harbour.example`;
     const r = await raw('POST', '/api/signup', { body: { company: 'Smoke Harbour', name: 'Smoke Owner', email, timeZone: 'Australia/Sydney', acceptTerms: true } });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.headers.get('cache-control'), 'no-store');
-    assert.equal(got.length, 1);
-    const token = (got[0].text.match(/#t=([A-Za-z0-9_-]+)/) || [])[1];
+    assert.equal(got.length, before + 1);
+    const token = (got[before].text.match(/#t=([A-Za-z0-9_-]+)/) || [])[1];
     const v = await raw('POST', '/api/signup/verify', { body: { token } });
     assert.equal(v.status, 200, JSON.stringify(v.body));
     const me = await call('GET', '/api/me', v.body.owner.token);
@@ -294,7 +303,39 @@ check('self-service signup: emailed link → new tenant + owner (or cleanly off)
     assert.equal((await raw('POST', '/api/signup/verify', { body: { token } })).status, 410);
     const list = await call('GET', '/api/platform/signups', PLATFORM);
     assert.equal(list.body.signups.recent[0].tenantId, v.body.tenant.id);
-  } finally { srv.close(); }
+  }
+});
+check('front-desk kiosk on D1: pair, phone pass, check-in (host told), walk-in → code, sign-out', async () => {
+  const pairRes = await call('POST', '/api/kiosks', OWNER, { siteId: 'site_river', name: 'Smoke reception' });
+  assert.equal(pairRes.status, 200, JSON.stringify(pairRes.body));
+  const key = pairRes.body.pairUrl.match(/#k=(kx_[A-Za-z0-9_-]+)$/)[1];
+  const k = (body) => raw('POST', '/api/kiosk', { body });
+  assert.equal((await call('GET', '/api/visits', key)).status, 401, 'a kiosk key is not an operator');
+  const info = await k({ kiosk: key, action: 'pass' });
+  assert.equal(info.status, 200, JSON.stringify(info.body));
+  assert.equal(info.body.site, 'Riverside Office');
+  assert.equal((await k({ pass: info.body.pass, action: 'info' })).body.mode, 'phone');
+  // A visit ending 4 hours from now, door time (Europe/London).
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(Date.now() + 4 * 3600e3)).map(x => [x.type, x.value]));
+  const email = `kiosk-${Date.now().toString(36)}@guest.example`;
+  const v = await call('POST', '/api/visits', OWNER, { visitorName: 'Kiosk Smoke', visitorEmail: email, hostUserId: 'u1', lockIds: [9001], endLocal: `${p.year}-${p.month}-${p.day}T${p.hour}:00` });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  const mailBefore = mail.length;
+  const ci = await k({ pass: info.body.pass, action: 'checkin', email, acceptNotice: true });
+  assert.equal(ci.status, 200, JSON.stringify(ci.body));
+  if (mailServer) assert.equal(mail.length, mailBefore + 1, 'host emailed');
+  const w = await k({ kiosk: key, action: 'walkin', name: 'Walk Smoke', host: 'Sarah Kelly' });
+  assert.equal(w.status, 200, JSON.stringify(w.body));
+  const wl = (await call('GET', '/api/walkins', OWNER)).body.walkins.find(x => x.name === 'Walk Smoke');
+  const issued = await call('POST', '/api/visits', OWNER, { visitorName: 'Walk Smoke', hostUserId: 'u1', lockIds: [9001], endLocal: `${p.year}-${p.month}-${p.day}T${p.hour}:00`, walkinId: wl.id });
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  assert.ok(issued.body.visit.checkedInAt);
+  const out = await k({ kiosk: key, action: 'checkout', email });
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.equal((await call('POST', `/api/kiosks/${pairRes.body.kiosk.id}/revoke`, OWNER, {})).status, 200);
+  assert.equal((await k({ kiosk: key, action: 'info' })).status, 401);
+  assert.equal((await k({ pass: info.body.pass, action: 'info' })).status, 401);
 });
 check('demo reset through the tenant Durable Object restores the seed and keeps the audit chain', async () => {
   const before = (await call('GET', '/api/audit/verify', OWNER)).body.verification;
@@ -313,6 +354,7 @@ check('wrong token is rejected', async () => {
 });
 
 (async () => {
+  await startMail();
   let failed = 0;
   for (const [name, fn] of checks) {
     try { await fn(); console.log(`ok   ${name}`); } catch (error) { failed++; console.log(`FAIL ${name}\n     ${error.message}`); }
@@ -330,5 +372,6 @@ check('wrong token is rejected', async () => {
     else console.log(`ok   wrangler log: no new [ERROR] lines (${path.basename(wranglerLog)})`);
   } else console.log('     (wrangler log not found: set WRANGLER_LOG to check it for errors)');
   console.log(`${checks.length - failed}/${checks.length} passed`);
+  if (mailServer) mailServer.close();
   process.exit(failed || logFailed ? 1 : 0);
 })();
