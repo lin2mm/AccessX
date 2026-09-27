@@ -4,7 +4,7 @@ For a small or mid-sized office (5–200 doors) moving from the TTLock app to
 AccessX. At the end: every door is in a group, staff and cleaners have rules,
 server/comms rooms need two people to change, people arrive from your
 directory, and alarms reach your chat. Trying it with real locks first? See
-[PILOT.md](PILOT.md).
+[10-PILOT.md](10-PILOT.md).
 
 ## Before you start
 

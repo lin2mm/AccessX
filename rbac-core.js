@@ -78,6 +78,8 @@ const ROUTES = [
   ['GET', /^\/api\/platform\/secrets$/, PLATFORM],
   ['POST', /^\/api\/platform\/secrets\/reseal$/, PLATFORM],
   ['GET', /^\/api\/platform\/usage$/, PLATFORM],
+  ['GET', /^\/api\/platform\/billing$/, PLATFORM],
+  ['POST', /^\/api\/platform\/billing\/problems\/[^/]+\/resolve$/, PLATFORM],
   ['PUT', /^\/api\/platform\/tenants\/[^/]+\/limits$/, PLATFORM],
   ['POST', /^\/api\/doors\/\d+\/unlock$/, 'door.unlock'],
   ['POST', /^\/api\/users\/[^/]+\/(suspend|unsuspend)$/, 'user.manage'],

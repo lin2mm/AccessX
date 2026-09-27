@@ -11,7 +11,7 @@
     "cf:db:migrate:remote": "npx wrangler d1 migrations apply accessx-demo --remote",
     "operator:new": "node scripts/new-operator.js",
     "test:worker": "node support/worker-smoke.js",
-    "test:isolation": "node --no-warnings --test test/isolation.fuzz.test.js",
+    "test:isolation": "node --no-warnings --test --test-concurrency=1 test/isolation.fuzz.test.js test/scope.fuzz.test.js",
     "audit:keygen": "node scripts/audit-keygen.js",
     "audit:verify": "node scripts/verify-audit-export.js",
     "ttlock:check": "node scripts/ttlock-check.js",

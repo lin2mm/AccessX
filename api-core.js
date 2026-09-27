@@ -1002,7 +1002,7 @@ function createApi({
     } };
   }
 
-  // --- visitor pre-registration invites (docs/PREREGISTRATION.md) --------------------
+  // --- visitor pre-registration invites (docs/20-PREREGISTRATION.md) --------------------
   const inviteHash = token => sha256Hex(`visit-invite|${token}`);
   const inviteGone = { status: 404, body: { ok: false, error: 'This invitation is no longer valid. Please contact your host.' } };
   const inviteState = (inv, now = Date.now()) => (['open', 'submitted'].includes(inv.status) && Date.parse(inv.expiresAt) <= now ? 'expired' : inv.status);
@@ -2138,11 +2138,88 @@ function createApi({
   route('GET', /^\/api\/platform\/secrets$/, async () => rotation().status());
 
   // --- platform: metered usage (billing) and per-tenant limits -------------
-  // --- billing (Stripe; docs/BILLING.md) -------------------------------------
+  // --- billing (Stripe; docs/40-BILLING.md) -------------------------------------
   const billingOn = () => Boolean(billing && billing.config && billing.config.active);
   async function billingAccount(tenantId) {
     const r = await store.sql.first('SELECT * FROM billing_accounts WHERE tenant_id = ?', [tenantId]);
-    return r ? { customerId: r.stripe_customer_id, subscriptionId: r.stripe_subscription_id, status: r.status, pastDueSince: r.past_due_since, lastEventAt: Number(r.last_event_at) || 0, updatedAt: r.updated_at } : null;
+    return r ? { customerId: r.stripe_customer_id, subscriptionId: r.stripe_subscription_id, status: r.status, pastDueSince: r.past_due_since, lastEventAt: Number(r.last_event_at) || 0, updatedAt: r.updated_at, noticeStage: r.notice_stage || 'ok' } : null;
+  }
+  // Stripe prices, for the "so far this month" estimate. An hour is fresh
+  // enough; a Stripe hiccup keeps the last known prices (or shows none).
+  let priceCache = { at: 0, door: null, sms: null };
+  async function stripePrices() {
+    if (Date.now() - priceCache.at < 36e5) return priceCache;
+    try {
+      const c = billing.config;
+      priceCache = { at: Date.now(), door: await billing.stripe.price(c.priceDoorDays), sms: c.priceSms ? await billing.stripe.price(c.priceSms) : null };
+    } catch (error) {
+      log('billing prices', error && error.message);
+      priceCache = { ...priceCache, at: Date.now() - 30 * 6e4 }; // retry in 30 minutes
+    }
+    return priceCache;
+  }
+  async function billingEstimate(usage) {
+    const pr = await stripePrices();
+    return pr.door ? billingCore.estimate(usage, pr.door, pr.sms) : null;
+  }
+  /** Platform-side problem, once per key. Never throws. */
+  async function billingProblem(key, tenantId, kind, detail) {
+    try {
+      await store.sql.batch([{ sql: 'INSERT OR IGNORE INTO billing_problems (problem_key, tenant_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)', params: [key.slice(0, 200), tenantId, kind, String(detail).slice(0, 500), new Date().toISOString()] }]);
+    } catch (error) { log('billing problem', key, error && error.message); }
+  }
+  /**
+   * Open problems nobody was told about go to PLATFORM_ALERT_WEBHOOK in one
+   * message. Rows are claimed first (so two tenants' maintenance runs do not
+   * both post) and released if the post fails. Never throws.
+   */
+  async function notifyPlatform() {
+    const url = billing && billing.config && billing.config.alertUrl;
+    if (!url) return null;
+    try {
+      const open = await store.sql.all('SELECT problem_key, tenant_id, kind, detail FROM billing_problems WHERE notified_at IS NULL AND resolved_at IS NULL ORDER BY created_at LIMIT 20');
+      if (!open.length) return null;
+      const claim = `claim:${policy.uid('n')}`;
+      for (const r of open) await store.sql.batch([{ sql: 'UPDATE billing_problems SET notified_at = ? WHERE problem_key = ? AND notified_at IS NULL', params: [claim, r.problem_key] }]);
+      const mine = await store.sql.all('SELECT problem_key, tenant_id, kind, detail FROM billing_problems WHERE notified_at = ?', [claim]);
+      if (!mine.length) return null;
+      const text = `AccessX billing: ${mine.length} problem(s) need a look (GET /api/platform/billing)\n${mine.map(r => `• [${r.kind}] ${r.tenant_id || '-'}: ${r.detail}`).join('\n')}`;
+      const res = await (fetchFn || globalThis.fetch)(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), redirect: 'manual', signal: AbortSignal.timeout(10000) }).catch(error => ({ ok: false, status: String(error && error.message) }));
+      if (res.ok) {
+        await store.sql.batch([{ sql: 'UPDATE billing_problems SET notified_at = ? WHERE notified_at = ?', params: [new Date().toISOString(), claim] }]);
+        return mine.length;
+      }
+      await store.sql.batch([{ sql: 'UPDATE billing_problems SET notified_at = NULL WHERE notified_at = ?', params: [claim] }]);
+      log('platform alert failed', res.status);
+      return null;
+    } catch (error) { log('platform alert', error && error.message); return null; }
+  }
+  const NOTICES = {
+    grace: st => `Billing: the last payment failed. Doors keep working. Adding people, visitors, codes and rules pauses in ${st.restrictsInDays} day(s) unless the card is updated (owner: People → Billing → Manage billing).`,
+    restricted: () => 'Billing: the subscription is unpaid, so adding people, visitors, codes and rules is paused. Doors keep working and removing access still works. Update the card in People → Billing → Manage billing.',
+    closure: st => `Billing: the account is due for closure (${st.status === 'canceled' ? 'subscription cancelled' : `unpaid for ${st.pastDueDays} days`}). Nothing changes on the doors yet; closure comes with 30 days' written notice. Keep what you need now: Activity → Audit export and Evidence pack.`,
+    ok: () => 'Billing: payment received. Adding people, visitors, codes and rules works again.',
+  };
+  /**
+   * One owner notice per stage change (grace → paused → closure → sorted),
+   * through the tenant's alert channels. Runs in the tenant's queue.
+   */
+  async function billingNotice(tenantId) {
+    if (!billingOn()) return null;
+    const acct = await billingAccount(tenantId);
+    if (!acct) return null;
+    const st = billingCore.standing(acct);
+    const next = billingCore.stage(st);
+    const prev = acct.noticeStage || 'ok';
+    if (next === prev) return null;
+    if (next === 'closure') await billingProblem(`closure_due:${tenantId}:${acct.pastDueSince || acct.status}`, tenantId, 'closure_due', `${st.status}${st.pastDueDays ? ` ${st.pastDueDays} days` : ''}: close the account by hand after written notice (docs/40-BILLING.md)`);
+    const TITLES = { grace: 'Payment failed', restricted: 'Adding is paused (unpaid)', closure: 'Account due for closure', ok: 'Billing sorted' };
+    const message = { title: TITLES[next], text: NOTICES[next](st), facts: [['Subscription', st.status], ...(st.pastDueDays ? [['Days unpaid', String(st.pastDueDays)]] : [])], path: '/#billing' };
+    const delivery = alerts ? await alerts.send(tenantId, 'billing_problem', message) : 'skipped: no alerts';
+    await store.tenant(tenantId).unit()
+      .raw('UPDATE billing_accounts SET notice_stage = ? WHERE tenant_id = ?', [next, tenantId])
+      .audit('billing.notice', `${prev} -> ${next} (alert: ${String(delivery).slice(0, 80)})`, 'stripe').commit();
+    return { stage: next, delivery };
   }
   /** 402 for additions while the subscription is unpaid past the grace period. Removals always pass. */
   async function billingBlock(tenantId, method, path) {
@@ -2164,9 +2241,10 @@ function createApi({
     const account = await billingAccount(ctx.tenantId);
     const p = period();
     const unsent = await store.sql.first('SELECT COUNT(*) AS n FROM billing_reports WHERE tenant_id = ? AND sent_at IS NULL', [ctx.tenantId]);
+    const usage = await monthUsage(ctx.tenantId, p);
     return { billing: { enabled: true, testMode: billing.config.testMode, subscribed: Boolean(account && !['canceled', 'incomplete_expired'].includes(account.status)),
-      standing: billingCore.standing(account), since: account ? account.updatedAt : null, period: p, usage: await monthUsage(ctx.tenantId, p), unsentReports: Number((unsent || {}).n || 0),
-      smsBilled: Boolean(billing.config.priceSms) } };
+      standing: billingCore.standing(account), stage: billingCore.stage(billingCore.standing(account)), since: account ? account.updatedAt : null, period: p, usage, unsentReports: Number((unsent || {}).n || 0),
+      smsBilled: Boolean(billing.config.priceSms), estimate: await billingEstimate(usage) } };
   });
 
   route('POST', /^\/api\/billing\/checkout$/, async ctx => {
@@ -2213,10 +2291,13 @@ function createApi({
     if (!billingOn()) return { status: 404, body: { ok: false, error: 'not found' } };
     let event;
     try { event = await billingCore.verifyWebhook(String(rawBody || ''), signature, billing.config.webhookSecret); } catch (error) {
-      return { status: 400, body: { ok: false, error: error.message } };
+      // Thin events (meter errors) come from their own event destination/secret.
+      if (billing.config.thinWebhookSecret) event = await billingCore.verifyWebhook(String(rawBody || ''), signature, billing.config.thinWebhookSecret).catch(() => null);
+      if (!event) return { status: 400, body: { ok: false, error: error.message } };
     }
     await whenReady();
     if (await store.sql.first('SELECT event_id FROM billing_events WHERE event_id = ?', [event.id])) return { status: 200, body: { ok: true, duplicate: true } };
+    if (event.object === 'v2.core.event') return thinEvent(event);
     const o = (event.data && event.data.object) || {};
     const exists = async id => Boolean(id && await store.sql.first('SELECT id FROM tenants WHERE id = ?', [String(id)]));
     let tenantId = null;
@@ -2240,6 +2321,38 @@ function createApi({
     return { status: 200, body: { ok: true, ...(out && typeof out === 'object' ? { applied: Boolean(out.applied) } : {}) } };
   }
 
+  /**
+   * Stripe could not use some meter events (unknown customer, meter off…).
+   * The notification is only an id: fetch the event, mark the report rows it
+   * names and raise a platform problem. A failed fetch answers 502 so Stripe
+   * retries; nothing is recorded until it worked.
+   */
+  async function thinEvent(event) {
+    if (!/^v1\.billing\.meter\.(error_report_triggered|no_meter_found)$/.test(event.type)) {
+      await store.sql.batch([{ sql: 'INSERT OR IGNORE INTO billing_events (event_id, tenant_id, type, received_at) VALUES (?, ?, ?, ?)', params: [event.id, null, event.type, new Date().toISOString()] }]);
+      return { status: 200, body: { ok: true, ignored: true } };
+    }
+    let full;
+    try { full = await billing.stripe.event(event.id); } catch (error) {
+      log('stripe thin event fetch', event.id, error && error.message);
+      return { status: 502, body: { ok: false, error: 'could not fetch the event from Stripe; retry' } };
+    }
+    const errs = billingCore.meterErrors(full);
+    const stmts = [];
+    for (const e of errs) {
+      if (e.tenantId && e.reportKey) stmts.push({ sql: 'UPDATE billing_reports SET error = ? WHERE tenant_id = ? AND meter = ? AND report_key = ?', params: [`${e.code}: ${e.message}`.slice(0, 300), e.tenantId, e.meter, e.reportKey] });
+    }
+    stmts.push({ sql: 'INSERT OR IGNORE INTO billing_events (event_id, tenant_id, type, received_at) VALUES (?, ?, ?, ?)', params: [event.id, null, event.type, new Date().toISOString()] });
+    await store.sql.batch(stmts);
+    const summary = String(((full || {}).data || {}).developer_message_summary || `${errs.length} invalid meter event(s)`).slice(0, 200);
+    let i = 0;
+    for (const e of errs.length ? errs : [{ code: event.type, message: summary, identifier: '', tenantId: null }]) {
+      await billingProblem(`meter_error:${event.id}:${i++}`, e.tenantId, 'meter_error', `${e.code}: ${e.message}${e.identifier ? ` (${e.identifier})` : ''}`);
+    }
+    await notifyPlatform();
+    return { status: 200, body: { ok: true, meterErrors: errs.length } };
+  }
+
   async function applyBillingEvent(tenantId, job) {
     if (await store.sql.first('SELECT event_id FROM billing_events WHERE event_id = ?', [job.eventId])) return { applied: false, duplicate: true };
     const prev = await billingAccount(tenantId);
@@ -2257,7 +2370,8 @@ function createApi({
       .raw('INSERT OR IGNORE INTO billing_events (event_id, tenant_id, type, received_at) VALUES (?, ?, ?, ?)', [job.eventId, tenantId, job.eventType, now]);
     if (!prev || prev.status !== next.status) u.audit('billing.status', `${prev ? prev.status : 'none'} -> ${next.status} (Stripe ${job.eventType} ${job.eventId})`, 'stripe');
     await u.commit();
-    return { applied: true, status: next.status, stale: Boolean(stale) };
+    const notice = await billingNotice(tenantId).catch(error => { log('billing notice', tenantId, error && error.message); return null; });
+    return { applied: true, status: next.status, stale: Boolean(stale), ...(notice ? { notice: notice.stage } : {}) };
   }
 
   /**
@@ -2305,6 +2419,37 @@ function createApi({
     return Object.keys(out).length ? out : null;
   }
 
+  // Platform: what needs a human in billing (open problems, who is behind).
+  route('GET', /^\/api\/platform\/billing$/, async ctx => {
+    if (!billingOn()) return { billing: { enabled: false } };
+    const all = ctx.query.get('all') === '1';
+    const problems = (await store.sql.all(`SELECT * FROM billing_problems ${all ? '' : 'WHERE resolved_at IS NULL'} ORDER BY created_at DESC LIMIT 200`))
+      .map(r => ({ key: r.problem_key, tenantId: r.tenant_id, kind: r.kind, detail: r.detail, createdAt: r.created_at, notified: Boolean(r.notified_at && !String(r.notified_at).startsWith('claim:')), resolvedAt: r.resolved_at, resolvedBy: r.resolved_by }));
+    const p = period();
+    const tenants = [];
+    for (const t of await store.listTenants()) {
+      const acct = await billingAccount(t.id);
+      if (!acct) continue;
+      const st = billingCore.standing(acct);
+      const usage = await monthUsage(t.id, p);
+      const unsent = await store.sql.first('SELECT COUNT(*) AS n, MIN(event_at) AS oldest, SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors FROM billing_reports WHERE tenant_id = ? AND (sent_at IS NULL OR error IS NOT NULL)', [t.id]);
+      tenants.push({ tenantId: t.id, name: t.name, customerId: acct.customerId, standing: st, stage: billingCore.stage(st), usage, estimate: await billingEstimate(usage),
+        unsentReports: Number((unsent || {}).n || 0) - Number((unsent || {}).errors || 0), reportErrors: Number((unsent || {}).errors || 0), oldestUnsent: (unsent || {}).oldest || null });
+    }
+    const order = { closure: 0, restricted: 1, grace: 2, ok: 3 };
+    tenants.sort((x, y) => order[x.stage] - order[y.stage] || x.name.localeCompare(y.name));
+    return { billing: { enabled: true, testMode: billing.config.testMode, period: p, alertsTo: billing.config.alertUrl ? 'PLATFORM_ALERT_WEBHOOK' : null, problems, tenants } };
+  });
+
+  route('POST', /^\/api\/platform\/billing\/problems\/([^/]+)\/resolve$/, async (ctx, [key]) => {
+    if (!billingOn()) throw new HttpError(404, 'billing is not enabled on this deployment');
+    const k = decodeURIComponent(key);
+    const row = await store.sql.first('SELECT problem_key, resolved_at FROM billing_problems WHERE problem_key = ?', [k]);
+    if (!row) throw new HttpError(404, 'not found');
+    if (!row.resolved_at) await store.sql.batch([{ sql: 'UPDATE billing_problems SET resolved_at = ?, resolved_by = ? WHERE problem_key = ? AND resolved_at IS NULL', params: [new Date().toISOString(), String((ctx.body || {}).note || 'platform').slice(0, 100), k] }]);
+    return { resolved: k };
+  });
+
   route('GET', /^\/api\/platform\/usage$/, async ctx => {
     const p = ctx.query.get('period') || period();
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) throw new HttpError(400, 'period must be YYYY-MM');
@@ -2317,7 +2462,7 @@ function createApi({
       const n = k => Number((mine.find(r => r.kind === k) || {}).n || 0);
       const acct = billingOn() ? await billingAccount(t.id) : null;
       out.push({ tenantId: t.id, name: t.name, sms: n('sms'), smsSegments: n('sms_segments'), smsMonthlyCap: Number.isInteger(limits.smsMonthlyCap) ? limits.smsMonthlyCap : (smsMonthlyCap || null),
-        ...(billingOn() ? { doorDays: (await monthUsage(t.id, p)).doorDays, billing: acct ? billingCore.standing(acct) : null } : {}) });
+        ...(billingOn() ? await (async () => { const u = await monthUsage(t.id, p); return { doorDays: u.doorDays, billing: acct ? billingCore.standing(acct) : null, estimate: acct ? await billingEstimate(u) : null }; })() : {}) });
     }
     return { period: p, tenants: out };
   });
@@ -2723,6 +2868,18 @@ function createApi({
     } catch (error) {
       log(`maintenance ${tenantId} billing usage failed`, error && error.message);
       out.billingError = String((error && error.message) || error);
+    }
+    if (billingOn()) {
+      try {
+        const notice = await billingNotice(tenantId);
+        if (notice) out.billingNotice = notice.stage;
+        // A report Stripe has not taken for a day is a platform problem (one per tenant per day).
+        const stuck = await store.sql.first('SELECT COUNT(*) AS n, MIN(event_at) AS oldest FROM billing_reports WHERE tenant_id = ? AND sent_at IS NULL AND event_at < ?', [tenantId, new Date(Date.now() - 864e5).toISOString()]);
+        if (stuck && Number(stuck.n)) await billingProblem(`unsent:${tenantId}:${new Date().toISOString().slice(0, 10)}`, tenantId, 'unsent_reports', `${stuck.n} usage report(s) not accepted by Stripe since ${stuck.oldest}${out.billingError ? `; last error: ${out.billingError}` : ''}`);
+        await notifyPlatform();
+      } catch (error) {
+        log(`maintenance ${tenantId} billing notices failed`, error && error.message);
+      }
     }
     try {
       // Snapshot-cache change log: keep the newest rows; caches further behind reload in full.

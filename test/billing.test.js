@@ -168,3 +168,83 @@ test('billing off (default): no routes do anything, webhook is 404, nothing is g
   assert.equal((await api.call('POST', '/api/billing/checkout', { ...OWNER, body: {} })).status, 404);
   assert.equal((await fetch(`${api.base}/api/stripe/webhook`, { method: 'POST', body: '{}' })).status, 404);
 });
+
+test('operations: owner notice per stage, Stripe meter errors (thin events), stuck reports, platform alerts, estimate', async t => {
+  const http = require('node:http');
+  const got = [];
+  const sink = http.createServer((req, res) => { let d = ''; req.on('data', c => { d += c; }); req.on('end', () => { got.push({ path: req.url, body: d }); res.writeHead(200); res.end('ok'); }); });
+  await new Promise(r => sink.listen(0, '127.0.0.1', r));
+  const sinkBase = `http://127.0.0.1:${sink.address().port}`;
+  t.after(() => new Promise(r => sink.close(r)));
+  const { api, stripe, tenantId, hook } = await setup(t, { ALLOW_HTTP_WEBHOOKS: '1', STRIPE_THIN_WEBHOOK_SECRET: 'whsec_thin', PLATFORM_ALERT_WEBHOOK: `${sinkBase}/platform` });
+  const P = { token: 'platform-token' };
+  const sql = api.server.store.sql;
+  const tenantMsgs = () => got.filter(g => g.path === '/tenant').map(g => JSON.parse(g.body)).filter(x => x.type === 'accessx.alert.billing_problem').map(x => x.text || JSON.stringify(x));
+  const platformMsgs = () => got.filter(g => g.path === '/platform').map(g => JSON.parse(g.body).text);
+  const maintain = () => api.server.api.maintainOne(tenantId);
+  const backdate = days => sql.batch([{ sql: 'UPDATE billing_accounts SET past_due_since = ? WHERE tenant_id = ?', params: [new Date(Date.now() - days * 864e5).toISOString(), tenantId] }]);
+  stripe.setPrice('price_doors', { billing_scheme: 'per_unit', unit_amount_decimal: '40', currency: 'aud' });
+  stripe.setPrice('price_sms', { billing_scheme: 'per_unit', unit_amount_decimal: '9.5', currency: 'aud' });
+  assert.equal((await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: `${sinkBase}/tenant` } })).status, 200);
+
+  let n = 0;
+  const sub = async status => hook({ id: `evt_ops_${++n}`, type: 'customer.subscription.updated', created: Math.floor(Date.now() / 1000) + n, data: { object: { id: 'sub_ops', customer: 'cus_ops', status } } });
+  await hook({ id: 'evt_ops_c', type: 'checkout.session.completed', data: { object: { mode: 'subscription', client_reference_id: tenantId, customer: 'cus_ops', subscription: 'sub_ops', payment_status: 'paid' } } });
+  assert.equal(tenantMsgs().length, 0, 'no notice while all is well');
+
+  // estimate: Stripe's per-unit prices, shown per door-month
+  const b = (await api.call('GET', '/api/billing', OWNER)).body.billing;
+  assert.deepEqual([b.stage, b.estimate.currency, b.estimate.perDoorMonth, b.estimate.perSmsSegment, b.estimate.amount], ['ok', 'aud', 12, 0.095, 0]);
+
+  // grace → paused → closure → sorted: one owner notice per stage, never repeated
+  assert.equal((await sub('past_due')).status, 200);
+  assert.match(tenantMsgs().at(-1), /last payment failed.*pauses in 15 day/);
+  await sub('past_due');
+  await maintain();
+  assert.equal(tenantMsgs().length, 1, 'same stage: no second notice');
+  await backdate(20);
+  assert.equal((await maintain()).billingNotice, 'restricted');
+  assert.match(tenantMsgs().at(-1), /adding people, visitors, codes and rules is paused/);
+  await backdate(50);
+  assert.equal((await maintain()).billingNotice, 'closure');
+  assert.match(tenantMsgs().at(-1), /due for closure \(unpaid for 50 days\).*30 days' written notice/);
+  assert.ok(platformMsgs().some(m => /\[closure_due\]/.test(m) && m.includes(tenantId)), 'the platform is told to close it by hand');
+  assert.equal((await sub('active')).status, 200);
+  assert.match(tenantMsgs().at(-1), /payment received/);
+  assert.equal(tenantMsgs().length, 4);
+  const log = (await api.call('GET', '/api/audit?limit=200', OWNER)).body.log.filter(e => e.action === 'billing.notice').map(e => e.detail.split(' (')[0]);
+  assert.deepEqual(log.reverse(), ['ok -> grace', 'grace -> restricted', 'restricted -> closure', 'closure -> ok']);
+
+  // Stripe rejected a meter event later (thin event from a second destination)
+  await sql.batch([{ sql: 'INSERT INTO billing_reports (tenant_id, meter, report_key, value, event_at, sent_at) VALUES (?, ?, ?, ?, ?, ?)', params: [tenantId, 'door_days', '2026-09-01', 4, new Date().toISOString(), new Date().toISOString()] }]);
+  const thin = { id: 'evt_thin_1', object: 'v2.core.event', type: 'v1.billing.meter.error_report_triggered', related_object: { id: 'mtr_1', type: 'billing.meter' } };
+  assert.equal((await hook(thin, { secret: 'whsec_other' })).status, 400, 'unsigned / wrong secret');
+  assert.equal((await hook(thin, { secret: 'whsec_thin' })).status, 502, 'details not fetchable yet: Stripe retries');
+  stripe.setEvent('evt_thin_1', { type: thin.type, data: { developer_message_summary: 'There is 1 invalid event', reason: { error_count: 1, error_types: [{ code: 'meter_event_customer_not_found', error_count: 1, sample_errors: [{ error_message: 'No customer found for cus_ops', request: { identifier: `${tenantId}:door_days:2026-09-01` } }] }] } } });
+  const ok = await hook(thin, { secret: 'whsec_thin' });
+  assert.deepEqual([ok.status, ok.body.meterErrors], [200, 1]);
+  assert.equal((await hook(thin, { secret: 'whsec_thin' })).body.duplicate, true);
+  assert.match((await sql.first("SELECT error FROM billing_reports WHERE tenant_id = ? AND report_key = '2026-09-01'", [tenantId])).error, /customer_not_found/);
+  assert.ok(platformMsgs().some(m => /\[meter_error\].*customer_not_found/.test(m)));
+
+  // a report Stripe has not taken for a day
+  await sql.batch([{ sql: 'INSERT INTO billing_reports (tenant_id, meter, report_key, value, event_at) VALUES (?, ?, ?, ?, ?)', params: [tenantId, 'sms_segments', '2026-09:3', 3, new Date(Date.now() - 2 * 864e5).toISOString()] }]);
+  stripe.failNext(3);
+  const m = await maintain();
+  assert.match(m.billingError, /simulated outage/);
+  assert.ok(platformMsgs().some(x => /\[unsent_reports\] .*1 usage report/.test(x)));
+
+  // platform view: who needs a look, and resolving
+  assert.equal((await api.call('GET', '/api/platform/billing', OWNER)).status, 401, 'tenants never see it');
+  const pv = (await api.call('GET', '/api/platform/billing', P)).body.billing;
+  assert.deepEqual(pv.problems.map(x => x.kind).sort(), ['closure_due', 'meter_error', 'unsent_reports']);
+  assert.ok(pv.problems.every(x => x.notified), 'all were sent to PLATFORM_ALERT_WEBHOOK');
+  const row = pv.tenants.find(x => x.tenantId === tenantId);
+  assert.deepEqual([row.stage, row.reportErrors, row.unsentReports], ['ok', 1, 1]);
+  const key = pv.problems.find(x => x.kind === 'meter_error').key;
+  assert.equal((await api.call('POST', `/api/platform/billing/problems/${encodeURIComponent(key)}/resolve`, { ...P, body: { note: 'customer re-linked' } })).status, 200);
+  assert.equal((await api.call('GET', '/api/platform/billing', P)).body.billing.problems.length, 2);
+  const sent = platformMsgs().length;
+  await maintain();
+  assert.equal(platformMsgs().length, sent, 'nothing is sent twice');
+});

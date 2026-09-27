@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Stripe billing (docs/BILLING.md): per door per month billed as door-days,
+ * Stripe billing (docs/40-BILLING.md): per door per month billed as door-days,
  * SMS segments at cost plus. Off unless BILLING_ENABLED=1 and the Stripe
  * settings are present. Plain fetch (no SDK), WebCrypto for signatures, so
  * the same code runs on Node and Workers.
@@ -11,6 +11,7 @@
 
 const API_VERSION = '2025-03-31.basil';
 const RESTRICT_AFTER_DAYS = 15;
+const CLOSE_AFTER_DAYS = 45; // an operator closes the account (never automatic)
 const MAX_BACKFILL_DAYS = 30; // Stripe accepts meter events up to 35 days old
 const enc = new TextEncoder();
 
@@ -30,6 +31,10 @@ function billingConfigFromEnv(env = {}) {
     apiBase: (env.STRIPE_API_BASE || 'https://api.stripe.com').replace(/\/+$/, ''),
     apiVersion: env.STRIPE_API_VERSION || API_VERSION,
     automaticTax: env.STRIPE_AUTOMATIC_TAX === '1',
+    // Thin events (meter errors) come from a separate Stripe event destination.
+    thinWebhookSecret: env.STRIPE_THIN_WEBHOOK_SECRET || '',
+    // Where platform-side billing problems go (Slack-style JSON {text}).
+    alertUrl: env.PLATFORM_ALERT_WEBHOOK || '',
   };
   c.problems = [];
   if (c.enabled) {
@@ -37,6 +42,8 @@ function billingConfigFromEnv(env = {}) {
     if (!/^whsec_/.test(c.webhookSecret)) c.problems.push('STRIPE_WEBHOOK_SECRET');
     if (!/^price_/.test(c.priceDoorDays)) c.problems.push('STRIPE_PRICE_DOOR_DAYS');
     if (c.priceSms && !/^price_/.test(c.priceSms)) c.problems.push('STRIPE_PRICE_SMS');
+    if (c.thinWebhookSecret && !/^whsec_/.test(c.thinWebhookSecret)) c.problems.push('STRIPE_THIN_WEBHOOK_SECRET');
+    if (c.alertUrl && !/^https:\/\//.test(c.alertUrl) && env.ALLOW_HTTP_WEBHOOKS !== '1') c.problems.push('PLATFORM_ALERT_WEBHOOK (https only)');
   }
   c.active = c.enabled && !c.problems.length;
   c.testMode = /^(sk|rk)_test_/.test(c.secretKey);
@@ -84,6 +91,9 @@ function createStripe(config, { fetchFn = (...a) => globalThis.fetch(...a) } = {
     checkout: (p, key) => call('POST', '/v1/checkout/sessions', p, { idempotencyKey: key }),
     portal: p => call('POST', '/v1/billing_portal/sessions', p),
     meterEvent: (p) => call('POST', '/v1/billing/meter_events', p, { idempotencyKey: p.identifier }),
+    price: id => call('GET', `/v1/prices/${encodeURIComponent(id)}`),
+    // Thin events carry only an id: the details live on the v2 event.
+    event: id => call('GET', `/v2/core/events/${encodeURIComponent(id)}`),
   };
 }
 
@@ -148,7 +158,62 @@ const ADDITIONS = [
 ];
 const isAddition = (method, path) => ADDITIONS.some(([m, re]) => m === method && re.test(path));
 
+/**
+ * Where a tenant is in the non-payment timeline (drives owner notices):
+ * ok | grace (0-14 days) | restricted (15-44) | closure (45+, or ended).
+ */
+function stage(st) {
+  if (!st || st.status === 'none') return 'ok';
+  if (ENDED.has(st.status)) return 'closure';
+  if (!PAST_DUE.has(st.status)) return 'ok';
+  if (st.pastDueDays >= CLOSE_AFTER_DAYS) return 'closure';
+  return st.restricted ? 'restricted' : 'grace';
+}
+
+/**
+ * Per-unit price of a metered Stripe price, in the currency's major unit
+ * (e.g. 0.4 = 40 cents), or null when the price is tiered / not per unit —
+ * then no estimate is shown rather than a wrong one.
+ */
+function unitPrice(price) {
+  if (!price || price.billing_scheme !== 'per_unit') return null;
+  const minor = price.unit_amount_decimal !== undefined && price.unit_amount_decimal !== null ? Number(price.unit_amount_decimal) : Number(price.unit_amount);
+  if (!Number.isFinite(minor)) return null;
+  const currency = String(price.currency || '').toLowerCase();
+  const zeroDecimal = ['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'].includes(currency);
+  return { currency, perUnit: zeroDecimal ? minor : minor / 100 };
+}
+
+/** This month so far, before tax and discounts. Null when any price is unknown. */
+function estimate(usage, doorPrice, smsPrice) {
+  const d = unitPrice(doorPrice);
+  if (!d) return null;
+  const s = smsPrice ? unitPrice(smsPrice) : null;
+  if (smsPrice && (!s || s.currency !== d.currency)) return null;
+  const amount = usage.doorDays * d.perUnit + (s ? usage.smsSegments * s.perUnit : 0);
+  return { currency: d.currency, amount: Math.round(amount * 100) / 100, perDoorDay: d.perUnit, perDoorMonth: Math.round(d.perUnit * 30 * 100) / 100, perSmsSegment: s ? s.perUnit : null };
+}
+
+/**
+ * Stripe's meter error report (v1.billing.meter.error_report_triggered /
+ * no_meter_found): sample errors carry our identifier
+ * "<tenant>:<meter>:<report key>", which points at the exact report row.
+ */
+function meterErrors(event) {
+  const types = (((event || {}).data || {}).reason || {}).error_types || [];
+  const out = [];
+  for (const t of types) {
+    for (const e of t.sample_errors || []) {
+      const id = String(((e || {}).request || {}).identifier || '');
+      const m = id.match(/^(t_[A-Za-z0-9_-]+):(door_days|sms_segments):(.{1,40})$/);
+      out.push({ code: String(t.code || 'unknown').slice(0, 60), message: String((e || {}).error_message || '').slice(0, 300), identifier: id.slice(0, 120), tenantId: m ? m[1] : null, meter: m ? m[2] : null, reportKey: m ? m[3] : null });
+    }
+    if (!(t.sample_errors || []).length) out.push({ code: String(t.code || 'unknown').slice(0, 60), message: `${Number(t.error_count) || 0} invalid event(s)`, identifier: '', tenantId: null, meter: null, reportKey: null });
+  }
+  return out;
+}
+
 module.exports = {
-  API_VERSION, RESTRICT_AFTER_DAYS, MAX_BACKFILL_DAYS, BillingError, billingConfigFromEnv, formEncode, createStripe,
+  API_VERSION, RESTRICT_AFTER_DAYS, CLOSE_AFTER_DAYS, MAX_BACKFILL_DAYS, stage, unitPrice, estimate, meterErrors, BillingError, billingConfigFromEnv, formEncode, createStripe,
   verifyWebhook, signWebhook, standing, nextAccountState, isAddition,
 };

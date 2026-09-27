@@ -9,7 +9,7 @@ the rate limits on the endpoints that need no login.
 
 | Check | What it proves |
 |---|---|
-| `npm run test:isolation` (merge gate) | ~2,700 requests across all 97 routes, SCIM and sessions with tenant B's tokens against tenant A's data: 0 responses may contain A-only markers. |
+| `npm run test:isolation` (merge gate) | **Tenants:** ~2,900 requests across all 103 routes, SCIM and sessions with tenant B's tokens against tenant A's data: 0 responses may contain A-only markers, nothing in A may change. **Sites** (`test/scope.fuzz.test.js`): ~1,550 requests from an operator holding *every* permission through a custom role but scoped to one site, with other sites' ids and "mixed" bodies (own group, other sites' doors/people inside): nothing outside that site may change and no new record may reach outside it. Mutation-checked: removing the door-group check (the R12 finding) or the "every group in scope" rule for deleting people makes it fail. |
 | `npm test` | Role and site scope (RBAC), four-eyes on sensitive doors, the audit hash chain, SCIM, OIDC (issuer mix-up, nonce, PKCE), secrets encryption and rotation, the visitor links (one use, attempt limits, same 404 for every invalid state), the rate limits and the SSRF guards below. |
 | `npm run test:worker` | The same API on Cloudflare (D1, Durable Object) against a fresh database. |
 
@@ -28,7 +28,12 @@ customer's tenant or doors.**
    issuer mix-up, `state`/`nonce` replay, account linking by email, a
    disabled user signing in), enforced SSO with break-glass, session cookie
    (HttpOnly, SameSite, CSRF token), sign-out, SCIM token scope.
-3. **Authorisation.** A site-scoped manager reaching another site's doors; a
+3. **Authorisation.** A site-scoped manager reaching another site's doors —
+   **spend the most time here**: the one real escalation found so far (R12)
+   was a custom role with `rule.manage` scoped to one site filing another
+   site's door into its own door group. The site-scope gate now covers every
+   route with one custom role; the tester should combine permissions, SCIM
+   group mappings, approvals and invites in ways a single role does not; a
    viewer writing; a Front Desk (visitors-only) operator issuing staff codes;
    bypassing four-eyes on sensitive doors (including via SCIM group mapping,
    office setup and visitor invites, which act as the inviting operator).

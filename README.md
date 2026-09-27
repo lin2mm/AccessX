@@ -2,14 +2,21 @@
 
 AccessX is an access-control demo with a browser-based PWA. The local Express
 server and Cloudflare Worker run the **same API core** (`api-core.js`) over the
-same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). Both
-use demo data and do not control physical locks. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
-[docs/PILOT.md](docs/PILOT.md) for trying it with real locks, and
-[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the visitor pre-registration design,
-[docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md) for setting up an office (about 45 minutes),
-[docs/SECURITY-TESTING.md](docs/SECURITY-TESTING.md) for the external security test and rate limits, and
-[docs/BILLING.md](docs/BILLING.md) for Stripe billing (off unless `BILLING_ENABLED=1`).
+same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). The
+default tenant runs on demo locks; a tenant that connects its own TTLock
+account (owner: People → Operators & sign-in; needs `TTLOCK_CLIENT_ID` /
+`TTLOCK_CLIENT_SECRET`)
+controls its real locks on either runtime.
+
+**Docs:** [docs/00-INDEX.md](docs/00-INDEX.md) lists every document and the
+naming scheme; [docs/90-ROUNDS.md](docs/90-ROUNDS.md) is the change history by
+round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
+[docs/01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md) for the design,
+[docs/10-PILOT.md](docs/10-PILOT.md) for trying it with real locks, and
+[docs/20-PREREGISTRATION.md](docs/20-PREREGISTRATION.md) for the visitor pre-registration design,
+[docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
+[docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
+[docs/40-BILLING.md](docs/40-BILLING.md) for Stripe billing (off unless `BILLING_ENABLED=1`).
 
 ## Run locally
 
@@ -29,9 +36,9 @@ in memory for the current page only. Do not put the token in source control.
 
 ## Cloudflare preview
 
-The hosted build serves the PWA as static assets, the demo API from a Worker,
-and demo state from D1. It is demo-only; TTLock credentials and real-lock
-operations are intentionally not enabled in the Worker.
+The hosted build serves the PWA as static assets, the API from a Worker, and
+state from D1 (one Durable Object per tenant serialises writes). The default
+tenant uses demo locks; tenants that connect a TTLock account use real ones.
 
 1. Install dependencies and log Wrangler in:
 
@@ -67,7 +74,9 @@ operations are intentionally not enabled in the Worker.
    npm run cf:deploy
    ```
 
-   The Worker's cron trigger (`*/15 * * * *`) runs the credential reconciler.
+   The Worker's cron trigger (`*/15 * * * *`) runs the credential reconciler and
+   each tenant's maintenance (alert retries, lock health, audit anchors, visitor
+   retention, billing usage and notices).
 
 Do not enable public writes. For live lock data, this prototype still needs a
 separate production security review.
@@ -83,7 +92,9 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `SECURITY_CONTACT` | production | Published as `/.well-known/security.txt` (RFC 9116): `mailto:` / `https:` / `tel:` URIs, comma-separated. Unset: no file. `SECURITY_POLICY` (optional) adds the disclosure-policy URL. |
 | `OPERATORS` | optional | JSON list of seeded operators: `id`, `name`, `role`, `siteIds` (omit or `["*"]` = all sites), `tokenSha256` (SHA-256 hex of the token; plaintext tokens are refused). |
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
-| `BILLING_ENABLED` | SaaS, optional | `1` turns on Stripe billing per door-day and SMS segment ([docs/BILLING.md](docs/BILLING.md)). Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_DOOR_DAYS`; optional `STRIPE_PRICE_SMS`, `STRIPE_METER_DOOR_DAYS` / `STRIPE_METER_SMS` (default `accessx_door_days` / `accessx_sms_segments`), `STRIPE_AUTOMATIC_TAX=1`. Non-payment pauses additions after 15 days; doors keep working. |
+| `BILLING_ENABLED` | SaaS, optional | `1` turns on Stripe billing per door-day and SMS segment ([docs/40-BILLING.md](docs/40-BILLING.md)). Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_DOOR_DAYS`; optional `STRIPE_PRICE_SMS`, `STRIPE_METER_DOOR_DAYS` / `STRIPE_METER_SMS` (default `accessx_door_days` / `accessx_sms_segments`), `STRIPE_AUTOMATIC_TAX=1`. Non-payment pauses additions after 15 days; doors keep working. |
+| `STRIPE_THIN_WEBHOOK_SECRET` | billing, optional | Signing secret of a second Stripe event destination (thin payload) for meter errors; same URL `/api/stripe/webhook`. |
+| `PLATFORM_ALERT_WEBHOOK` | SaaS, optional | https URL (Slack-compatible `{text}`) that gets platform-side billing problems once: meter errors, reports stuck for 24 h, accounts due for closure. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
 | `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts, visitors' self check-out links and visitor invitations; without it those links are left out and the redirect URI follows the request host. |
@@ -100,7 +111,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `DATA_DIR`, `PORT` | Node | SQLite location and HTTP port. |
 | `RECONCILE_INTERVAL_MIN` | Node | Reconciler period (default 15, `0` = off). The Worker uses the cron trigger in `wrangler.jsonc`. |
 | `WRITE_QUEUE_MAX` | Node | Per-tenant write queue depth before 503 (default 256). |
-| `SNAPSHOT_CACHE_ROWS` | both | Snapshot cache budget in rows across tenants (Node 500000, Worker 100000; `0` = off). See *Snapshot cache* in docs/ARCHITECTURE.md. |
+| `SNAPSHOT_CACHE_ROWS` | both | Snapshot cache budget in rows across tenants (Node 500000, Worker 100000; `0` = off). See *Snapshot cache* in docs/01-ARCHITECTURE.md. |
 
 ### Rotating SECRETS_KEY
 
@@ -225,7 +236,7 @@ Operators (people who administer the system) are separate from door users.
   access), Office hours and Cleaning schedules, Staff and Cleaners rules.
   Preview first (`GET /api/onboarding/office?timeZone=`), apply
   (`POST /api/onboarding/office`, owner only); everything audited, doors
-  already grouped are never touched. See [docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md).
+  already grouped are never touched. See [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md).
 - **Lock health** — one battery reading per lock per day (lock list and
   callback records); a trend line since the last battery change warns about
   three weeks before a lock reaches 10%, and at 20% / 10%. Alerts only
@@ -260,7 +271,7 @@ Operators (people who administer the system) are separate from door users.
   shows a code. One use, expires with the window, revocable; the visit is
   re-checked against the inviter's current rights at registration. Sites with
   sensitive doors wait for reception's approval by default. See
-  [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md).
+  [docs/20-PREREGISTRATION.md](docs/20-PREREGISTRATION.md).
   **Self check-out**: with `PUBLIC_URL`, the email/text carries a link;
   one tap ends the visit and removes the codes (no login, one use, shows no
   names or codes; the token sits in the URL fragment, so it is never in
@@ -279,7 +290,7 @@ Operators (people who administer the system) are separate from door users.
 - **Burst-safe writes** — each tenant's writes run one at a time (a Durable
   Object per tenant on Cloudflare, an in-process queue on Node), so a
   2,000-person SCIM sync completes with zero failed writes
-  (`npm run load:scim`, numbers in docs/ARCHITECTURE.md).
+  (`npm run load:scim`, numbers in docs/01-ARCHITECTURE.md).
 - **Stays fast at 10k+ people** — a version-checked snapshot cache (database
   triggers log every change; readers patch only changed rows): reads and
   writes ~7–8 ms at 10,000 people instead of ~230 ms.
@@ -301,7 +312,9 @@ Operators (people who administer the system) are separate from door users.
 - `npm test` — unit, storage, tenancy, SSO, SCIM and in-process API tests.
 - `npm run test:isolation` — the **cross-tenant gate**: every route is called
   as tenant B with tenant A's ids; any leak or change to A fails CI
-  (`.github/workflows/ci.yml`). New routes are covered automatically.
+  (`.github/workflows/ci.yml`). New routes are covered automatically. The same
+  command runs the **site-scope gate** (`test/scope.fuzz.test.js`): an operator
+  with every permission but one site may not change anything at other sites.
 - `MOCK_IDP=1` mounts a fake OIDC provider at `/mock-idp` for demos/tests
   (`MOCK_IDP_AUTOCONFIGURE=1` wires the default tenant to it). Never in production.
 - `npm run test:worker` — smoke test against a running `wrangler dev`
@@ -310,7 +323,10 @@ Operators (people who administer the system) are separate from door users.
   pulling — `0003_multitenant.sql` adds the relational multi-tenant schema,
   `0004_identity.sql` sessions, SSO and directory tables, `0005` per-tenant
   vendor accounts, `0006` audit anchors and retention checkpoints, `0007`
-  break-glass operators, `0008` approvals and sensitive door groups. Set `SECRETS_KEY`
+  break-glass operators, `0008` approvals and sensitive door groups, `0009`–`0011`
+  sealed approval codes, alert outbox and snapshot versions, `0012`–`0018`
+  visitors (arrivals, phone, alarms, check-out, SMS usage, invites), `0019` lock
+  health, `0020`–`0021` billing. Set `SECRETS_KEY`
   as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
@@ -318,4 +334,4 @@ connecting real locks or real user data: run `npm run ttlock:check` against
 each lock model on site, set `AUDIT_SIGNING_KEY` and an anchor webhook,
 verify your SSO domains (TXT record) and turn on *Require single sign-on*
 with a break-glass owner, and complete an independent security review
-([docs/SECURITY-TESTING.md](docs/SECURITY-TESTING.md) has the scope).
+([docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) has the scope).

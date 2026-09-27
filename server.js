@@ -58,7 +58,7 @@ const tt = new TTLock();
 const demoVendor = createDemoVendor({ mirror: fileMirror() });
 const liveVendor = tt.demo ? null : createTTLockVendor(tt);
 // TTLock credentials are per deployment today → default tenant only.
-// Per-tenant vendor accounts are the next step (see docs/ARCHITECTURE.md).
+// Per-tenant vendor accounts are the next step (see docs/01-ARCHITECTURE.md).
 // Other tenants get an EMPTY simulated fleet: lock ids belong to a vendor
 // account, and one tenant must never see (let alone open) another's doors.
 const emptyVendor = createDemoVendor({ locks: [] });

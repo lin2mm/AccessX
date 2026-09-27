@@ -47,7 +47,7 @@ const { encryptSecret, decryptSecret } = require('./secrets-core');
 const { checkWebhookUrl } = require('./audit-ops');
 const policy = require('./policy-core');
 
-const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived', 'lock_alarm', 'door_left_open', 'battery_low', 'callback_silent'];
+const EVENTS = ['approval_requested', 'removal_overdue', 'revoke_failed', 'break_glass', 'vendor_needs_reconnect', 'visitor_arrived', 'lock_alarm', 'door_left_open', 'battery_low', 'callback_silent', 'billing_problem'];
 // Informational, and they name people: channels get these only when an owner turns them on.
 const OPT_IN_EVENTS = ['visitor_arrived', 'door_left_open'];
 const DEFAULT_EVENTS = EVENTS.filter(e => !OPT_IN_EVENTS.includes(e));
@@ -68,7 +68,7 @@ const EVENT_TITLES = {
   revoke_failed: 'Revocations failed', break_glass: 'Break-glass sign-ins',
   vendor_needs_reconnect: 'TTLock accounts to reconnect', visitor_arrived: 'Visitors arrived',
   lock_alarm: 'Lock alarms', door_left_open: 'Doors left open',
-  battery_low: 'Lock batteries', callback_silent: 'TTLock callback silent',
+  battery_low: 'Lock batteries', callback_silent: 'TTLock callback silent', billing_problem: 'Billing',
 };
 
 /** Next occurrence of `hour`:00 in `timeZone` strictly after `nowMs` (DST-safe). */

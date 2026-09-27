@@ -41,7 +41,7 @@ async function appState(sql, key) {
 /**
  * One api instance per isolate+config, so the auth rate limiter and the
  * "ready" flag survive between requests. (Isolates are recycled at will;
- * the limiter is best-effort — see docs/ARCHITECTURE.md.)
+ * the limiter is best-effort — see docs/01-ARCHITECTURE.md.)
  */
 let cached = null;
 let limiters = null; // per isolate; returns the RL_* bindings when configured

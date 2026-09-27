@@ -189,7 +189,7 @@ function arrivalCandidates(records) {
   })).filter(r => r.recordType === PASSCODE_UNLOCK && r.success === 1 && /^\d{4,12}$/.test(r.code) && Number.isFinite(r.lockId) && Number.isFinite(r.at));
 }
 
-// ---- pre-registration invites (docs/PREREGISTRATION.md) -------------------------------
+// ---- pre-registration invites (docs/20-PREREGISTRATION.md) -------------------------------
 const INVITE = { maxOpen: 200, maxAttempts: 5 };
 
 /** The operator fixes where the link AND the code go: an email address or a mobile number. */

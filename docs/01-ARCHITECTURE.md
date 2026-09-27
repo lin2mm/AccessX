@@ -492,7 +492,7 @@ and a fake TTLock that rotates refresh tokens.
   public literal host; IPv4 embedded in IPv6 literals is unpacked and checked;
   redirects are not followed. `ALLOW_HTTP_WEBHOOKS` / `ALLOW_HTTP_ISSUERS`
   (development only) turn this off. DNS names resolving to private addresses
-  are a known gap on Node only (docs/SECURITY-TESTING.md).
+  are a known gap on Node only (docs/30-SECURITY-TESTING.md).
 
 ### Editing door groups
 

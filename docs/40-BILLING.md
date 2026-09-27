@@ -14,7 +14,7 @@ plan. Prices are placeholders created in the Stripe dashboard, not in code.
 | Minimum | e.g. 5 doors | A 2-door customer costs as much to support as a 5-door one. |
 
 Price points are a pilot decision, not a code decision: test them in the
-pilot calls (docs/PILOT.md) against what the office pays today (keys, fobs,
+pilot calls (docs/10-PILOT.md) against what the office pays today (keys, fobs,
 locksmith visits, the Kisi/Brivo quote it didn't sign). Keep one price list
 per currency (AUD, USD) instead of converting.
 
@@ -153,9 +153,9 @@ deduplicated in `billing_events`, rate-limited on `RL_NOTIFY`).
   = the delta since the last report; the running total makes it idempotent.
 - `invoice.*` events are not needed: `customer.subscription.updated` already
   carries `past_due` / `unpaid` / `active`. They are recorded and ignored.
-- The thin event `v1.billing.meter.error_report_triggered` is not consumed
-  yet; failed reports stay in `billing_reports` with `sent_at` empty and show
-  as `unsentReports` for the owner and in the maintenance result.
+- Reports Stripe did not accept stay in `billing_reports` with `sent_at`
+  empty (`unsentReports`); errors Stripe finds later arrive as thin events
+  (see Operations below).
 - Out-of-order events: an event older than `last_event_at` is recorded but
   does not change the status.
 - No account (pilot / trial / flag off) restricts nothing. The 402 gate
@@ -173,4 +173,43 @@ deduplicated in `billing_events`, rate-limited on `RL_NOTIFY`).
 20) and compare the invoice with `GET /api/platform/usage`; decide the price
 and the minimum (e.g. 5 doors); write the terms that say non-payment never
 locks anyone out.
+
+## Operations (R13)
+
+**Owner notices.** One alert per stage change through the tenant's alert
+channels (event `billing_problem`, on by default, never in the daily
+summary), audited as `billing.notice`:
+
+| Stage | When | Notice |
+|---|---|---|
+| grace | payment failed (0–14 days) | doors keep working; adding pauses in N days |
+| restricted | 15–44 days | adding is paused; removing still works |
+| closure | 45+ days or cancelled | due for closure, 30 days' written notice, keep the audit export / evidence pack; also a platform problem `closure_due` |
+| ok | paid again | adding works again |
+
+**Meter errors (thin events).** Stripe validates meter events later and
+reports bad ones as thin events. Stripe dashboard → Workbench → Webhooks →
+*Create new destination* → advanced: payload style **Thin**, events
+`v1.billing.meter.error_report_triggered` and `v1.billing.meter.no_meter_found`,
+URL = the same `https://<host>/api/stripe/webhook`. Put its signing secret in
+`STRIPE_THIN_WEBHOOK_SECRET`. AccessX fetches the full event
+(`GET /v2/core/events/:id`; a failed fetch answers 502 so Stripe retries),
+maps each sample error's `identifier` (`<tenant>:<meter>:<key>`) to the
+report row (`billing_reports.error`) and opens a platform problem. Test with
+`stripe trigger v1.billing.meter.error_report_triggered`.
+
+**Platform problems** (`billing_problems`, one row per key, never repeated):
+`meter_error`, `unsent_reports` (a report Stripe has not taken for 24 h,
+checked by each tenant's maintenance run), `closure_due`. With
+`PLATFORM_ALERT_WEBHOOK` (https; Slack-compatible `{text}`) new problems are
+posted once, batched. `GET /api/platform/billing` lists open problems and the
+subscribed tenants worst-first (stage, usage, estimate, unsent and failed
+reports); `POST /api/platform/billing/problems/:key/resolve {note}` closes
+one. Both need `PLATFORM_TOKEN`.
+
+**Estimate.** Per-unit Stripe prices (`GET /v1/prices/:id`, cached for an
+hour) times this month's door-days and SMS segments, before tax and
+discounts; shown to the owner (People → Billing, with the per-door-month
+price) and on the platform views. Tiered or non-per-unit prices show no
+estimate rather than a wrong one. The Stripe invoice is what counts.
 

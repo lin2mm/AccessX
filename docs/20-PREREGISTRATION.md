@@ -53,7 +53,7 @@ at reception typing it in.
    codes/texts only ever go to addresses an operator typed in. The draft's
    "60 submissions per hour" counter was dropped in favour of per-IP limits
    at the edge (Cloudflare rate limiting on `/api/visit-invite`, see
-   `docs/SECURITY-TESTING.md`). Code creation goes through the tenant's write
+   `docs/30-SECURITY-TESTING.md`). Code creation goes through the tenant's write
    queue like every other write.
 5. **Reception approval for sensitive sites.** `requireApproval` defaults
    to **on** when the site has any sensitive door group (only an owner may

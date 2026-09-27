@@ -386,13 +386,16 @@ async function loadBilling(){
   const warn=st&&(st.restricted||st.restrictsInDays!==null&&st.restrictsInDays!==undefined);
   $('#billing-banner').hidden=!warn;
   if(!b)return;
-  if(warn)$('#billing-banner').innerHTML=st.restricted
+  if(warn)$('#billing-banner').innerHTML=b.stage==='closure'
+    ?`<span class="tag r">billing</span> <b>The account is due for closure.</b> Doors keep working until then; closure comes with 30 days' written notice. Keep what you need now (Activity → Audit export, Evidence pack) and <a href="#" data-goto-billing>sort out billing</a>.`
+    :st.restricted
     ?`<span class="tag r">billing</span> <b>Adding people, visitors, codes and rules is paused</b> until the subscription is paid. Doors keep opening; removing access works. <a href="#" data-goto-billing>Billing</a>`
     :`<span class="tag o">billing</span> The last payment failed. Adding people and visitors pauses in <b>${Number(st.restrictsInDays)} day(s)</b> unless the card is updated. <a href="#" data-goto-billing>Billing</a>`;
   const label={none:'No subscription yet',active:'Active',trialing:'Trial',past_due:'Payment failed',unpaid:'Unpaid',canceled:'Cancelled',incomplete:'Waiting for payment',incomplete_expired:'Checkout expired',paused:'Paused'}[st.status]||st.status;
   const tag=st.restricted?'r':st.status==='active'||st.status==='trialing'?'g':st.status==='none'?'':'o';
   $('#billing-state').innerHTML=`<div><span class="tag ${tag}">${esc(label)}</span>${b.testMode?' <span class="tag">Stripe test mode</span>':''}</div>
-    <div class="meta" style="margin-top:6px">This month (${esc(b.period)}): <b>${Number(b.usage.doorDays)}</b> door-days${b.smsBilled?` · <b>${Number(b.usage.smsSegments)}</b> text segments`:''}${b.unsentReports?` · ${Number(b.unsentReports)} usage report(s) waiting to reach Stripe`:''}</div>`;
+    <div class="meta" style="margin-top:6px">This month (${esc(b.period)}): <b>${Number(b.usage.doorDays)}</b> door-days${b.smsBilled?` · <b>${Number(b.usage.smsSegments)}</b> text segments`:''}${b.unsentReports?` · ${Number(b.unsentReports)} usage report(s) waiting to reach Stripe`:''}</div>
+    ${b.estimate?`<div class="meta">Estimated so far: <b>${esc(b.estimate.currency.toUpperCase())} ${Number(b.estimate.amount).toFixed(2)}</b> before tax (${esc(b.estimate.currency.toUpperCase())} ${Number(b.estimate.perDoorMonth).toFixed(2)} per door per month${b.estimate.perSmsSegment!==null?`, ${Number(b.estimate.perSmsSegment).toFixed(3)} per text segment`:''}). The invoice from Stripe is what counts.</div>`:''}`;
   $('#bill-start').hidden=b.subscribed;
   $('#bill-manage').hidden=st.status==='none';
 }
@@ -721,7 +724,7 @@ $('#a-verify').addEventListener('click',async()=>{
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
 });
-const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)',lock_alarm:'Lock alarms (tamper, forced, keypad locked)',door_left_open:'Door left open',battery_low:'Lock batteries (low or running out)',callback_silent:'TTLock callback stopped'};
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected',visitor_arrived:'Visitor arrivals (names the visitor)',lock_alarm:'Lock alarms (tamper, forced, keypad locked)',door_left_open:'Door left open',battery_low:'Lock batteries (low or running out)',callback_silent:'TTLock callback stopped',billing_problem:'Billing (payment failed, adding paused, closure notice)'};
 async function loadAlerts(){
   const r=await api('/api/alerts');
   $('#alerts-box').hidden=!r.ok;
