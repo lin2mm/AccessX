@@ -11,7 +11,7 @@ one busy front desk).
 
 | Item | How to check |
 |---|---|
-| Migrations applied remotely **before** deploying | `npm run cf:db:migrate:remote`, then `npm run cf:deploy` |
+| Migrations applied remotely **before** deploying | automatic: every build runs `npm run deploy` (migrate → deploy → health check), [13-CLOUDFLARE-GIT-DEPLOY.md](13-CLOUDFLARE-GIT-DEPLOY.md) |
 | `SECRETS_KEY`, `PUBLIC_URL` set | Visitors → Settings says "Visitors get a self check-out link" |
 | TTLock callback | `TTLOCK_NOTIFY_SECRET` set; TTLock developer console → your app → Callback URL `https://<host>/api/ttlock/notify/<secret>`. Unlock any managed door with the app: Visitors → Settings shows **Last message from TTLock** within a minute |
 | SMS | Twilio env set; Visitors → Settings → **Send test text** to your own phone. Cap: `SMS_MONTHLY_CAP` |

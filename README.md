@@ -47,6 +47,14 @@ The hosted build serves the PWA as static assets, the API from a Worker, and
 state from D1 (one Durable Object per tenant serialises writes). The default
 tenant uses demo locks; tenants that connect a TTLock or Nuki account use real ones.
 
+**Production deploys from GitHub:** the repository is connected to Cloudflare
+Workers Builds, and every merge to `main` runs `npm run deploy`. That finds or
+creates the D1 database by name, applies migrations, deploys and checks
+`/api/healthz`. Dashboard settings, secrets and rollback:
+[docs/13-CLOUDFLARE-GIT-DEPLOY.md](docs/13-CLOUDFLARE-GIT-DEPLOY.md).
+
+By hand, or locally:
+
 1. Install dependencies and log Wrangler in:
 
    ```sh
@@ -54,32 +62,28 @@ tenant uses demo locks; tenants that connect a TTLock or Nuki account use real o
    npx wrangler login
    ```
 
-2. Create a D1 database, then copy its `database_id` into `wrangler.jsonc`:
+2. Local Worker: apply the schema to a local D1, write test variables, start:
 
    ```sh
-   npx wrangler d1 create accessx-demo
+   npm run cf:db:migrate:local
+   node support/dev-vars.js      # .dev.vars with test tokens and AUTH_OPEN_READS=1
+   npm run dev:cloudflare
    ```
 
    The rate-limit bindings `RL_NOTIFY` / `RL_PUBLIC` in `wrangler.jsonc` use
    `namespace_id` 4101 and 4102; change them if another Worker in your
    Cloudflare account already uses those numbers.
 
-3. Apply the schema locally before `npm run dev:cloudflare`, or remotely before
-   deployment (**always migrate before deploying new code**; `0003` moves the
-   old JSON blob into tables on the first request and copies the audit chain
-   unchanged):
+3. Deploy (**migrations always go first**; `npm run deploy` does it in that
+   order and fails if the new version is not healthy):
 
    ```sh
-   npm run cf:db:migrate:local
-   npm run cf:db:migrate:remote
+   npm run deploy               # or: npm run deploy -- --dry-run
    ```
 
-4. Set an admin token as a Cloudflare secret and deploy:
-
-   ```sh
-   npx wrangler secret put ADMIN_TOKEN
-   npm run cf:deploy
-   ```
+   Secrets go in the dashboard (Settings → Variables & Secrets) or via
+   `npx wrangler secret put ADMIN_TOKEN`. `"keep_vars": true` keeps them across
+   deploys.
 
    The Worker's cron trigger (`*/15 * * * *`) runs the credential reconciler and
    each tenant's maintenance (alert retries, lock health, audit anchors, visitor
@@ -87,9 +91,9 @@ tenant uses demo locks; tenants that connect a TTLock or Nuki account use real o
 
 Do not enable public writes. For live lock data, this prototype still needs a
 separate production security review. Before a real deployment, work through
-[docs/12-GO-LIVE.md](docs/12-GO-LIVE.md): the shipped `wrangler.jsonc` is a
-**demo** config (placeholder D1 id, `AUTH_OPEN_READS=1`) and `npm run doctor -- --worker`
-fails it until you change both.
+[docs/12-GO-LIVE.md](docs/12-GO-LIVE.md). Since R23 the shipped `wrangler.jsonc`
+deploys closed: no anonymous reads, no placeholder D1 id. A public demo sets
+`AUTH_OPEN_READS=1` in the dashboard.
 
 ## Configuration
 

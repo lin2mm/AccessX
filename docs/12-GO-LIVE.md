@@ -1,10 +1,13 @@
 # 12 · Going live
 
-Status: current (R14, 2026-09-27). Owner: whoever deploys and runs AccessX.
+Status: current (R14, 2026-09-27; deploy steps R23).  Owner: whoever deploys and runs AccessX.
 
 What to do between "it works on my machine" and "an office relies on it":
 check the configuration, watch it, and prove backups restore. About 2 hours
 the first time, plus waiting for DNS and the TTLock callback.
+
+Deploying itself (GitHub → Cloudflare, dashboard settings, secrets, rollback):
+[13-CLOUDFLARE-GIT-DEPLOY.md](13-CLOUDFLARE-GIT-DEPLOY.md). Steps 1–3 and 8 below happen there.
 
 Related: [10-PILOT.md](10-PILOT.md) (real locks), [11-OFFICE-SETUP.md](11-OFFICE-SETUP.md)
 (one office), [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) (pentest, rate limits),
@@ -14,14 +17,14 @@ Related: [10-PILOT.md](10-PILOT.md) (real locks), [11-OFFICE-SETUP.md](11-OFFICE
 
 | # | Step | How | Done when |
 |---|---|---|---|
-| 1 | Real database | `npx wrangler d1 create accessx` → put its name and id in `wrangler.jsonc` (`database_name`, `database_id`). The `cf:db:*` scripts and `npm run backup -- d1` use the binding `DB`, so they follow | doctor: `wrangler.d1` ok |
-| 2 | Close the demo | `wrangler.jsonc` `"vars": { "AUTH_OPEN_READS": "0" }` | doctor: `AUTH_OPEN_READS` ok |
-| 3 | Secrets | `npx wrangler secret put` for `ADMIN_TOKEN`, `SECRETS_KEY`, `PLATFORM_TOKEN` (each `openssl rand -base64 32`) | keep `SECRETS_KEY` **offline too**: without it, a restored backup cannot open TTLock tokens, SSO secrets or alert webhooks |
+| 1 | Real database | automatic: the first `npm run deploy` (the Git build) creates D1 `accessx-demo` and every later deploy finds it by name. The repo has no `database_id`; `wrangler.deploy.jsonc` (gitignored) gets the real one. Region: build variable `D1_LOCATION` before the first build | build log `D1 "accessx-demo" created` / `found` |
+| 2 | Demo closed | nothing to do since R23: `wrangler.jsonc` no longer sets `AUTH_OPEN_READS`, and a doctor check fails the build if it comes back. Set it in the dashboard only for a public demo | doctor: `AUTH_OPEN_READS` ok |
+| 3 | Secrets | dashboard → Settings → Variables & Secrets (or `npx wrangler secret put`) for `ADMIN_TOKEN`, `SECRETS_KEY`, `PLATFORM_TOKEN` (each `openssl rand -base64 32`, generated on your own computer): [13](13-CLOUDFLARE-GIT-DEPLOY.md) section 3 | keep `SECRETS_KEY` **offline too**: without it, a restored backup cannot open TTLock tokens, SSO secrets or alert webhooks |
 | 4 | Links and disclosure | vars `PUBLIC_URL=https://doors.<you>`, `SECURITY_CONTACT=mailto:security@<you>` | `/.well-known/security.txt` answers |
 | 5 | Locks | `TTLOCK_CLIENT_ID`, `TTLOCK_CLIENT_SECRET`, `TTLOCK_NOTIFY_SECRET`; callback URL `https://<host>/api/ttlock/notify/<secret>` in the TTLock console | a test unlock shows up within seconds |
 | 6 | Mail (SMS optional) | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` (SPF/DKIM on the sending domain); Twilio + `SMS_MONTHLY_CAP` | a visitor invite arrives |
 | 7 | Audit evidence | `npm run audit:keygen` → `AUDIT_SIGNING_KEY`; anchor webhook in *Settings → Audit* | first daily anchor delivered |
-| 8 | Migrate, deploy | `npm run cf:db:migrate:remote`, then `npm run cf:deploy` (always in that order) | `GET /api/healthz` → 200 |
+| 8 | Migrate, deploy | merge to `main`: the build runs `npm run deploy` = migrate, deploy, health check, in that order (by hand: `npm run deploy`) | build log `[deploy] healthy:` |
 | 9 | Doctor on the live site | `npm run doctor -- --url https://<host> --platform-token …` | `✓ ready`, warnings understood |
 | 10 | Monitor | uptime check on `/api/healthz` (section 3) | test alert received |
 | 11 | Backup drill | R2 bucket bound as `BACKUPS`, `POST /api/platform/backups/run`, download, `npm run backup -- verify` (section 4) | `✓ restorable`, date written in section 6 |
@@ -147,14 +150,14 @@ sealed, not plain text, and need the same `SECRETS_KEY`.
 **Restore, Cloudflare (Time Travel):**
 
 ```sh
-npx wrangler d1 time-travel info accessx --timestamp "2026-10-20T09:00:00+11:00"   # find the bookmark
-npx wrangler d1 time-travel restore accessx --timestamp "2026-10-20T09:00:00+11:00" # prints an undo bookmark: keep it
+npx wrangler d1 time-travel info accessx-demo --timestamp "2026-10-20T09:00:00+11:00"   # find the bookmark
+npx wrangler d1 time-travel restore accessx-demo --timestamp "2026-10-20T09:00:00+11:00" # prints an undo bookmark: keep it
 ```
 
 **Restore, Cloudflare (from an export):** `npx wrangler d1 create accessx-restore`,
 then `npx wrangler d1 execute accessx-restore --remote --file backups/d1-….sql`
 (an R2 copy: `gunzip -k accessx-….sql.gz` first).
-Put the new id in `wrangler.jsonc`, run `npm run cf:db:migrate:remote`, then deploy.
+Switch the Worker to it: set `"database_name": "accessx-restore"` in `wrangler.jsonc` and merge. The build finds it by name, migrates and deploys. (Or rename nothing and restore with Time Travel above, which keeps the same database.)
 
 **Restore, Node:** stop the service; move `accessx.sqlite`, `-wal` and `-shm`
 aside; copy the backup to `$DATA_DIR/accessx.sqlite`; start (migrations apply

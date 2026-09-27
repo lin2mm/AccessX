@@ -35,6 +35,7 @@
 | [10-PILOT.md](10-PILOT.md) | 用真实锁试点的步骤与检查 | 实施 |
 | [11-OFFICE-SETUP.md](11-OFFICE-SETUP.md) | 办公室 45 分钟安装指南 | 实施、客户 |
 | [12-GO-LIVE.md](12-GO-LIVE.md) | 上线清单、`npm run doctor`、健康检查与监控、日志、备份与恢复演练 | 部署与运维 |
+| [13-CLOUDFLARE-GIT-DEPLOY.md](13-CLOUDFLARE-GIT-DEPLOY.md) | GitHub → Cloudflare 自动部署：控制台设置、D1 权限、运行时密钥、构建失败对照表、回滚 | 部署（合并到 main 就是上线） |
 | [20-PREREGISTRATION.md](20-PREREGISTRATION.md) | 访客预登记设计 | 产品、开发 |
 | [21-SIGNUP.md](21-SIGNUP.md) | 自助开通（注册 → 邮件确认 → 新租户 + 所有者）、防滥用规则、演示租户一键重置 | 产品、开发、平台运维 |
 | [22-KIOSK.md](22-KIOSK.md) | 前台平板：访客自助签到 / 临时访客 / 签退、手机二维码、到访须知、打印名单；注册页 Turnstile 人机验证 | 前台、产品、开发 |
