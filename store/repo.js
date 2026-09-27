@@ -62,6 +62,8 @@ const COLLECTIONS = {
       type: 'type', userId: 'user_id', lockId: ['lock_id', i], siteId: 'site_id', startAt: 'start_at', endAt: 'end_at',
       enforcement: 'enforcement', rules: ['rules', j], status: 'status', vendorRef: 'vendor_ref', codeHint: 'code_hint',
       issuedBy: 'issued_by', issuedAt: 'issued_at', revokedAt: 'revoked_at', revokedBy: 'revoked_by', revokeReason: 'revoke_reason',
+      // Set for visitor codes (userId is then the host, see credentials-core review).
+      visitId: 'visit_id',
     },
   },
 };

@@ -69,6 +69,10 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     await call('POST', '/api/doorGroups', { ...ownerA, body: { name: 'A Vault Sensitive Doors', siteId: 'site_river', lockIds: [9003], sensitive: true } });
     const aprA = (await call('POST', '/api/passcode', { ...ownerA, body: { lockId: 9003, userId: 'u3', acknowledgeScheduleGap: true } })).body.approval;
     assert.ok(aprA && aprA.id, 'tenant A has a pending approval');
+    // A visitor (personal data outside the snapshot, in the visits table).
+    const endLocal = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(Date.now() + 6 * 36e5)).replace(' ', 'T');
+    const visA = (await call('POST', '/api/visits', { ...ownerA, body: { visitorName: 'Wanda Tenant-A-Visitor', visitorEmail: 'wanda.a-only@guest.example', company: 'A-Only Visiting Co', hostUserId: 'u1', lockIds: [9001], endLocal } })).body;
+    assert.ok(visA.visit && visA.visit.id, JSON.stringify(visA));
     const loginA = await call('POST', '/api/auth/login', { body: { token: OWNER_A } });
     const cookieA = loginA.cookies[0].split(';')[0];
 
@@ -88,6 +92,8 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     const headA0 = await store.tenant(A).auditHead();
     const opsA0 = await store.tenant(A).operators();
     const settingsA0 = await store.tenantSettings(A);
+    const visitsA = () => store.sql.all('SELECT * FROM visits WHERE tenant_id = ? ORDER BY id', [A]);
+    const visitsA0 = await visitsA();
     const bJson = JSON.stringify(await store.tenant(tb.body.tenant.id).snapshot()) + JSON.stringify(await store.tenant(tb.body.tenant.id).operators());
     const strings = new Set();
     const collect = v => {
@@ -99,6 +105,7 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     collect(snapA0.assignments); collect(snapA0.holidays); collect(snapA0.roles); collect(snapA0.credentials); collect(snapA0.directoryGroups);
     collect(opsA0.map(o => ({ id: o.id, name: o.name, email: o.email })));
     strings.add('tenant-a-client-7731'); strings.add('tenant-a-sso-secret'); strings.add(aprA.id);
+    for (const x of [visA.visit.id, 'Wanda Tenant-A-Visitor', 'wanda.a-only@guest.example', 'A-Only Visiting Co', ...visA.codes.map(c => c.code)]) strings.add(x);
     const markers = [...strings].filter(s => !bJson.includes(s));
     assert.ok(markers.length > 60, `expected plenty of A-only markers, got ${markers.length}`);
 
@@ -111,7 +118,7 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     const ids = [...new Set([
       ...pick(a.userIds, 4), su.id, ...pick(a.userGroupIds), ...pick(a.doorGroupIds), ...pick(a.siteIds), ...pick(a.scheduleIds),
       ...pick(snapA0.assignments.map(x => x.id)), ...pick(snapA0.holidays.map(x => x.id).filter(Boolean)), ...snapA0.roles.map(r => r.id).filter(id => !/^r_(owner|manager|installer|view|provisioner)$/.test(id)),
-      ...snapA0.credentials.map(c => c.id), sg.id, ...opsA0.map(o => o.id), aprA.id,
+      ...snapA0.credentials.map(c => c.id), sg.id, ...opsA0.map(o => o.id), aprA.id, visA.visit.id,
     ])];
     const locks = [9001, 9002, 9004, 9101];
 
@@ -174,12 +181,13 @@ test('cross-tenant isolation gate: tenant B cannot read or change tenant A throu
     assert.deepEqual(await store.tenant(A).auditHead(), headA0, 'tenant A audit chain changed');
     assert.deepEqual(await store.tenant(A).operators(), opsA0, 'tenant A operators changed');
     assert.deepEqual(await store.tenantSettings(A), settingsA0, 'tenant A settings changed');
+    assert.deepEqual(await visitsA(), visitsA0, 'tenant A visits changed');
     assert.equal((await call('GET', '/api/me', { headers: { cookie: cookieA } })).status, 200, "tenant A's session was ended");
     assert.equal((await scimA('GET', `/Users/${su.id}`)).status, 200);
     // ---- B never succeeded at anything on A's ids
     const bLog = (await call('GET', '/api/audit?limit=1000', { token: ownerB })).body.log;
     const aIds = new Set([...ids, ...locks.map(String)]);
-    const bad = bLog.filter(e => /^(unlock\.granted|passcode\.create|credential\.|users\.(suspend|unsuspend|delete)|scim\.|directory\.|operator\.revoke)/.test(e.action)
+    const bad = bLog.filter(e => /^(unlock\.granted|passcode\.create|credential\.|visit\.|users\.(suspend|unsuspend|delete)|scim\.|directory\.|operator\.revoke)/.test(e.action)
       && [...aIds].some(id => new RegExp(`\\b${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(e.detail)));
     assert.deepEqual(bad.map(e => `${e.action} ${e.detail}`), []);
     console.log(`# isolation gate: ${requests} requests, ${ctx.server.api.routes.length} routes + SCIM + session, ${markers.length} A-only markers, 0 leaks`);

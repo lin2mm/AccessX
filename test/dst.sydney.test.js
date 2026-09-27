@@ -114,10 +114,12 @@ test('passcode endLocal is converted in the door\'s time zone, not the admin\'s'
   const { boot } = require('../support/boot');
   const api = await boot({ ADMIN_TOKEN: 'o', TZ: 'America/Los_Angeles' });
   t.after(api.close);
-  // Riverside (seed) is Europe/London: 20 Oct is still BST (+1) → 22:59Z, whatever the server/admin zone.
+  // Riverside (seed) is Europe/London: 20 Oct is still BST (+1), whatever the server/admin zone.
+  // TTLock codes run on whole hours, so "until 23:59" is what the lock enforces: 00:00 local = 23:00Z.
   const r = await api.call('POST', '/api/passcode', { token: 'o', body: { lockId: 9002, userId: 'u2', endLocal: '2026-10-20T23:59' } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.equal(r.body.credential.endAt, '2026-10-20T22:59:00.000Z');
+  assert.equal(r.body.credential.endAt, '2026-10-20T23:00:00.000Z');
+  assert.ok(r.body.warnings.some(w => /whole hours/.test(w)), 'the operator is told');
   assert.equal((await api.call('POST', '/api/passcode', { token: 'o', body: { lockId: 9002, userId: 'u2', endLocal: 'soon' } })).status, 400);
   // The UI labels, prefills and displays in the zone /api/doors reports — it must be the one used above.
   const doors = (await api.call('GET', '/api/doors', { token: 'o' })).body.doors;

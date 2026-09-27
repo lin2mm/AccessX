@@ -54,6 +54,39 @@ const toMs = value => {
   return Number.isFinite(ms) ? ms : NaN;
 };
 
+const HOUR = 36e5;
+
+/**
+ * TTLock period passcodes (keyboardPwd/get, type 3) have two rules the lock
+ * enforces whether we like it or not (euopen.ttlock.com/doc/api/v3/keyboardPwd/get):
+ *   1. validity is whole hours ("set the minute and second to 0");
+ *   2. the code must be used once within 24 h of its start, or it is voided.
+ * So we compute the window the LOCK will actually enforce — rounded on the
+ * door's wall clock (start down, end up; never past `hardEnd`) — record that,
+ * and tell the operator when it differs from what they asked for.
+ */
+function ttlockWindow(startMs, endMs, timeZone, { hardEnd = null } = {}) {
+  const round = (t, fn) => {
+    const off = policy.offsetMs(new Date(t), timeZone) || 0;
+    return fn((t + off) / HOUR) * HOUR - off;
+  };
+  const start = round(startMs, Math.floor);
+  let end = round(endMs, Math.ceil);
+  if (hardEnd && end > hardEnd) end = round(endMs, Math.floor);
+  return { start, end, startMoved: start !== startMs, endMoved: end !== endMs };
+}
+
+const localLabel = (ms, timeZone) => policy.localParts(new Date(ms), timeZone).label;
+
+/** Warnings for the TTLock rules above (shared by passcodes and visitor codes). */
+function ttlockWarnings(win, timeZone, { explicitStart = true } = {}) {
+  const out = [];
+  if (win.startMoved && explicitStart) out.push(`starts ${localLabel(win.start, timeZone)} (TTLock codes run on whole hours)`);
+  if (win.endMoved) out.push(`valid until ${localLabel(win.end, timeZone)} (TTLock codes run on whole hours)`);
+  if (win.end - win.start > 24 * HOUR) out.push(`must be used at least once by ${localLabel(win.start + 24 * HOUR, timeZone)} (within 24 h of its start), or the lock voids it — a TTLock rule for period codes`);
+  return out;
+}
+
 /**
  * Decide whether a passcode may be issued and with which validity.
  * Returns { ok, status, error?, credential?, warnings[] }.
@@ -86,6 +119,13 @@ function planPasscode(db, { userId, lockId, startAt, endAt, acknowledgeScheduleG
   }
   if (end <= now) return { ok: false, status: 403, error: 'credential would already be expired' };
   if (end <= start) return { ok: false, status: 400, error: 'endAt must be after startAt' };
+  const site = policy.siteForLock(db, lockId);
+  const timeZone = policy.siteTimeZone(db, site ? site.id : null);
+  const win = ttlockWindow(start, end, timeZone, { hardEnd: userTo || null });
+  warnings.push(...ttlockWarnings(win, timeZone, { explicitStart: toMs(startAt) !== null }));
+  ({ start, end } = win);
+  if (end <= now) return { ok: false, status: 403, error: 'credential would already be expired' };
+  if (end <= start) return { ok: false, status: 400, error: 'on whole hours (a TTLock rule) this window is empty' };
 
   const fullyEnforceable = rules.some(r => isAlwaysOpen(r.schedule));
   const enforcement = fullyEnforceable ? ENFORCEMENT.LOCK : ENFORCEMENT.PARTIAL;
@@ -101,7 +141,6 @@ function planPasscode(db, { userId, lockId, startAt, endAt, acknowledgeScheduleG
     warnings.push(gap);
   }
 
-  const site = policy.siteForLock(db, lockId);
   return {
     ok: true,
     warnings,
@@ -143,7 +182,12 @@ function reviewCredentials(db, now = Date.now()) {
     if (cred.status !== 'active') continue;
     const reasons = [];
     const user = (db.users || []).find(u => u.id === cred.userId);
-    if (!user) reasons.push('user deleted');
+    if (cred.visitId) {
+      // Visitor code: authorised by the visit, not by rules. It follows its
+      // host — a host who is suspended or removed takes their visitors' access with them.
+      if (!user) reasons.push('host deleted');
+      else if (user.suspended) reasons.push('host suspended');
+    } else if (!user) reasons.push('user deleted');
     else {
       if (user.suspended) reasons.push('user suspended');
       const userTo = toMs(user.validTo);
@@ -166,4 +210,4 @@ function revoke(db, id, { revokedBy, reason = 'manual' }) {
   return cred;
 }
 
-module.exports = { LIMITS, ENFORCEMENT, isAlwaysOpen, grantingRules, planPasscode, register, reviewCredentials, revoke };
+module.exports = { LIMITS, ENFORCEMENT, isAlwaysOpen, grantingRules, planPasscode, register, reviewCredentials, revoke, ttlockWindow, ttlockWarnings };

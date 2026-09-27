@@ -24,6 +24,7 @@ const PERMS = {
   'diag.read': 'Installer diagnostics',
   'door.commission': 'Commission / decommission hardware',
   'directory.sync': 'Provision people and groups from a directory (SCIM)',
+  'visitor.manage': 'Register visitors and give them time-limited door codes (site-scoped; implied by credential.issue)',
 };
 
 const OWNER = '*';
@@ -36,6 +37,8 @@ const DEFAULT_ROLES = [
   { id: 'r_manager', name: 'Site Manager', perms: ['door.read', 'door.unlock', 'credential.issue', 'user.manage', 'report.read', 'audit.read'] },
   { id: 'r_installer', name: 'Installer', perms: ['door.read', 'door.commission', 'diag.read'] },
   { id: 'r_view', name: 'Auditor', perms: ['door.read', 'report.read', 'audit.read'] },
+  // Reception: visitors only — no rules, no people, no reports, no sensitive doors.
+  { id: 'r_front_desk', name: 'Front Desk', perms: ['door.read', 'visitor.manage'] },
   // Machine identity for Entra ID / Okta / Google. It can only reach /scim/v2.
   { id: 'r_provisioner', name: 'Directory sync (SCIM)', perms: ['directory.sync'] },
 ];
@@ -79,6 +82,10 @@ const ROUTES = [
   ['POST', /^\/api\/evaluate$/, 'report.read'],
   ['GET', /^\/api\/users\/[^/]+\/doors$/, 'report.read'],
   ['POST', /^\/api\/passcode$/, 'credential.issue'],
+  ['GET', /^\/api\/visits(\/hosts|\/settings)?$/, 'visitor.manage'],
+  ['POST', /^\/api\/visits$/, 'visitor.manage'],
+  ['POST', /^\/api\/visits\/[^/]+\/(checkout|cancel|erase)$/, 'visitor.manage'],
+  ['PUT', /^\/api\/visits\/settings$/, OWNER],
   // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
   // the RBAC coverage gate fails for any route that falls through to the default.
   ['GET', /^\/api\/sso$/, OWNER], ['PUT', /^\/api\/sso$/, OWNER], ['DELETE', /^\/api\/sso$/, OWNER],
@@ -147,6 +154,8 @@ function hasPermission(db, operator, perm) {
   const perms = permsFor(db, operator);
   if (perms.includes('*')) return true;
   if (perm === OWNER) return false;
+  // Anyone who may issue codes to staff may register a visitor (a narrower power).
+  if (perm === 'visitor.manage' && perms.includes('credential.issue')) return true;
   return perms.includes(perm);
 }
 

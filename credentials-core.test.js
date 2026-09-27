@@ -87,3 +87,25 @@ test('isAlwaysOpen recognises 24/7 schedules only', () => {
   assert.equal(creds.isAlwaysOpen(db().schedules[0]), false);
   assert.equal(creds.isAlwaysOpen({ ...db().schedules[1], denyOnHolidays: true }), false);
 });
+
+test('TTLock windows: whole hours on the door clock, never past validTo, 24 h first-use rule surfaced', () => {
+  const H = 36e5;
+  // London (BST, +1): 09:30 → 09:00, 17:10 → 18:00.
+  const w = creds.ttlockWindow(Date.parse('2026-10-05T08:30:00Z'), Date.parse('2026-10-05T16:10:00Z'), 'Europe/London');
+  assert.equal(new Date(w.start).toISOString(), '2026-10-05T08:00:00.000Z');
+  assert.equal(new Date(w.end).toISOString(), '2026-10-05T17:00:00.000Z');
+  // Adelaide (+10:30 in October): whole hours on the LOCAL clock are :30 in UTC.
+  const a = creds.ttlockWindow(Date.parse('2026-10-05T00:10:00Z'), Date.parse('2026-10-05T05:00:00Z'), 'Australia/Adelaide');
+  assert.equal(new Date(a.start).toISOString(), '2026-10-04T23:30:00.000Z'); // 10:00 local
+  assert.equal(new Date(a.end).toISOString(), '2026-10-05T05:30:00.000Z');   // 16:00 local
+  // Rounding up would pass a hard end (the user's validTo): round down instead.
+  const hard = Date.parse('2026-10-05T16:10:00Z');
+  assert.equal(new Date(creds.ttlockWindow(Date.parse('2026-10-05T08:00:00Z'), hard, 'Europe/London', { hardEnd: hard }).end).toISOString(), '2026-10-05T16:00:00.000Z');
+  // Already whole: untouched, no warnings.
+  const exact = creds.ttlockWindow(Date.parse('2026-10-05T08:00:00Z'), Date.parse('2026-10-05T17:00:00Z'), 'Europe/London');
+  assert.deepEqual(creds.ttlockWarnings(exact, 'Europe/London'), []);
+  // Longer than 24 h: the first-use rule is spelled out with the deadline on the door clock.
+  const long = creds.ttlockWindow(Date.parse('2026-10-05T08:00:00Z'), Date.parse('2026-10-07T17:00:00Z'), 'Europe/London');
+  assert.match(creds.ttlockWarnings(long, 'Europe/London').join(' '), /by 2026-10-06 09:00.*within 24 h/);
+  assert.ok(long.end - long.start > 24 * H);
+});

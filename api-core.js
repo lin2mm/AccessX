@@ -13,6 +13,7 @@
 const rbac = require('./rbac-core');
 const policy = require('./policy-core');
 const creds = require('./credentials-core');
+const visitors = require('./visitors-core');
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -230,7 +231,11 @@ function createApi({
   // --- identity ------------------------------------------------------
   route('POST', /^\/api\/auth\/verify$/, async ctx => ({ authenticated: true, operator: rbac.describe(await ctx.snap(), ctx.operator), tenant: (await ctx.snap()).tenant }));
   route('GET', /^\/api\/me$/, async ctx => ({ operator: rbac.describe(await ctx.snap(), ctx.operator), tenant: (await ctx.snap()).tenant }));
-  route('GET', /^\/api\/permissions$/, async ctx => ({ perms: rbac.PERMS, roles: (await ctx.snap()).roles }));
+  route('GET', /^\/api\/permissions$/, async ctx => {
+    // Built-in roles added after a tenant was created (e.g. r_front_desk) are assignable too.
+    const stored = (await ctx.snap()).roles;
+    return { perms: rbac.PERMS, roles: [...stored, ...rbac.DEFAULT_ROLES.filter(d => !stored.some(r => r.id === d.id)).map(d => ({ ...d, builtIn: true }))] };
+  });
   route('GET', /^\/api\/status$/, async ctx => ({ ...ctx.vendor.status(), tenant: (await ctx.snap()).tenant }));
 
   // --- doors ---------------------------------------------------------
@@ -620,6 +625,191 @@ function createApi({
       .commit();
     // The full code is returned exactly once and never stored.
     return { passcode: out, credential: entry, warnings: plan.warnings };
+  });
+
+  // --- visitors ----------------------------------------------------------
+  // A visit's codes are ordinary credentials (visitId set, userId = host), so
+  // review, reconcile, removal SLA and the revocation report cover them.
+  const emailAvailable = () => Boolean(alerts && alerts.emailAvailable);
+  const doorName = (locks, id) => { const l = locks.find(x => Number(x.lockId) === Number(id)); return (l && l.lockAlias) || `Lock ${id}`; };
+  const visitVisible = (ctx, v) => ctx.scope.all || v.lockIds.every(l => ctx.scope.lock(l));
+  const visitView = (snap, v, now = Date.now()) => {
+    const host = snap.users.find(u => u.id === v.hostUserId);
+    const site = snap.sites.find(x => x.id === v.siteId);
+    return {
+      ...v, state: visitors.stateOf(v, now), hostName: host ? host.name : null, siteName: site ? site.name : null,
+      timeZone: policy.siteTimeZone(snap, v.siteId),
+      codes: snap.credentials.filter(c => c.visitId === v.id).map(c => ({ credentialId: c.id, lockId: c.lockId, status: c.status, codeHint: c.codeHint })),
+    };
+  };
+  async function loadVisit(ctx, id) {
+    const row = await store.sql.first('SELECT * FROM visits WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
+    const v = row ? visitors.rowToVisit(row) : null;
+    if (!v || !visitVisible(ctx, v)) throw new HttpError(404, 'not found');
+    return v;
+  }
+
+  route('GET', /^\/api\/visits$/, async ctx => {
+    const snap = await ctx.snap();
+    const now = Date.now();
+    const range = ctx.query.get('range') || 'current';
+    // current = not over yet, or ended in the last 24 h; recent = last 30 days.
+    const since = range === 'all' ? null : new Date(now - (range === 'recent' ? 30 : 1) * 864e5).toISOString();
+    const rows = await store.sql.all(`SELECT * FROM visits WHERE tenant_id = ?${since ? ' AND end_at >= ?' : ''} ORDER BY start_at DESC LIMIT 200`,
+      since ? [ctx.tenantId, since] : [ctx.tenantId]);
+    return {
+      visits: rows.map(visitors.rowToVisit).filter(v => visitVisible(ctx, v)).map(v => visitView(snap, v, now)),
+      settings: { ...visitors.settingsOf(snap.settings), emailAvailable: emailAvailable() },
+    };
+  });
+
+  // Just enough to pick a host: the front desk has no report.read.
+  route('GET', /^\/api\/visits\/hosts$/, async ctx => {
+    const snap = await ctx.snap();
+    return { hosts: snap.users.filter(u => !u.suspended && ctx.scope.userVisible(u)).map(u => ({ id: u.id, name: u.name })).sort((a, b) => String(a.name).localeCompare(String(b.name))) };
+  });
+
+  route('GET', /^\/api\/visits\/settings$/, async ctx => ({
+    ...visitors.settingsOf((await ctx.snap()).settings), emailAvailable: emailAvailable(), limits: visitors.LIMITS,
+  }));
+
+  route('PUT', /^\/api\/visits\/settings$/, async ctx => {
+    const v = visitors.validateSettings(ctx.body || {});
+    if (!v.ok) throw new HttpError(400, v.error);
+    const next = { ...visitors.settingsOf((await store.tenantSettings(ctx.tenantId)) || {}), ...v.value };
+    // json_set: only this key, a concurrent SSO/alerts change is never overwritten.
+    await ctx.t.unit().raw("UPDATE tenants SET settings = json_set(COALESCE(settings, '{}'), '$.visitors', json(?)) WHERE id = ?", [JSON.stringify(next), ctx.tenantId])
+      .audit('visits.settings', `maxHours=${next.maxHours} retentionDays=${next.retentionDays}`, ctx.actor).commit();
+    return { ...next, emailAvailable: emailAvailable(), limits: visitors.LIMITS };
+  });
+
+  route('POST', /^\/api\/visits$/, async ctx => {
+    const snap = await ctx.snap();
+    const body = ctx.body || {};
+    // Tenant fleet first (a lock id from another tenant is "unknown", never "forbidden").
+    const lockIds = Array.isArray(body.lockIds) ? [...new Set(body.lockIds.map(Number))] : [];
+    for (const id of lockIds.slice(0, visitors.LIMITS.maxDoors)) if (Number.isFinite(id)) await ctx.requireLock(id);
+    const plan = visitors.planVisit(snap, body, {
+      sensitive: sensitiveLockSet(snap), canSeeLock: id => ctx.scope.lock(id), canSeeUser: u => ctx.scope.userVisible(u),
+    });
+    if (!plan.ok) {
+      const { ok: _ok, status, error, ...rest } = plan;
+      throw new HttpError(status, error, rest);
+    }
+    const v = plan.visit;
+    const id = policy.uid('vis');
+    const locks = await ctx.vendor.listLocks();
+    const created = [];
+    try {
+      for (const lockId of v.lockIds) {
+        // Only the visit id goes to the lock vendor — no visitor name (data minimisation).
+        const out = await ctx.vendor.createPasscode({ lockId, name: `AccessX visit ${id}`, startAt: v.startAt, endAt: v.endAt });
+        created.push({ lockId, out });
+      }
+    } catch (error) {
+      // Codes already on locks must not be left untracked: remove what we can, record the rest.
+      const uow = ctx.t.unit();
+      for (const { lockId, out } of created) {
+        const lock = locks.find(l => Number(l.lockId) === lockId);
+        let status = 'pending_removal';
+        if (lock && lock.hasGateway) { try { await ctx.vendor.deletePasscode(lockId, out.keyboardPwdId); status = 'revoked'; } catch { /* stays pending_removal */ } }
+        const entry = creds.register({ credentials: [] }, { type: 'passcode', userId: v.hostUserId, lockId, siteId: v.siteId, startAt: v.startAt, endAt: v.endAt, enforcement: creds.ENFORCEMENT.LOCK, rules: [`visitor (visit ${id}, creation failed)`] }, { issuedBy: ctx.actor, vendorRef: out.keyboardPwdId, code: out.keyboardPwd });
+        Object.assign(entry, { vendorRef: out.keyboardPwdId === undefined || out.keyboardPwdId === null ? null : String(out.keyboardPwdId), visitId: id, status, revokedAt: new Date().toISOString(), revokedBy: ctx.actor, revokeReason: 'visit creation failed' });
+        uow.insert('credentials', entry).audit(status === 'revoked' ? 'credential.revoke' : 'credential.pending_removal', `${entry.id} lock ${lockId} user ${v.hostUserId}: visit ${id} creation failed`, ctx.actor);
+      }
+      if (created.length) await uow.commit();
+      throw error;
+    }
+    const now = new Date().toISOString();
+    const host = plan.host;
+    const uow = ctx.t.unit().raw(
+      'INSERT INTO visits (tenant_id, id, visitor_name, visitor_email, company, host_user_id, site_id, lock_ids, start_at, end_at, status, delivery, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ctx.tenantId, id, v.visitorName, v.visitorEmail, v.company, v.hostUserId, v.siteId, JSON.stringify(v.lockIds), v.startAt, v.endAt, 'scheduled', 'shown', ctx.actor, now]);
+    const entries = created.map(({ lockId, out }) => {
+      const entry = creds.register({ credentials: [] }, {
+        type: 'passcode', userId: v.hostUserId, lockId, siteId: v.siteId, startAt: v.startAt, endAt: v.endAt,
+        enforcement: creds.ENFORCEMENT.LOCK, rules: [`visitor (host ${host.name || host.id})`], status: 'active',
+      }, { issuedBy: ctx.actor, vendorRef: out.keyboardPwdId, code: out.keyboardPwd });
+      entry.vendorRef = out.keyboardPwdId === undefined || out.keyboardPwdId === null ? null : String(out.keyboardPwdId);
+      entry.visitId = id;
+      uow.insert('credentials', entry).audit('passcode.create', `${entry.id} lock ${lockId} user ${v.hostUserId} visit ${id} ${v.startAt}..${v.endAt} enforcement=lock`, ctx.actor);
+      return entry;
+    });
+    // No personal data in the audit chain: it cannot be erased later.
+    uow.audit('visit.create', `${id} host ${v.hostUserId} locks ${v.lockIds.join(',')} ${v.startAt}..${v.endAt} credentials ${entries.map(e => e.id).join(',')}` +
+      (plan.warnings.length ? ` warnings: ${plan.warnings.join(' | ')}` : ''), ctx.actor);
+    await uow.commit();
+
+    const codes = created.map(({ lockId, out }) => ({ lockId, door: doorName(locks, lockId), code: String(out.keyboardPwd) }));
+    const warnings = [...plan.warnings];
+    let delivery = 'shown';
+    if (body.sendCode === true) {
+      // Sent only AFTER the codes are recorded; never queued (a queue would store the code).
+      if (!v.visitorEmail) warnings.push('no visitor email: hand the code over yourself');
+      else if (!emailAvailable()) warnings.push('email is not configured on this server: hand the code over yourself');
+      else {
+        const site = snap.sites.find(x => x.id === v.siteId);
+        const msg = visitors.invitationEmail({ visit: v, hostName: host.name || 'Your host', siteName: site ? site.name : null, doors: codes.map(c => ({ name: c.door, code: c.code })), timeZone: plan.timeZone, tenantName: snap.tenant && snap.tenant.name });
+        const result = await alerts.emailTo(v.visitorEmail, msg, `visit-${id}`);
+        delivery = result === 'delivered' ? 'emailed' : 'email_failed';
+        if (delivery === 'email_failed') warnings.push(`the email could not be sent (${result}): hand the code over yourself`);
+        await ctx.t.unit().raw('UPDATE visits SET delivery = ? WHERE tenant_id = ? AND id = ?', [delivery, ctx.tenantId, id])
+          .audit(delivery === 'emailed' ? 'visit.code_emailed' : 'visit.email_failed', `${id}${delivery === 'emailed' ? '' : `: ${result}`}`, ctx.actor).commit();
+      }
+    }
+    const visit = { id, ...v, status: 'scheduled', delivery, createdBy: ctx.actor, createdAt: now, endedAt: null, endedBy: null, erased: false, erasedAt: null };
+    // The codes are returned exactly once and never stored.
+    return { visit: visitView({ ...snap, credentials: entries }, visit), codes, delivery, warnings };
+  });
+
+  route('POST', /^\/api\/visits\/([^/]+)\/(checkout|cancel)$/, async (ctx, [id, verb]) => {
+    const v = await loadVisit(ctx, id);
+    if (v.status !== 'scheduled') throw new HttpError(409, `visit is already ${v.status.replace('_', ' ')}`);
+    const snap = await ctx.snap();
+    const locks = await ctx.vendor.listLocks();
+    const at = new Date().toISOString();
+    const reason = verb === 'cancel' ? 'visit cancelled' : 'visitor checked out';
+    const uow = ctx.t.unit();
+    const stillValid = [];
+    let failure = null;
+    for (const cred of snap.credentials.filter(c => c.visitId === id && c.status === 'active')) {
+      const lock = locks.find(l => Number(l.lockId) === Number(cred.lockId));
+      if (lock && lock.hasGateway) {
+        try {
+          if (cred.vendorRef) await ctx.vendor.deletePasscode(cred.lockId, cred.vendorRef);
+        } catch (error) { failure = failure || error; continue; }
+        uow.update('credentials', cred.id, { status: 'revoked', revokedAt: at, revokedBy: ctx.actor, revokeReason: reason })
+          .audit('credential.revoke', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}`, ctx.actor);
+      } else {
+        uow.update('credentials', cred.id, { status: 'pending_removal', revokedAt: at, revokedBy: ctx.actor, revokeReason: reason })
+          .audit('credential.pending_removal', `${cred.id} lock ${cred.lockId} user ${cred.userId} visit ${id}: no gateway, on-site removal required`, ctx.actor);
+        stillValid.push({ credentialId: cred.id, lockId: cred.lockId, door: doorName(locks, cred.lockId), until: cred.endAt });
+      }
+    }
+    if (failure) {
+      // Keep what worked; the visit stays open so a retry finishes the job (already-revoked codes are skipped).
+      await uow.commit();
+      throw failure;
+    }
+    const status = verb === 'cancel' ? 'cancelled' : 'checked_out';
+    await uow.raw("UPDATE visits SET status = ?, ended_at = ?, ended_by = ? WHERE tenant_id = ? AND id = ? AND status = 'scheduled'", [status, at, ctx.actor, ctx.tenantId, id])
+      .audit(`visit.${verb}`, `${id}${stillValid.length ? ` still valid on locks ${stillValid.map(s => s.lockId).join(',')} until removed on site` : ''}`, ctx.actor).commit();
+    const after = await ctx.t.snapshot();
+    return {
+      visit: visitView(after, { ...v, status, endedAt: at, endedBy: ctx.actor }),
+      stillValid,
+      warnings: stillValid.map(s => `${s.door} has no gateway: the code keeps working until ${s.until} unless removed at the lock (then confirm it under Access → Credentials)`),
+    };
+  });
+
+  // Right to erasure: the visit (who/when/which doors, by id) stays; the person's details go.
+  route('POST', /^\/api\/visits\/([^/]+)\/erase$/, async (ctx, [id]) => {
+    const v = await loadVisit(ctx, id);
+    if (v.erased) return { visit: visitView(await ctx.snap(), v) };
+    const at = new Date().toISOString();
+    await ctx.t.unit().raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND id = ?', [at, ctx.tenantId, id])
+      .audit('visit.erased', `${id} (on request)`, ctx.actor).commit();
+    return { visit: visitView(await ctx.snap(), { ...v, visitorName: null, visitorEmail: null, company: null, erased: true, erasedAt: at }) };
   });
 
   route('GET', /^\/api\/credentials$/, async ctx => {
@@ -1508,6 +1698,20 @@ function createApi({
     if (alerts) {
       const f = await alerts.flush(tenantId);
       if (f.retried || f.error) out.alerts = f;
+    }
+    try {
+      // Visitors: personal details are kept only `retentionDays` after the visit ends.
+      const { retentionDays } = visitors.settingsOf((await store.tenantSettings(tenantId)) || {});
+      const cutoff = new Date(Date.now() - retentionDays * 864e5).toISOString();
+      const due = await store.sql.first('SELECT COUNT(*) AS n FROM visits WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [tenantId, cutoff]);
+      if (due && Number(due.n)) {
+        await store.tenant(tenantId).unit()
+          .raw('UPDATE visits SET visitor_name = NULL, visitor_email = NULL, company = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND end_at < ?', [new Date().toISOString(), tenantId, cutoff])
+          .audit('visits.erased', `${Number(due.n)} visit(s) ended more than ${retentionDays} days ago`, 'system').commit();
+        out.visitsErased = Number(due.n);
+      }
+    } catch (error) {
+      log(`maintenance ${tenantId} visitor retention failed`, error);
     }
     try {
       // Snapshot-cache change log: keep the newest rows; caches further behind reload in full.

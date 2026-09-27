@@ -22,7 +22,7 @@ test('tenants are isolated end to end', async t => {
   for (const coll of ['users', 'sites', 'doorGroups', 'credentials']) {
     assert.deepEqual((await api.call('GET', `/api/${coll}`, acme)).body[coll], [], coll);
   }
-  assert.equal((await api.call('GET', '/api/roles', acme)).body.roles.length, 5); // incl. r_provisioner (SCIM)
+  assert.equal((await api.call('GET', '/api/roles', acme)).body.roles.length, 6); // incl. r_provisioner (SCIM) and r_front_desk (visitors)
   assert.equal((await api.call('DELETE', '/api/users/u1', acme)).status, 404);
   assert.equal((await api.call('POST', '/api/evaluate', acme, { body: { userId: 'u1', lockId: 9001 } })).body.result.allowed, false);
 

@@ -278,7 +278,27 @@ function createAlerts({ store, secretsKey = '', fetchFn, allowHttp = false, publ
     return res;
   }
 
-  return { settings, save, send, flush, slaHours, EVENTS };
+  /**
+   * One-off email to someone who is not an alert recipient (a visitor's code).
+   * Deliberately NOT queued in the outbox: the message contains a door code and
+   * codes are never stored. One attempt; the caller falls back to showing it.
+   * Never throws. Returns 'delivered' | 'failed: …' | 'skipped: …'.
+   */
+  async function emailTo(to, { subject, text }, id) {
+    if (!emailCfg) return 'skipped: email is not configured on this server';
+    const req = emailRequest(emailCfg, [].concat(to), { subject, text }, id);
+    try {
+      const res = await fetch(req.url, {
+        method: 'POST', headers: req.headers, body: JSON.stringify(req.body),
+        signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(6000) : undefined, redirect: 'manual',
+      });
+      return res.status >= 200 && res.status < 300 ? 'delivered' : `failed: HTTP ${res.status}`;
+    } catch (error) {
+      return `failed: ${String(error.message || error).slice(0, 80)}`;
+    }
+  }
+
+  return { settings, save, send, flush, slaHours, emailTo, emailAvailable: Boolean(emailCfg), EVENTS };
 }
 
 /** EMAIL_PROVIDER / EMAIL_API_KEY / EMAIL_FROM / EMAIL_API_BASE (tests) → createAlerts({ email }). */
