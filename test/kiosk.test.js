@@ -189,6 +189,12 @@ test('walk-ins: no code from the kiosk; host matched narrowly; reception issues 
   assert.equal((await api.call('POST', `/api/walkins/${other.id}/dismiss`, DESK)).status, 200);
   assert.equal((await api.call('POST', `/api/walkins/${other.id}/dismiss`, DESK)).status, 409);
   assert.equal((await api.call('GET', '/api/walkins', DESK)).body.walkins.length, 2);
+  // Erase on request: personal details go, the row (and its audit entry) stays.
+  assert.equal((await api.call('POST', `/api/walkins/${other.id}/erase`, GYM_DESK)).status, 404);
+  const er = await api.call('POST', `/api/walkins/${other.id}/erase`, DESK);
+  assert.equal(er.status, 200);
+  assert.equal(er.body.walkin.erased, true);
+  assert.equal(er.body.walkin.name, null);
   // Audit: ids only.
   const audit = JSON.stringify((await api.call('GET', '/api/audit?limit=40', OWNER)).body);
   assert.match(audit, /walkin\.create/);

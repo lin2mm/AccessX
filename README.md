@@ -15,6 +15,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/10-PILOT.md](docs/10-PILOT.md) for trying it with real locks, and
 [docs/20-PREREGISTRATION.md](docs/20-PREREGISTRATION.md) for the visitor pre-registration design,
 [docs/21-SIGNUP.md](docs/21-SIGNUP.md) for self-service signup and the demo reset (off unless `SIGNUP_ENABLED=1`),
+[docs/22-KIOSK.md](docs/22-KIOSK.md) for the front-desk tablet (visitor check-in, walk-ins, notice, printable list) and Turnstile,
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
@@ -108,6 +109,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (public demo). Explicit opt-in on the Worker; on Node the default only in demo mode. **Ignored whenever `TTLOCK_CLIENT_ID` is set** (R14). Production: `0`. |
 | `SIGNUP_ENABLED` | SaaS, optional | `1` opens `/signup`: company + email → emailed link (24 h, once) → new empty tenant and its owner key ([docs/21-SIGNUP.md](docs/21-SIGNUP.md)). Needs email and `PUBLIC_URL`. `SIGNUP_DAILY_LIMIT` (default 50 per 24 h), `SIGNUP_TERMS_URL` (https). |
+| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | signup, optional | Cloudflare Turnstile human check on `/signup`, verified server-side; fails closed if Cloudflare is unreachable. Both or neither ([docs/22-KIOSK.md](docs/22-KIOSK.md)). |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
 | `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `SMS_FROM` | texting visitor codes | `twilio`. `SMS_FROM` is a Twilio number (+E.164), an alphanumeric sender ID where the country allows it, or a Messaging Service SID (`MG…`). An API key may replace the auth token (`TWILIO_API_KEY` + `TWILIO_API_SECRET`). Codes are sent once and never queued; Twilio keeps message bodies in its logs according to your account settings. |
 | `SMS_MONTHLY_CAP` | optional | Texts per tenant per calendar month (default unlimited). The platform can set a tenant's own cap (`PUT /api/platform/tenants/:id/limits`); usage for billing: `GET /api/platform/usage?period=YYYY-MM`. At the cap, visits are still created and the code is shown on screen. |
@@ -283,6 +285,12 @@ Operators (people who administer the system) are separate from door users.
   names or codes; the token sits in the URL fragment, so it is never in
   server logs). **SMS** is metered per tenant (messages and billed segments)
   with an optional monthly cap, and owners can send a test text.
+  **Front-desk kiosk**: a paired tablet at reception lets visitors sign in
+  with their invitation email (host emailed, notice ticked), register as a
+  walk-in (reception then issues the code or dismisses) or sign out, on the
+  tablet or on their phone via a 10-minute QR pass. The tablet key can never
+  create a code or read the visitor list. `/visitors-print` is the roll-call
+  sheet. See [docs/22-KIOSK.md](docs/22-KIOSK.md).
 - **Codes run on whole hours** — TTLock period codes are valid on whole
   hours only and must be used once within 24 h of their start, or the lock
   voids them. Windows are rounded on the door's clock (start down, end up,
@@ -342,7 +350,7 @@ Operators (people who administer the system) are separate from door users.
   break-glass operators, `0008` approvals and sensitive door groups, `0009`–`0011`
   sealed approval codes, alert outbox and snapshot versions, `0012`–`0018`
   visitors (arrivals, phone, alarms, check-out, SMS usage, invites), `0019` lock
-  health, `0020`–`0021` billing. Set `SECRETS_KEY`
+  health, `0020`–`0021` billing, `0022` signups, `0023` kiosks and walk-ins. Set `SECRETS_KEY`
   as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
