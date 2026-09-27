@@ -18,6 +18,7 @@ import { createAlerts, emailConfigFromEnv, needsReconnectMessage } from './alert
 import { createSms, smsConfigFromEnv } from './sms-core.js';
 import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
 import { createLimiters, allow } from './rate-limit-core.js';
+import { securityTxt } from './security-txt.js';
 
 const MAX_BODY = 64 * 1024;
 
@@ -243,6 +244,10 @@ export default {
     if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
     if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handlePublicJson(request, env, 'visitCheckoutPublic', 'Check-out');
     if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
+    if (url.pathname === '/.well-known/security.txt') {
+      const body = securityTxt(env);
+      return new Response(body || 'not found', { status: body ? 200 : 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': body ? 'public, max-age=86400' : 'no-store' } });
+    }
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
     return env.ASSETS.fetch(request);
   },

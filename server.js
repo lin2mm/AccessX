@@ -91,6 +91,7 @@ const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNI
 const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
 const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
 const { createLimiters, allow } = require('./rate-limit-core');
+const { securityTxt } = require('./security-txt');
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const sms = createSms({ config: smsConfigFromEnv(process.env) });
@@ -199,6 +200,11 @@ if (process.env.MOCK_IDP === '1') {
   app.use('/mock-idp', require('./support/mock-idp').createMockIdp({ basePath: '/mock-idp' }).router);
 }
 // extensions: /checkout serves checkout.html, as Cloudflare's asset handling does.
+app.get('/.well-known/security.txt', (req, res) => {
+  const body = securityTxt(process.env);
+  if (!body) return res.status(404).type('text/plain').send('not found');
+  res.type('text/plain; charset=utf-8').set('cache-control', 'public, max-age=86400').send(body);
+});
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 // Malformed JSON and oversize bodies → JSON errors, not HTML stack traces.
 // eslint-disable-next-line no-unused-vars

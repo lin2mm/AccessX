@@ -63,8 +63,9 @@ Cloudflare's platform, denial of service beyond the rate limits below.
 - Pick a firm with web application and API testing experience (CREST or
   OSCP-certified testers); ask for a retest of fixes in the quote. Budget
   about 5–8 tester days for the scope above.
-- Fix critical and high findings before the first office goes live; publish
-  a `/.well-known/security.txt` with a contact for reports.
+- Fix critical and high findings before the first office goes live. Set
+  `SECURITY_CONTACT` (and optionally `SECURITY_POLICY`) so
+  `/.well-known/security.txt` tells researchers where to report.
 
 ## Known limits (tell the testers)
 

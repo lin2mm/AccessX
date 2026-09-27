@@ -55,9 +55,16 @@ $('#admin-logout').addEventListener('click',async()=>{
   }
 }
 
+// Opening a view (or clicking it again) refreshes its data: another operator,
+// a visitor or the directory may have changed it since sign-in.
+const VIEW_LOADERS={doors:()=>[loadDoors(),loadHealth(),loadSetup()],access:()=>[loadRules(),loadCompile(),loadCreds()],
+  visitors:()=>[loadVisitors()],people:()=>[loadPeople(),loadRules(),loadAdmin()],log:()=>[loadApprovals(),loadAudit(),loadRevocation()]};
+let viewLoading=null;
 $$('nav button').forEach(b=>b.onclick=()=>{
   $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
   $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
+  const load=VIEW_LOADERS[b.dataset.v];
+  if(load&&viewLoading!==b.dataset.v){viewLoading=b.dataset.v;Promise.allSettled(load()).finally(()=>{viewLoading=null;});}
 });
 const batClass=n=>n>50?'hi':n>25?'mid':'lo';
 const errText=r=>r._status===401?'Sign in first':r.code==='sso_required'?r.error:r._status===403?`No permission${r.required?` (needs ${r.required})`:''}${r.detail?': '+r.detail:''}`:(r.error||'Request failed');

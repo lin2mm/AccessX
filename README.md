@@ -80,6 +80,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | Variable | Needed for | Notes |
 |---|---|---|
 | `ADMIN_TOKEN` | production | Owner token of the default tenant. Without it (and `OPERATORS`) the app runs as an open demo. |
+| `SECURITY_CONTACT` | production | Published as `/.well-known/security.txt` (RFC 9116): `mailto:` / `https:` / `tel:` URIs, comma-separated. Unset: no file. `SECURITY_POLICY` (optional) adds the disclosure-policy URL. |
 | `OPERATORS` | optional | JSON list of seeded operators: `id`, `name`, `role`, `siteIds` (omit or `["*"]` = all sites), `tokenSha256` (SHA-256 hex of the token; plaintext tokens are refused). |
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
