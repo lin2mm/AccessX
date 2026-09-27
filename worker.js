@@ -50,10 +50,12 @@ let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.NUKI_API_BASE, env.NUKI_POLL_MS, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.NUKI_API_BASE, env.NUKI_POLL_MS, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN, env.USAGE_METER].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
-  const sql = d1Adapter(env.DB);
+  // USAGE_METER=1 (load tests, R20): each /api response says what it cost in D1 (x-accessx-d1).
+  const meter = env.USAGE_METER === '1' ? { queries: 0, rowsRead: 0, rowsWritten: 0 } : null;
+  const sql = d1Adapter(env.DB, { meter });
   // Per-isolate snapshot cache (Workers have 128 MB): budget in rows, 0 = off.
   const store = createStore(sql, { snapshotCache: { maxRows: env.SNAPSHOT_CACHE_ROWS === undefined ? 100000 : Number(env.SNAPSHOT_CACHE_ROWS) } });
   const mirror = {
@@ -108,7 +110,7 @@ function apiFor(env) {
   if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
   const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
   const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), signup: signupConfigFromEnv(env), calendarDomain: env.CALENDAR_INBOUND_DOMAIN || '', demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
-  cached = { key, db: env.DB, api };
+  cached = { key, db: env.DB, api, meter };
   return api;
 }
 
@@ -142,10 +144,31 @@ async function parseRequest(request, env) {
   };
 }
 
+/**
+ * D1 cost of one request (USAGE_METER=1 only). The meter is per isolate, so the
+ * numbers are exact only when requests are sent one at a time (the load test does).
+ */
+// Same isolate = same meter: never count twice. (No random values at global scope in Workers.)
+let isolateTag = null;
+const isolate = () => (isolateTag = isolateTag || crypto.randomUUID().slice(0, 8));
+const meterStart = () => (cached && cached.meter ? { ...cached.meter } : null);
+function withMeter(res, start, inner = null) {
+  if (!start || !cached || !cached.meter) return res;
+  const m = cached.meter;
+  const d = { q: m.queries - start.queries, read: m.rowsRead - start.rowsRead, written: m.rowsWritten - start.rowsWritten };
+  // A write forwarded to the Durable Object: add what the DO reported.
+  const fromDo = /q=(\d+);read=(\d+);written=(\d+);iso=(\w+)/.exec(inner || '');
+  if (fromDo && fromDo[4] !== isolate()) { d.q += Number(fromDo[1]); d.read += Number(fromDo[2]); d.written += Number(fromDo[3]); }
+  const out = new Response(res.body, res);
+  out.headers.set('x-accessx-d1', `q=${d.q};read=${d.read};written=${d.written};iso=${isolate()}`);
+  return out;
+}
+
 async function handleApi(request, env) {
   const req = await parseRequest(request, env);
   if (req instanceof Response) return req;
   const api = apiFor(env);
+  const start = meterStart();
   // Writes go to the tenant's Durable Object, which runs them one at a time
   // (tenant-queue.js explains why). Reads, and writes whose tenant can't be
   // told from the credential (login, platform calls), are handled right here.
@@ -155,14 +178,15 @@ async function handleApi(request, env) {
       const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
       const headers = new Headers(request.headers);
       headers.delete('content-length'); // the body is re-serialized below
-      return stub.fetch(new Request(request.url, {
+      const res = await stub.fetch(new Request(request.url, {
         method: request.method,
         headers,
         body: req.body === undefined ? undefined : JSON.stringify(req.body),
       }));
+      return withMeter(res, start, res.headers.get('x-accessx-d1'));
     }
   }
-  return toResponse(await api.handle(req));
+  return withMeter(toResponse(await api.handle(req)), start);
 }
 
 /** TTLock record callback (form-encoded, secret in the path). Arrivals are written in each tenant's DO. */
@@ -281,13 +305,15 @@ export class TenantWriter {
     const req = await parseRequest(request, this.env);
     if (req instanceof Response) return req;
     let out;
+    const api = apiFor(this.env);
+    const start = meterStart();
     try {
-      out = await this.queue.run('tenant', () => apiFor(this.env).handle(req));
+      out = await this.queue.run('tenant', () => api.handle(req));
     } catch (error) {
       if (!(error instanceof QueueFullError)) throw error;
       out = busyResponse(error, req.path);
     }
-    const res = toResponse(out);
+    const res = withMeter(toResponse(out), start);
     res.headers.set('x-accessx-writer', 'durable-object');
     return res;
   }
