@@ -21,11 +21,12 @@ const billingCore = require('./billing-core');
 const doctorCore = require('./doctor-core');
 const signupCore = require('./signup-core');
 const kioskCore = require('./kiosk-core');
+const calendarCore = require('./calendar-core');
 const { ipKey } = require('./rate-limit-core');
 // The newest migration this code needs. GET /api/healthz answers 503 until the
 // database has it ("always migrate before deploying"). A test keeps it equal
 // to the last file in migrations/.
-const SCHEMA_VERSION = '0023_kiosk';
+const SCHEMA_VERSION = '0024_calendar';
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -124,7 +125,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null, signup = null, demoData = null,
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null, signup = null, demoData = null, calendarDomain = '',
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -1072,9 +1073,10 @@ function createApi({
     return { invites: rows.map(visitors.rowToInvite).filter(v => visitVisible(ctx, v)).map(v => inviteView(snap, v)), available: { links: Boolean(publicUrl), email: emailAvailable(), sms: smsAvailable() } };
   });
 
-  route('POST', /^\/api\/visit-invites$/, async ctx => {
+  route('POST', /^\/api\/visit-invites$/, ctx => issueInvite(ctx, ctx.body || {}));
+  /** An invitation, as an operator (or the calendar, on its configuring operator's standing approval). */
+  async function issueInvite(ctx, body, { createdBy = ctx.actor, auditActor = ctx.actor } = {}) {
     if (!publicUrl) throw new HttpError(400, 'invitations need PUBLIC_URL (the link the visitor opens)');
-    const body = ctx.body || {};
     const c = visitors.inviteContact(body);
     if (!c.ok) throw new HttpError(c.status, c.error);
     if (c.channel === 'email' && !emailAvailable()) throw new HttpError(400, 'email is not configured on this server: invite by mobile number');
@@ -1100,9 +1102,9 @@ function createApi({
     const now = new Date().toISOString();
     await ctx.t.unit().raw(
       'INSERT INTO visit_invites (tenant_id, id, token_hash, host_user_id, site_id, lock_ids, start_local, end_local, start_at, end_at, channel, contact, require_approval, status, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [ctx.tenantId, id, inviteHash(token), v.hostUserId, v.siteId, JSON.stringify(v.lockIds), String(body.startLocal), String(body.endLocal), v.startAt, v.endAt, c.channel, c.contact, requireApproval ? 1 : 0, 'open', ctx.actor, now, v.endAt])
+      [ctx.tenantId, id, inviteHash(token), v.hostUserId, v.siteId, JSON.stringify(v.lockIds), String(body.startLocal), String(body.endLocal), v.startAt, v.endAt, c.channel, c.contact, requireApproval ? 1 : 0, 'open', createdBy, now, v.endAt])
       // No personal data in the audit chain (the address stays in the invite row, erasable).
-      .audit('invite.create', `${id} host ${v.hostUserId} locks ${v.lockIds.join(',')} ${v.startAt}..${v.endAt} via ${c.channel} approval=${requireApproval ? 'yes' : 'no'}`, ctx.actor).commit();
+      .audit('invite.create', `${id} host ${v.hostUserId} locks ${v.lockIds.join(',')} ${v.startAt}..${v.endAt} via ${c.channel} approval=${requireApproval ? 'yes' : 'no'}`, auditActor).commit();
     const inviteUrl = `${publicUrl.replace(/\/+$/, '')}/invite#${token}`;
     const tz = plan.timeZone;
     const label = iso => policy.localParts(new Date(iso), tz).label.replace(/ \S+$/, '');
@@ -1114,7 +1116,7 @@ function createApi({
     const row = await store.sql.first('SELECT * FROM visit_invites WHERE tenant_id = ? AND id = ?', [ctx.tenantId, id]);
     // The link is shown once, to the operator who made it (the code still goes only to the fixed address).
     return { invite: inviteView(snap, visitors.rowToInvite(row)), inviteUrl, delivery, warnings };
-  });
+  }
 
   route('POST', /^\/api\/visit-invites\/([^/]+)\/(revoke|approve|reject)$/, async (ctx, [id, verb]) => {
     const inv = await loadInvite(ctx, id);
@@ -1441,6 +1443,251 @@ function createApi({
     return { status: 200, body: r };
   }
 
+  // --- calendar → visitor pre-registration (R17, docs/23-CALENDAR.md) --------
+  // A host adds cal-<key>@CALENDAR_INBOUND_DOMAIN to a meeting. The invitation
+  // becomes a draft; only the organiser, at their registered address, can turn it
+  // into normal visitor invitations, on the standing approval of the operator who
+  // set the calendar up (door sets). Nothing is granted by the email itself.
+  const CAL = { perDay: 50, doorSets: 10 };
+  const calendarMissing = () => [!calendarDomain && 'CALENDAR_INBOUND_DOMAIN', !publicUrl && 'PUBLIC_URL', !emailAvailable() && 'EMAIL_PROVIDER'].filter(Boolean);
+  const calendarOn = () => calendarMissing().length === 0;
+  const calendarAddress = key => `cal-${key}@${calendarDomain}`;
+  const uidHash = uid => sha256Hex(`calendar-uid|${uid}`);
+  const draftHash = token => sha256Hex(`calendar-draft|${token}`);
+  const calKey = () => calendarCore.newKey(n => globalThis.crypto.getRandomValues(new Uint8Array(n)));
+  const parseJson = (v, d) => { try { return v ? JSON.parse(v) : d; } catch { return d; } };
+  const calTz = (snap, doorSets) => policy.siteTimeZone(snap, (doorSets[0] || {}).siteId || (snap.sites[0] || {}).id);
+  const localIso = (iso, tz) => { const p = policy.localParts(new Date(iso), tz); return `${p.isoDate}T${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`; };
+  const draftView = (snap, r) => {
+    const host = snap.users.find(u => u.id === r.host_user_id);
+    const site = snap.sites.find(s => s.id === r.site_id);
+    return { id: r.id, status: r.status, reason: r.reason || null, hostUserId: r.host_user_id || null, hostName: host ? host.name : null, summary: r.summary, startAt: r.start_at, endAt: r.end_at,
+      guests: parseJson(r.guests, []), tzAssumed: Boolean(r.tz_assumed), recurring: Boolean(r.recurring), siteId: r.site_id || null, siteName: site ? site.name : null,
+      inviteIds: parseJson(r.invite_ids, []), hostNotified: r.host_notified || null, createdAt: r.created_at, decidedAt: r.decided_at || null, erased: Boolean(r.erased_at) };
+  };
+  const inboxView = row => (row ? { address: calendarDomain ? calendarAddress(row.address_key) : null, enabled: Boolean(row.enabled), doorSets: parseJson(row.door_sets, []), configuredBy: row.configured_by, updatedAt: row.updated_at } : null);
+
+  route('GET', /^\/api\/calendar$/, async ctx => {
+    const snap = await ctx.snap();
+    const inbox = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ?', [ctx.tenantId]);
+    const rows = await store.sql.all('SELECT * FROM calendar_drafts WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 30', [ctx.tenantId]);
+    const hostVisible = r => !r.host_user_id || ctx.scope.userVisible(snap.users.find(u => u.id === r.host_user_id) || {});
+    return { available: calendarOn(), missing: calendarMissing(), inbox: inboxView(inbox),
+      drafts: rows.filter(r => (r.site_id ? ctx.scope.site(r.site_id) : hostVisible(r))).map(r => draftView(snap, r)),
+      sites: snap.sites.filter(s => ctx.scope.site(s.id)).map(s => ({ id: s.id, name: s.name })) };
+  });
+
+  route('PUT', /^\/api\/calendar$/, async ctx => {
+    if (!calendarOn()) throw new HttpError(400, `calendar invitations need ${calendarMissing().join(', ')} on the server`);
+    const body = ctx.body || {};
+    const snap = await ctx.snap();
+    const sensitive = sensitiveLockSet(snap);
+    const raw = Array.isArray(body.doorSets) ? body.doorSets : [];
+    if (raw.length > CAL.doorSets) throw new HttpError(400, `at most ${CAL.doorSets} sites`);
+    const doorSets = [];
+    for (const d of raw) {
+      const siteId = String((d && d.siteId) || '');
+      if (!snap.sites.some(s => s.id === siteId) || !ctx.scope.site(siteId)) throw new HttpError(400, `unknown site ${siteId}`);
+      if (doorSets.some(x => x.siteId === siteId)) throw new HttpError(400, 'each site once');
+      const lockIds = [...new Set((Array.isArray(d.lockIds) ? d.lockIds : []).map(Number))];
+      if (!lockIds.length || lockIds.length > visitors.LIMITS.maxDoors) throw new HttpError(400, `choose 1 to ${visitors.LIMITS.maxDoors} visitor doors per site`);
+      for (const id of lockIds) {
+        await ctx.requireLock(id);
+        if (!ctx.scope.lock(id) || (policy.siteForLock(snap, id) || {}).id !== siteId) throw new HttpError(400, `door ${id} is not at site ${siteId}`);
+        if (sensitive.has(id)) throw new HttpError(400, `door ${id} is sensitive: visitors never get codes for it`);
+      }
+      doorSets.push({ siteId, lockIds });
+    }
+    const enabled = body.enabled !== false;
+    if (enabled && !doorSets.length) throw new HttpError(400, 'choose the visitor doors for at least one site');
+    const now = new Date().toISOString();
+    const existing = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ?', [ctx.tenantId]);
+    const unit = ctx.t.unit();
+    if (existing) unit.raw('UPDATE calendar_inboxes SET enabled = ?, door_sets = ?, configured_by = ?, updated_at = ? WHERE tenant_id = ?', [enabled ? 1 : 0, JSON.stringify(doorSets), ctx.actor, now, ctx.tenantId]);
+    else unit.raw('INSERT INTO calendar_inboxes (tenant_id, address_key, enabled, door_sets, configured_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)', [ctx.tenantId, calKey(), enabled ? 1 : 0, JSON.stringify(doorSets), ctx.actor, now]);
+    await unit.audit('calendar.configure', `${enabled ? 'on' : 'off'} ${doorSets.map(d => `${d.siteId}:${d.lockIds.join(',')}`).join(' ') || '-'}`, ctx.actor).commit();
+    return { inbox: inboxView(await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ?', [ctx.tenantId])) };
+  });
+
+  route('POST', /^\/api\/calendar\/rotate$/, async ctx => {
+    const existing = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ?', [ctx.tenantId]);
+    if (!existing) throw new HttpError(404, 'the calendar address is not set up');
+    await ctx.t.unit().raw('UPDATE calendar_inboxes SET address_key = ?, updated_at = ? WHERE tenant_id = ?', [calKey(), new Date().toISOString(), ctx.tenantId])
+      .audit('calendar.rotate', 'new calendar address; the old one stops working', ctx.actor).commit();
+    return { inbox: inboxView(await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ?', [ctx.tenantId])) };
+  });
+
+  /**
+   * An email to cal-<key>@CALENDAR_INBOUND_DOMAIN (Worker email() handler, or
+   * POST /api/inbound/calendar on Node). Never answers the sender: no bounce, no
+   * oracle; unknown addresses and non-invitations are dropped.
+   */
+  async function calendarInbound({ to, raw }, { dispatch = null } = {}) {
+    await whenReady();
+    if (!calendarDomain) return { accepted: false, reason: 'calendar is not configured on this server' };
+    const key = calendarCore.keyFromAddress(to, calendarDomain);
+    const inbox = key && await store.sql.first('SELECT * FROM calendar_inboxes WHERE address_key = ? AND enabled = 1', [key]);
+    if (!inbox) return { accepted: false, reason: 'unknown address' };
+    const mail = calendarCore.calendarsFromEmail(raw);
+    if (mail.error || !mail.calendars.length) return { accepted: false, reason: mail.error || 'no calendar invitation in the email' };
+    const job = { type: 'calendar', ics: mail.calendars[0].slice(0, 200000), to: calendarAddress(key) };
+    const tenantId = inbox.tenant_id;
+    const result = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+    return { accepted: true, tenantId, result };
+  }
+
+  /** Inside the tenant's queue: one invitation → a draft (or a cancellation). */
+  async function calendarJob(tenantId, job) {
+    const t = store.tenant(tenantId);
+    const inbox = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ? AND enabled = 1', [tenantId]);
+    if (!inbox) return { stored: false, reason: 'calendar is off' };
+    const snap = await t.snapshot();
+    const doorSets = parseJson(inbox.door_sets, []);
+    const tz = calTz(snap, doorSets);
+    const settings = (await store.tenantSettings(tenantId)) || {};
+    const r = calendarCore.readInvitation(job.ics, { users: snap.users, internalDomains: verifiedDomains(settings.sso), inbox: job.to, fallbackTz: tz });
+    const now = new Date().toISOString();
+    const recent = await store.sql.first('SELECT COUNT(*) AS n FROM calendar_drafts WHERE tenant_id = ? AND created_at >= ?', [tenantId, new Date(Date.now() - 864e5).toISOString()]);
+    if (Number(recent.n) >= CAL.perDay) return { stored: false, reason: 'daily limit' };
+    const id = policy.uid('cal');
+    if (!r.ok) {
+      await t.unit().raw('INSERT INTO calendar_drafts (tenant_id, id, uid_sha256, sequence, host_user_id, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [tenantId, id, r.uid ? uidHash(r.uid) : '-', 0, r.hostUserId || null, 'unusable', r.reason, now]).commit();
+      return { stored: true, id, status: 'unusable', reason: r.reason };
+    }
+    const uh = uidHash(r.uid);
+    const same = await store.sql.all("SELECT * FROM calendar_drafts WHERE tenant_id = ? AND uid_sha256 = ? AND host_user_id = ? AND status IN ('pending', 'confirmed') ORDER BY created_at DESC", [tenantId, uh, r.hostUserId]);
+    if (r.method === 'CANCEL') {
+      const unit = t.unit();
+      for (const d of same) {
+        unit.raw("UPDATE calendar_drafts SET status = 'cancelled', token_sha256 = NULL, decided_at = ? WHERE tenant_id = ? AND id = ?", [now, tenantId, d.id]);
+        for (const inv of parseJson(d.invite_ids, [])) unit.raw("UPDATE visit_invites SET status = 'revoked', token_hash = NULL, decided_by = ? WHERE tenant_id = ? AND id = ? AND status IN ('open', 'submitted')", [`calendar:${d.id}`, tenantId, inv]);
+        unit.audit('calendar.cancelled', `${d.id} (meeting cancelled by its organiser; unused invitations revoked)`, `calendar:${d.id}`);
+      }
+      if (same.length) await unit.commit();
+      return { stored: false, cancelled: same.length };
+    }
+    const latest = same[0];
+    const guestKey = gs => gs.map(g => g.email).sort().join(',');
+    if (latest && r.sequence < latest.sequence) return { stored: false, reason: 'an older version of the invitation' };
+    if (latest && latest.start_at === r.startAt && latest.end_at === r.endAt && guestKey(parseJson(latest.guests, [])) === guestKey(r.guests)) return { stored: false, reason: 'no change' };
+    const host = snap.users.find(u => u.id === r.hostUserId);
+    const token = randomB64url(18);
+    const unit = t.unit();
+    for (const d of same.filter(x => x.status === 'pending')) unit.raw("UPDATE calendar_drafts SET status = 'superseded', token_sha256 = NULL, decided_at = ? WHERE tenant_id = ? AND id = ?", [now, tenantId, d.id]);
+    await unit.raw('INSERT INTO calendar_drafts (tenant_id, id, uid_sha256, sequence, host_user_id, summary, location, start_at, end_at, guests, tz_assumed, recurring, status, token_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [tenantId, id, uh, r.sequence, r.hostUserId, r.summary, r.location, r.startAt, r.endAt, JSON.stringify(r.guests), r.tzAssumed ? 1 : 0, r.recurring ? 1 : 0, 'pending', draftHash(token), now])
+      .audit('calendar.draft', `${id} host ${r.hostUserId} guests ${r.guests.length} ${r.startAt}..${r.endAt}${latest ? ` (update of ${latest.id})` : ''}`, 'calendar').commit();
+    const label = iso => policy.localParts(new Date(iso), tz).label;
+    const url = `${publicUrl.replace(/\/+$/, '')}/calendar#t=${token}`;
+    const msg = {
+      subject: `Visitor access for "${r.summary || 'your meeting'}": please confirm`.slice(0, 200),
+      text: [`Hello ${(host.name || '').split(/\s+/)[0] || ''},`.trim(), '',
+        `Your meeting "${r.summary || 'untitled'}" (${label(r.startAt)} – ${label(r.endAt)}) invites ${r.guests.length} guest${r.guests.length > 1 ? 's' : ''} from outside:`,
+        ...r.guests.map(g => `  - ${g.name ? `${g.name} <${g.email}>` : g.email}`), '',
+        r.tzAssumed ? 'Note: we could not read the meeting\'s time zone and assumed the office time. Check the times before confirming.\n' : '',
+        'Open this link to send them visitor invitations (they get their door code after registering):', url, '',
+        'The link works once, until the meeting ends. If you did not send this invitation, ignore this email: nothing happens without you.',
+        snap.tenant && snap.tenant.name ? `\n${snap.tenant.name} · AccessX` : '\nAccessX'].filter(x => x !== '').join('\n'),
+    };
+    const delivered = host.email ? await alerts.emailTo(host.email, msg, `calendar-${id}`) : 'no email address';
+    await store.sql.batch([{ sql: 'UPDATE calendar_drafts SET host_notified = ? WHERE tenant_id = ? AND id = ?', params: [String(delivered).slice(0, 120), tenantId, id] }]);
+    return { stored: true, id, status: 'pending', hostNotified: delivered };
+  }
+
+  async function draftByToken(token) {
+    if (!validToken(token)) return null;
+    const row = await store.sql.first("SELECT * FROM calendar_drafts WHERE token_sha256 = ? AND status = 'pending' AND end_at > ?", [draftHash(token), new Date().toISOString()]);
+    return row || null;
+  }
+
+  /** Inside the tenant's queue: the organiser confirmed (or declined) a draft. */
+  async function calendarConfirmJob(tenantId, job) {
+    const draft = await draftByToken(job.token);
+    if (!draft || draft.tenant_id !== tenantId) return { status: 404 };
+    const t = store.tenant(tenantId);
+    const now = new Date().toISOString();
+    if (job.action === 'decline') {
+      await t.unit().raw("UPDATE calendar_drafts SET status = 'declined', token_sha256 = NULL, decided_at = ? WHERE tenant_id = ? AND id = ? AND status = 'pending'", [now, tenantId, draft.id])
+        .audit('calendar.declined', draft.id, `calendar:${draft.id}`).commit();
+      return { status: 200, body: { ok: true, declined: true } };
+    }
+    const inbox = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ? AND enabled = 1', [tenantId]);
+    const doorSet = inbox && parseJson(inbox.door_sets, []).find(d => d.siteId === job.siteId);
+    if (!doorSet) return { status: 400, body: { ok: false, error: 'Choose one of the offered offices.' } };
+    const guests = parseJson(draft.guests, []);
+    const chosen = guests.filter(g => (Array.isArray(job.guests) ? job.guests.map(x => String(x).toLowerCase()) : []).includes(g.email));
+    if (!chosen.length) return { status: 400, body: { ok: false, error: 'Choose at least one guest.' } };
+    const snap = await t.snapshot();
+    const operator = await auth.operatorFor(tenantId, inbox.configured_by);
+    if (!operator || !rbac.hasPermission(snap, operator, 'visitor.manage')) {
+      await t.unit().audit('calendar.failed', `${draft.id}: ${inbox.configured_by} no longer manages visitors (calendar set-up needs renewing)`, `calendar:${draft.id}`).commit();
+      return { status: 409, body: { ok: false, error: 'Calendar invitations are paused: an administrator needs to save the calendar settings again.' } };
+    }
+    // Claim the draft first (compare-and-set): a second tab or a replay does nothing.
+    const claim = `${now}#${policy.uid('c')}`;
+    await store.sql.batch([{ sql: "UPDATE calendar_drafts SET status = 'confirmed', token_sha256 = NULL, decided_at = ?, site_id = ? WHERE tenant_id = ? AND id = ? AND status = 'pending'", params: [claim, doorSet.siteId, tenantId, draft.id] }]);
+    const mine = await store.sql.first('SELECT decided_at FROM calendar_drafts WHERE tenant_id = ? AND id = ?', [tenantId, draft.id]);
+    if (!mine || mine.decided_at !== claim) return { status: 404 };
+    const ctx = buildCtx({ t, vendor: await resolveVendor(tenantId), tenantId, operator, body: {}, query: new URLSearchParams(), method: 'POST', path: '/api/visit-invites' });
+    ctx.scope = scopeFor(snap, operator);
+    ctx.actor = `calendar:${draft.id}`;
+    const tz = policy.siteTimeZone(snap, doorSet.siteId);
+    const sent = []; const failed = []; const ids = [];
+    for (const g of chosen) {
+      try {
+        const out = await issueInvite(ctx, { visitorEmail: g.email, hostUserId: draft.host_user_id, lockIds: doorSet.lockIds, startLocal: localIso(draft.start_at, tz), endLocal: localIso(draft.end_at, tz) },
+          { createdBy: inbox.configured_by, auditActor: ctx.actor });
+        ids.push(out.invite.id);
+        (out.delivery === 'delivered' ? sent : failed).push(out.delivery === 'delivered' ? { email: g.email } : { email: g.email, error: 'the invitation email could not be sent' });
+      } catch (error) {
+        failed.push({ email: g.email, error: String(error.message || error).slice(0, 200) });
+      }
+    }
+    const unit = t.unit().raw('UPDATE calendar_drafts SET decided_at = ?, invite_ids = ? WHERE tenant_id = ? AND id = ?', [now, JSON.stringify(ids), tenantId, draft.id]);
+    // An earlier confirmed version of the same meeting: its unused invitations give way to these.
+    const older = await store.sql.all("SELECT * FROM calendar_drafts WHERE tenant_id = ? AND uid_sha256 = ? AND status = 'confirmed' AND id != ?", [tenantId, draft.uid_sha256, draft.id]);
+    for (const d of older) {
+      unit.raw("UPDATE calendar_drafts SET status = 'superseded' WHERE tenant_id = ? AND id = ?", [tenantId, d.id]);
+      for (const inv of parseJson(d.invite_ids, [])) unit.raw("UPDATE visit_invites SET status = 'revoked', token_hash = NULL, decided_by = ? WHERE tenant_id = ? AND id = ? AND status IN ('open', 'submitted')", [ctx.actor, tenantId, inv]);
+    }
+    await unit.audit('calendar.confirmed', `${draft.id} site ${doorSet.siteId} invitations ${ids.length}/${chosen.length}${older.length ? ` (replaces ${older.map(d => d.id).join(',')})` : ''}`, ctx.actor).commit();
+    return { status: 200, body: { ok: true, sent, failed } };
+  }
+
+  /** The organiser's confirmation page (no login; the emailed token is the credential). */
+  async function calendarConfirmPublic(body, { dispatch = null } = {}) {
+    await whenReady();
+    body = body || {};
+    const draft = await draftByToken(body.token);
+    const gone = { status: 404, body: { ok: false, error: 'This link has already been used, has expired, or was replaced by a newer version of the meeting.' } };
+    if (!draft) return gone;
+    const tenantId = draft.tenant_id;
+    const action = String(body.action || 'info');
+    if (action === 'info') {
+      const snap = await store.tenant(tenantId).snapshot();
+      const inbox = await store.sql.first('SELECT * FROM calendar_inboxes WHERE tenant_id = ? AND enabled = 1', [tenantId]);
+      const doorSets = inbox ? parseJson(inbox.door_sets, []) : [];
+      const locks = doorSets.length ? await (await resolveVendor(tenantId)).listLocks().catch(() => []) : [];
+      const offices = doorSets.map(d => {
+        const site = snap.sites.find(s => s.id === d.siteId);
+        const tz = policy.siteTimeZone(snap, d.siteId);
+        return { siteId: d.siteId, name: site ? site.name : d.siteId, doors: d.lockIds.map(id => doorName(locks, id)),
+          from: policy.localParts(new Date(draft.start_at), tz).label, until: policy.localParts(new Date(draft.end_at), tz).label };
+      });
+      const loc = String(draft.location || '').toLowerCase();
+      const suggested = (offices.find(o => loc && loc.includes(String(o.name).toLowerCase())) || offices[0] || {}).siteId || null;
+      const host = snap.users.find(u => u.id === draft.host_user_id);
+      return { status: 200, body: { ok: true, host: host ? (host.name || '').split(/\s+/)[0] : null, organisation: (snap.tenant && snap.tenant.name) || null, summary: draft.summary, location: draft.location,
+        tzAssumed: Boolean(draft.tz_assumed), recurring: Boolean(draft.recurring), guests: parseJson(draft.guests, []), offices, suggestedSiteId: suggested } };
+    }
+    if (action !== 'confirm' && action !== 'decline') return { status: 400, body: { ok: false, error: 'unknown action' } };
+    const job = { type: 'calendar_confirm', token: body.token, action, siteId: String(body.siteId || ''), guests: Array.isArray(body.guests) ? body.guests.slice(0, 20) : [] };
+    const r = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+    if (!r || r.status === 404) return gone;
+    return { status: r.status, body: r.body };
+  }
+
   // --- visitor arrival --------------------------------------------------
   // TTLock reports unlocks (callback or record list) with the code that was
   // typed. The first successful unlock with a visitor's code is their arrival.
@@ -1555,6 +1802,8 @@ function createApi({
     if (job && job.type === 'invite_submit') return inviteSubmit(tenantId, job);
     if (job && job.type === 'billing') return applyBillingEvent(tenantId, job);
     if (job && job.type === 'kiosk') return kioskJob(tenantId, job);
+    if (job && job.type === 'calendar') return calendarJob(tenantId, job);
+    if (job && job.type === 'calendar_confirm') return calendarConfirmJob(tenantId, job);
     return recordArrival(tenantId, job);
   }
 
@@ -3241,6 +3490,9 @@ function createApi({
         // Walk-ins (R16): nobody decided within a day → expired; details go after the same period as visits.
         { sql: "UPDATE walkins SET status = 'expired' WHERE tenant_id = ? AND status = 'waiting' AND created_at < ?", params: [tenantId, new Date(Date.now() - 864e5).toISOString()] },
         { sql: 'UPDATE walkins SET visitor_name = NULL, company = NULL, visitor_email = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND created_at < ?', params: [new Date().toISOString(), tenantId, cutoff] },
+        // Calendar drafts (R17): an unconfirmed draft dies with its meeting; guests' addresses go after the same period.
+        { sql: "UPDATE calendar_drafts SET status = 'expired', token_sha256 = NULL WHERE tenant_id = ? AND status = 'pending' AND end_at <= ?", params: [tenantId, new Date().toISOString()] },
+        { sql: 'UPDATE calendar_drafts SET guests = NULL, summary = NULL, location = NULL, erased_at = ? WHERE tenant_id = ? AND erased_at IS NULL AND created_at < ?', params: [new Date().toISOString(), tenantId, cutoff] },
       ]);
     } catch (error) {
       log(`maintenance ${tenantId} visitor retention failed`, error);
@@ -3298,7 +3550,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, signupPublic, signupVerifyPublic, kioskPublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, signupPublic, signupVerifyPublic, kioskPublic, calendarInbound, calendarConfirmPublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError, SCHEMA_VERSION };

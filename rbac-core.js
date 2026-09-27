@@ -109,6 +109,11 @@ const ROUTES = [
   ['POST', /^\/api\/kiosks\/[^/]+\/revoke$/, 'visitor.manage'],
   ['GET', /^\/api\/walkins$/, 'visitor.manage'],
   ['POST', /^\/api\/walkins\/[^/]+\/(dismiss|erase)$/, 'visitor.manage'],
+  // Calendar invitations (R17): anyone managing visitors sees the drafts; only an owner sets the doors
+  // (the calendar then acts on that owner's standing approval) or changes the address.
+  ['GET', /^\/api\/calendar$/, 'visitor.manage'],
+  ['PUT', /^\/api\/calendar$/, OWNER],
+  ['POST', /^\/api\/calendar\/rotate$/, OWNER],
   ['POST', /^\/api\/visits\/sms-test$/, OWNER],
   // Owner-only, on purpose (tenant-wide security settings). Listed explicitly:
   // the RBAC coverage gate fails for any route that falls through to the default.

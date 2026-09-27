@@ -83,7 +83,7 @@ async function seedTenant(store, tenantId, { data, sealedAudit = null, legacyAud
  * approvals, alarms) is replaced. The caller checks that the tenant has no
  * real doors.
  */
-const DEMO_RESET_TABLES = ['approvals', 'credentials', 'walkins', 'visit_invites', 'visits', 'alert_outbox', 'lock_alarms', 'lock_battery', 'lock_health',
+const DEMO_RESET_TABLES = ['approvals', 'credentials', 'walkins', 'calendar_drafts', 'visit_invites', 'visits', 'alert_outbox', 'lock_alarms', 'lock_battery', 'lock_health',
   'directory_groups', 'assignments', 'users', 'user_groups', 'door_groups', 'schedules', 'holidays', 'sites'];
 async function resetDemoTenant(store, tenantId, { data, actor = 'platform' } = {}) {
   const t = store.tenant(tenantId);

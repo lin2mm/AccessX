@@ -50,7 +50,7 @@ let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -105,7 +105,7 @@ function apiFor(env) {
   const billingConfig = billingConfigFromEnv(env);
   if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
   const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), signup: signupConfigFromEnv(env), demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), signup: signupConfigFromEnv(env), calendarDomain: env.CALENDAR_INBOUND_DOMAIN || '', demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -203,6 +203,30 @@ function jobDispatcher(env) {
   } : null;
 }
 
+/** Inbound calendar mail from a provider that POSTs raw MIME (Bearer CALENDAR_INBOUND_SECRET). */
+async function handleCalendarHttp(request, env, url) {
+  const secret = env.CALENDAR_INBOUND_SECRET || '';
+  const given = String(request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const enc = new TextEncoder();
+  const a = enc.encode(given); const b = enc.encode(secret);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a[i] || 0) ^ (b[i] || 0);
+  if (!secret || diff) {
+    limiters = limiters || createLimiters(env);
+    if (!(await allow(limiters, 'visitorLink', clientIp(request)))) return tooMany('json');
+    return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+  }
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.length > 600 * 1024) return Response.json({ ok: false, error: 'too large' }, { status: 413 });
+  try {
+    const out = await apiFor(env).calendarInbound({ to: request.headers.get('x-envelope-to') || url.searchParams.get('to') || '', raw }, { dispatch: jobDispatcher(env) });
+    return Response.json({ ok: true, accepted: out.accepted }, { status: 202 });
+  } catch (error) {
+    console.error('calendar inbound failed', error);
+    return Response.json({ ok: false, error: 'inbound failed' }, { status: 500 });
+  }
+}
+
 /** Visitor self check-out / pre-registration (no login; the token in the body is the credential). */
 async function handlePublicJson(request, env, fn, what, kind = 'visitorLink') {
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
@@ -277,6 +301,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/api/signup') return handlePublicJson(request, env, 'signupPublic', 'Signup', 'signup');
     if (request.method === 'POST' && url.pathname === '/api/signup/verify') return handlePublicJson(request, env, 'signupVerifyPublic', 'Signup', 'signup');
     if (request.method === 'POST' && url.pathname === '/api/kiosk') return handlePublicJson(request, env, 'kioskPublic', 'Kiosk', 'kiosk');
+    if (request.method === 'POST' && url.pathname === '/api/calendar-confirm') return handlePublicJson(request, env, 'calendarConfirmPublic', 'Confirmation');
+    if (request.method === 'POST' && url.pathname === '/api/inbound/calendar') return handleCalendarHttp(request, env, url);
     if (url.pathname === '/.well-known/security.txt') {
       const body = securityTxt(env);
       return new Response(body || 'not found', { status: body ? 200 : 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': body ? 'public, max-age=86400' : 'no-store' } });
@@ -291,6 +317,22 @@ export default {
       return out;
     }
     return env.ASSETS.fetch(request);
+  },
+  /**
+   * Cloudflare Email Routing (R17): mail to cal-<key>@CALENDAR_INBOUND_DOMAIN (a
+   * catch-all or per-address rule "Send to a Worker"). Meeting invitations become
+   * drafts for their organiser to confirm; everything else is dropped silently
+   * (no bounce: senders can be forged, and a bounce would confirm the address).
+   */
+  async email(message, env) {
+    try {
+      if (message.rawSize > 600 * 1024) return;
+      const raw = new Uint8Array(await new Response(message.raw).arrayBuffer());
+      const out = await apiFor(env).calendarInbound({ to: message.to, raw }, { dispatch: jobDispatcher(env) });
+      if (out.accepted) console.log('calendar invitation', JSON.stringify({ tenant: out.tenantId, status: out.result && (out.result.status || out.result.reason) }));
+    } catch (error) {
+      console.error('calendar email failed', error);
+    }
   },
   /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
   async scheduled(event, env, ctx) {

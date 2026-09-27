@@ -109,6 +109,7 @@ const api = createApi({
   store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing,
   doctor: () => checkConfig(startupEnv, { runtime: 'node' }),
   signup: signupConfigFromEnv(process.env),
+  calendarDomain: process.env.CALENDAR_INBOUND_DOMAIN || '',
   demoData: require('./data/acl.json'), // the settings this process started with
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
@@ -173,7 +174,8 @@ app.post('/api/stripe/webhook', express.raw({ type: () => true, limit: '256kb' }
 // Visitor pre-registration: no login; the invite token (in the body) is the only credential.
 // Self-service signup and its emailed link (R15): no login; rate-limited per address.
 for (const [path, fn, what, kind] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out', 'visitorLink'], ['/api/visit-invite', 'visitInvitePublic', 'Registration', 'visitorLink'],
-  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup'], ['/api/kiosk', 'kioskPublic', 'Kiosk', 'kiosk']]) {
+  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup'], ['/api/kiosk', 'kioskPublic', 'Kiosk', 'kiosk'],
+  ['/api/calendar-confirm', 'calendarConfirmPublic', 'Confirmation', 'visitorLink']]) {
   app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
     if (!(await allow(limiterFor, kind, peerIp(req)))) return tooMany(res, true);
     try {
@@ -187,6 +189,26 @@ for (const [path, fn, what, kind] of [['/api/visit-checkout', 'visitCheckoutPubl
     }
   });
 }
+// Calendar invitations (R17) from an inbound-email provider that POSTs the raw message
+// (Cloudflare uses the Worker's email() handler instead). Bearer CALENDAR_INBOUND_SECRET;
+// the envelope recipient in x-envelope-to (or ?to=).
+const CALENDAR_INBOUND_SECRET = process.env.CALENDAR_INBOUND_SECRET || ''; // read once at start, like all settings
+app.post('/api/inbound/calendar', express.raw({ type: () => true, limit: '600kb' }), async (req, res) => {
+  const secret = CALENDAR_INBOUND_SECRET;
+  const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const a = Buffer.from(given); const b = Buffer.from(secret);
+  if (!secret || a.length !== b.length || !require('node:crypto').timingSafeEqual(a, b)) {
+    if (!(await allow(limiterFor, 'visitorLink', peerIp(req)))) return tooMany(res, true);
+    return res.status(404).json({ ok: false, error: 'not found' });
+  }
+  try {
+    const out = await api.calendarInbound({ to: String(req.headers['x-envelope-to'] || req.query.to || ''), raw: Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || '')) });
+    res.status(202).json({ ok: true, accepted: out.accepted });
+  } catch (error) {
+    console.error('calendar inbound failed', error);
+    res.status(500).json({ ok: false, error: 'inbound failed' }); // the provider retries
+  }
+});
 app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));
 // Okta/Entra may PUT a group with its full member list: allow larger bodies here only.
 app.use('/scim', express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] }));
