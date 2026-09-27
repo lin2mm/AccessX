@@ -64,12 +64,15 @@ const emptyVendor = createDemoVendor({ locks: [] });
 const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? liveVendor || demoVendor : emptyVendor);
 // Per-tenant TTLock accounts (owners connect their own; tokens sealed with SECRETS_KEY).
 // A connected account overrides vendorFor() for that tenant.
+const { createAlerts, emailConfigFromEnv, needsReconnectMessage } = require('./alerts-core');
 const vendorAccounts = createVendorAccounts({
   store,
   secretsKey: process.env.SECRETS_KEY || '',
   apiBase: process.env.TTLOCK_API_BASE || '', // deployment-level override (tests, egress proxy) — never per tenant
   platformApp: { clientId: process.env.TTLOCK_CLIENT_ID || '', clientSecret: process.env.TTLOCK_CLIENT_SECRET || '' },
   log: (...a) => console.error(...a),
+  // `alerts` is created below; the hook only runs later, at request time.
+  onNeedsReconnect: (tenantId, info) => alerts.send(tenantId, 'vendor_needs_reconnect', needsReconnectMessage(info)),
 });
 
 const auth = createAuthenticator({
@@ -80,8 +83,7 @@ const auth = createAuthenticator({
   openReads: process.env.AUTH_OPEN_READS === undefined ? tt.demo : process.env.AUTH_OPEN_READS === '1',
 });
 // Signed audit anchors (AUDIT_SIGNING_KEY, Ed25519 JWK) + retention.
-const { createAlerts } = require('./alerts-core');
-const alerts = createAlerts({ store, secretsKey: process.env.SECRETS_KEY || '', allowHttp: process.env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: process.env.PUBLIC_URL || '', log: (...a) => console.error(...a) });
+const alerts = createAlerts({ store, secretsKey: process.env.SECRETS_KEY || '', allowHttp: process.env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: process.env.PUBLIC_URL || '', email: emailConfigFromEnv(process.env), log: (...a) => console.error(...a) });
 const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: process.env.ALLOW_HTTP_WEBHOOKS === '1' });
 // SSO domain proof (TXT over DoH). Tests set overrides via `dns.set()`.
 const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
@@ -176,7 +178,7 @@ function startReconciler(minutes = Number(process.env.RECONCILE_INTERVAL_MIN ?? 
       .catch(error => console.error('reconcile failed', error));
     // Anchors at most daily per tenant; retention only below delivered anchors.
     api.maintenance()
-      .then(results => results.filter(r => r.anchored || r.purged || r.error).forEach(r => console.log('maintenance', JSON.stringify(r))))
+      .then(results => results.filter(r => r.anchored || r.purged || r.error || r.alerts).forEach(r => console.log('maintenance', JSON.stringify(r))))
       .catch(error => console.error('maintenance failed', error));
   }, minutes * 60e3);
   timer.unref();

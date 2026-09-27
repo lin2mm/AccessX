@@ -79,6 +79,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `TTLOCK_CLIENT_ID` / `TTLOCK_CLIENT_SECRET` | platform TTLock app | Tenants may bring their own app instead. `TTLOCK_API_BASE` overrides the region URL (tests). |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (Node default only in demo mode). |
+| `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
 | `ALLOW_HTTP_WEBHOOKS` | local testing | `1` allows `http://` alert and anchor webhooks. **Never in production**: webhook URLs carry secrets. |
 | `ALLOW_HTTP_ISSUERS` / `MOCK_IDP` | local testing | Allow `http://` OIDC issuers / mount a fake IdP. Never in production. |
 | `DOH_URL` | SSO domain verification | DNS-over-HTTPS resolver for the TXT check (default Cloudflare). |
@@ -182,9 +183,11 @@ Operators (people who administer the system) are separate from door users.
   removed at an offline lock is flagged in the revocation report and evidence
   pack once it passes the target, and escalated once in the audit log
   (`credential.removal_overdue`).
-- **Alerts to Slack / Teams / SIEM** — approval requests, overdue removals,
-  failed revocations and break-glass sign-ins go to one webhook per tenant
-  (URL stored encrypted).
+- **Alerts to Slack / Teams / SIEM / email** — approval requests, overdue
+  removals, failed revocations, break-glass sign-ins and a TTLock account
+  that must be reconnected go to one webhook per tenant (URL stored
+  encrypted) and/or up to 10 email recipients. Undelivered alerts are
+  retried for about a day, then recorded as `alerts.dropped`.
 - **Local times mean the site's clock** — passcode end dates and schedules
   are converted in the door's time zone; on a daylight-saving fall-back the
   ambiguous hour uses the *earlier* instant, a skipped hour moves forward

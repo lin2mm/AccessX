@@ -113,6 +113,197 @@ test('a revoke that fails alerts once; a dead webhook never fails the change', a
   await api.call('POST', '/api/reconcile', { ...OWNER, body: {} });
   assert.equal(hook.got.length, n1, 'the same failing credential does not alert every run');
   const st = (await api.call('GET', '/api/alerts', OWNER)).body.alerts;
-  assert.equal(st.lastDelivery.status, 'failed: HTTP 500');
+  assert.equal(st.lastDelivery.status, 'failed: HTTP 500 (will retry)');
+  assert.equal(st.retrying.count, 1, 'a 500 is transient: queued for retry');
   assert.equal(st.format, 'teams');
+});
+
+/** Answers with the scripted statuses in turn (the last one repeats); records headers and bodies. */
+async function scripted(t, statuses) {
+  const got = [];
+  const srv = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => { b += c; });
+    req.on('end', () => {
+      got.push({ path: req.url, headers: req.headers, body: JSON.parse(b || '{}') });
+      res.writeHead(statuses[Math.min(got.length - 1, statuses.length - 1)], { 'content-type': 'application/json' }); res.end('{}');
+    });
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  t.after(() => srv.close());
+  return { base: `http://127.0.0.1:${srv.address().port}`, url: `http://127.0.0.1:${srv.address().port}/hook/SECRET-PART`, got };
+}
+const outbox = api => api.server.store.sql.all('SELECT * FROM alert_outbox ORDER BY created_at');
+const makeDue = api => api.server.store.sql.batch([{ sql: 'UPDATE alert_outbox SET next_at = ?', params: [new Date(Date.now() - 1000).toISOString()] }]);
+/** Four-eyes request on a sensitive door → one approval_requested alert. */
+async function requestApproval(api) {
+  const dg = (await api.call('GET', '/api/doorGroups', OWNER)).body.doorGroups;
+  if (!dg.some(g => g.sensitive)) await api.call('POST', '/api/doorGroups', { ...OWNER, body: { name: 'Server room', siteId: 'site_river', lockIds: [9002], sensitive: true } });
+  const r = await api.call('POST', '/api/passcode', { ...M1, body: { lockId: 9002, userId: 'u2' } });
+  assert.equal(r.status, 202, JSON.stringify(r.body));
+}
+
+test('undelivered alerts are retried with backoff by the scheduled maintenance, same id each time', async t => {
+  const hook = await scripted(t, [500, 503, 200]);
+  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  t.after(api.close);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'json' } });
+  await requestApproval(api);
+  assert.equal(hook.got.length, 1);
+  let q = await outbox(api);
+  assert.equal(q.length, 1);
+  assert.equal(q[0].channel, 'webhook');
+  assert.equal(q[0].event, 'approval_requested');
+  assert.ok(!JSON.stringify(q).includes('SECRET-PART'), 'the outbox never holds the URL');
+  const st = (await api.call('GET', '/api/alerts', OWNER)).body.alerts;
+  assert.equal(st.lastDelivery.status, 'failed: HTTP 500 (will retry)');
+  assert.equal(st.retrying.count, 1);
+
+  await api.server.api.maintenance();
+  assert.equal(hook.got.length, 1, 'not due yet (5 min backoff)');
+
+  await makeDue(api);
+  const m1 = await api.server.api.maintenance();
+  assert.deepEqual({ ...m1.find(r => r.tenantId === 't_default').alerts }, { retried: 1, delivered: 0, dropped: 0, pending: 1 });
+  q = await outbox(api);
+  assert.equal(q[0].attempts, 2);
+  const wait = Date.parse(q[0].next_at) - Date.now();
+  assert.ok(wait > 9 * 60e3 && wait <= 10 * 60e3, `second backoff is 10 min, got ${wait}`);
+
+  await makeDue(api);
+  await api.server.api.maintenance();
+  assert.equal(hook.got.length, 3);
+  assert.equal((await outbox(api)).length, 0);
+  assert.equal((await api.call('GET', '/api/alerts', OWNER)).body.alerts.lastDelivery.status, 'delivered (retry 2)');
+  const ids = hook.got.map(g => g.body.id);
+  assert.ok(ids[0] && ids.every(id => id === ids[0]), 'one alert id across retries: receivers can de-duplicate');
+  assert.equal(hook.got[2].body.type, 'accessx.alert.approval_requested');
+});
+
+test('a 4xx is not retried; the 8th failure is given up and audited; removing the channel clears its queue', async t => {
+  const gone = await scripted(t, [404]);
+  const dead = await scripted(t, [500]);
+  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0' });
+  t.after(api.close);
+
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: gone.url } });
+  await requestApproval(api);
+  assert.equal((await outbox(api)).length, 0, '404 = misconfigured webhook: retrying will not help');
+  assert.equal((await api.call('GET', '/api/alerts', OWNER)).body.alerts.lastDelivery.status, 'failed: HTTP 404');
+
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: dead.url } });
+  await requestApproval(api);
+  await api.server.store.sql.batch([{ sql: 'UPDATE alert_outbox SET attempts = 7' }]);
+  await makeDue(api);
+  const m = await api.server.api.maintenance();
+  assert.equal(m.find(r => r.tenantId === 't_default').alerts.dropped, 1);
+  assert.equal((await outbox(api)).length, 0);
+  const log = (await api.call('GET', '/api/audit?action=alerts.dropped', OWNER)).body.log;
+  assert.equal(log.length, 1);
+  assert.match(log[0].detail, /webhook approval_requested after 8 attempts: failed: HTTP 500/);
+  assert.match((await api.call('GET', '/api/alerts', OWNER)).body.alerts.lastDelivery.status, /gave up/);
+
+  await requestApproval(api);
+  assert.equal((await outbox(api)).length, 1);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: '' } });
+  await makeDue(api);
+  const before = dead.got.length;
+  await api.server.api.maintenance();
+  assert.equal((await outbox(api)).length, 0);
+  assert.equal(dead.got.length, before, 'nothing is sent to a channel that was removed');
+});
+
+test('email alerts through Resend or Postmark: recipients validated, never audited; retries keep the idempotency key', async t => {
+  const resend = await scripted(t, [200, 502, 200]);
+  const api = await boot({
+    ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0', PUBLIC_URL: 'https://accessx.example',
+    EMAIL_PROVIDER: 'resend', EMAIL_API_KEY: 're_test_key', EMAIL_FROM: 'AccessX <alerts@accessx.example>', EMAIL_API_BASE: resend.base,
+  });
+  t.after(api.close);
+  assert.equal((await api.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['not-an-email'] } })).status, 400);
+  assert.equal((await api.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['a@x.example\r\nBcc: evil@x.example'] } })).status, 400, 'no header injection');
+  assert.equal((await api.call('PUT', '/api/alerts', { ...OWNER, body: { emails: Array.from({ length: 11 }, (_, i) => `p${i}@x.example`) } })).status, 400);
+  assert.equal((await api.call('PUT', '/api/alerts', { ...M1, body: { emails: ['m@x.example'] } })).status, 403);
+  const saved = await api.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['Security@Riverside.example', 'security@riverside.example', 'it@riverside.example'] } });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual(saved.body.alerts.emails, ['security@riverside.example', 'it@riverside.example']);
+  assert.equal(saved.body.alerts.emailProvider, 'resend');
+  const audit = (await api.call('GET', '/api/audit?action=alerts.settings', OWNER)).body.log[0].detail;
+  assert.match(audit, /emails=2/);
+  assert.ok(!audit.includes('riverside.example'), 'recipients are personal data: counted, not logged');
+
+  const t1 = await api.call('POST', '/api/alerts/test', { ...OWNER, body: {} });
+  assert.equal(t1.body.delivery, 'delivered');
+  const mail = resend.got[0];
+  assert.equal(mail.path, '/emails');
+  assert.equal(mail.headers.authorization, 'Bearer re_test_key');
+  assert.match(mail.headers['idempotency-key'], /^accessx-[0-9a-f-]{36}$/);
+  assert.deepEqual(mail.body.to, ['security@riverside.example', 'it@riverside.example']);
+  assert.equal(mail.body.from, 'AccessX <alerts@accessx.example>');
+  assert.equal(mail.body.subject, '[AccessX] AccessX test alert');
+  assert.match(mail.body.text, /Open AccessX: https:\/\/accessx\.example\//);
+  assert.equal(mail.body.html, undefined, 'plain text only');
+
+  // 502 → queued; the retry reuses the idempotency key (Resend drops a duplicate).
+  await requestApproval(api);
+  const q = await outbox(api);
+  assert.equal(q.length, 1);
+  assert.equal(q[0].channel, 'email');
+  assert.ok(!JSON.stringify(q).includes('riverside.example'), 'the outbox never holds recipients');
+  await makeDue(api);
+  await api.server.api.maintenance();
+  assert.equal(resend.got.length, 3);
+  assert.equal(resend.got[2].headers['idempotency-key'], resend.got[1].headers['idempotency-key']);
+  assert.match(resend.got[2].body.subject, /Approval needed/);
+
+  // Webhook and email together: both channels, one status each.
+  const hook = await scripted(t, [200]);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url } });
+  assert.equal((await api.call('POST', '/api/alerts/test', { ...OWNER, body: {} })).body.delivery, 'webhook: delivered; email: delivered');
+});
+
+test('Postmark request shape; email recipients need a configured provider; bad provider config fails at start', async t => {
+  const pm = await scripted(t, [200]);
+  const api = await boot({
+    ADMIN_TOKEN: 'owner-token', OPERATORS, SECRETS_KEY, RECONCILE_INTERVAL_MIN: '0',
+    EMAIL_PROVIDER: 'postmark', EMAIL_API_KEY: 'pm-server-token', EMAIL_FROM: 'alerts@accessx.example', EMAIL_API_BASE: pm.base,
+  });
+  t.after(api.close);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['a@x.example', 'b@x.example'] } });
+  assert.equal((await api.call('POST', '/api/alerts/test', { ...OWNER, body: {} })).body.delivery, 'delivered');
+  const m = pm.got[0];
+  assert.equal(m.path, '/email');
+  assert.equal(m.headers['x-postmark-server-token'], 'pm-server-token');
+  assert.equal(m.body.To, 'a@x.example,b@x.example');
+  assert.equal(m.body.MessageStream, 'outbound');
+  assert.match(m.body.TextBody, /AccessX test alert/);
+
+  const plain = await boot({ ADMIN_TOKEN: 'owner-token', SECRETS_KEY, RECONCILE_INTERVAL_MIN: '0' });
+  t.after(plain.close);
+  const r = await plain.call('PUT', '/api/alerts', { ...OWNER, body: { emails: ['a@x.example'] } });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /EMAIL_PROVIDER/);
+
+  const { createAlerts } = require('../alerts-core');
+  assert.throws(() => createAlerts({ store: {}, email: { provider: 'smtp', apiKey: 'k', from: 'a@b.c' } }), /EMAIL_PROVIDER must be one of resend, postmark/);
+  assert.throws(() => createAlerts({ store: {}, email: { provider: 'resend', apiKey: '', from: 'a@b.c' } }), /EMAIL_API_KEY/);
+});
+
+test('TTLock refusing the account alerts the owners once (vendor_needs_reconnect)', async t => {
+  const { demoFixture } = require('../support/fake-ttlock');
+  const cloud = demoFixture();
+  const base = await cloud.listen(0);
+  const hook = await scripted(t, [200]);
+  const api = await boot({
+    ADMIN_TOKEN: 'owner-token', SECRETS_KEY, ALLOW_HTTP_WEBHOOKS: '1', RECONCILE_INTERVAL_MIN: '0',
+    TTLOCK_API_BASE: base, TTLOCK_CLIENT_ID: 'platform-app', TTLOCK_CLIENT_SECRET: 'platform-secret',
+  });
+  t.after(async () => { await api.close(); await cloud.close(); });
+  assert.equal((await api.call('PUT', '/api/vendor-account', { ...OWNER, body: { region: 'eu', username: 'riverside-admin', password: 'river-pass-1' } })).status, 200);
+  await api.call('PUT', '/api/alerts', { ...OWNER, body: { webhookUrl: hook.url, format: 'slack' } });
+  cloud.revokeAccount('riverside-admin');
+  for (let i = 0; i < 3; i++) assert.equal((await api.call('POST', '/api/doors/9001/unlock', { ...OWNER, body: { reason: 'delivery' } })).status, 503);
+  const alertsSent = hook.got.filter(g => /TTLock account must be reconnected/.test(g.body.text));
+  assert.equal(alertsSent.length, 1, 'one alert per incident, not per failed request');
+  assert.match(alertsSent[0].body.text, /uid 71001/);
+  assert.ok(!alertsSent[0].body.text.includes('riverside-admin'), 'the TTLock username is not sent');
 });

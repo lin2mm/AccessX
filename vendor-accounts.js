@@ -42,6 +42,7 @@ function loginError(error) {
 function createVendorAccounts({
   store, secretsKey = '', fetchFn, apiBase = '', platformApp = {}, log = () => {},
   refreshBeforeMs = 7 * DAY, lockCacheMs = 60e3, now = () => Date.now(), refreshGraceMs = 3000,
+  onNeedsReconnect = null, // (tenantId, { accountUid, why }) → alert the owners; called once per incident
 }) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const sql = store.sql;
@@ -79,6 +80,9 @@ function createVendorAccounts({
     cache.delete(tenantId);
     if (!after || after.status !== 'needs_reconnect' || after.sealed !== r.sealed || after.updated_at !== at) return false; // someone else won
     await store.tenant(tenantId).unit().audit('vendor.needs_reconnect', `ttlock uid=${r.account_uid}: ${String(why).slice(0, 120)}`, 'system').commit();
+    if (onNeedsReconnect) {
+      try { await onNeedsReconnect(tenantId, { accountUid: r.account_uid, why: String(why).slice(0, 200) }); } catch (error) { log('needs_reconnect hook failed', error.message); }
+    }
     return true;
   }
 

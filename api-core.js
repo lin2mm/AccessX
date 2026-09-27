@@ -907,7 +907,7 @@ function createApi({
   route('PUT', /^\/api\/alerts$/, async ctx => ({ alerts: await needAlerts().save(ctx.tenantId, ctx.body, ctx.actor) }));
   route('POST', /^\/api\/alerts\/test$/, async ctx => {
     const status = await needAlerts().send(ctx.tenantId, 'test', {
-      title: 'AccessX test alert', text: `Sent by ${ctx.actor}. You will get approval requests, overdue on-site removals, failed revocations and break-glass sign-ins here.`,
+      title: 'AccessX test alert', text: `Sent by ${ctx.actor}. You will get approval requests, overdue on-site removals, failed revocations, break-glass sign-ins and TTLock reconnect warnings here.`,
       facts: [['Tenant', (await ctx.snap()).tenant.name]], path: '/',
     }, { force: true });
     return { delivery: status, alerts: await alerts.settings(ctx.tenantId) };
@@ -1458,22 +1458,31 @@ function createApi({
     }
   }
 
-  /** Daily housekeeping per tenant: anchor the audit head, apply retention. */
-  /** Anchor + retention for one tenant (never throws). */
+  /**
+   * Scheduled housekeeping for one tenant (never throws): anchor the audit
+   * head (daily), apply retention, retry undelivered alerts.
+   */
   async function maintainOne(tenantId) {
-    if (!auditOps) return { tenantId, skipped: 'no audit ops' };
-    try {
-      const a = await auditOps.maybeAnchor(tenantId);
-      const p = await auditOps.maybePurge(tenantId);
-      return { tenantId, anchored: a.anchor && !a.skipped ? a.anchor.seq : null, delivery: a.anchor && !a.skipped ? a.anchor.deliveryStatus : undefined, purged: p.purged || 0 };
-    } catch (error) {
-      log(`maintenance ${tenantId} failed`, error);
-      return { tenantId, error: String(error.message || error) };
+    const out = { tenantId };
+    if (auditOps) {
+      try {
+        const a = await auditOps.maybeAnchor(tenantId);
+        const p = await auditOps.maybePurge(tenantId);
+        Object.assign(out, { anchored: a.anchor && !a.skipped ? a.anchor.seq : null, delivery: a.anchor && !a.skipped ? a.anchor.deliveryStatus : undefined, purged: p.purged || 0 });
+      } catch (error) {
+        log(`maintenance ${tenantId} failed`, error);
+        out.error = String(error.message || error);
+      }
     }
+    if (alerts) {
+      const f = await alerts.flush(tenantId);
+      if (f.retried || f.error) out.alerts = f;
+    }
+    return out;
   }
 
   async function maintenance() {
-    if (!auditOps) return [];
+    if (!auditOps && !alerts) return [];
     const results = [];
     for (const id of await tenantIds()) results.push(await serialize(id, () => maintainOne(id)));
     return results;

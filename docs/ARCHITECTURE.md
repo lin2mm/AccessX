@@ -246,7 +246,25 @@ clobbers a concurrent settings change) and never fails the change that
 triggered it; the audit log stays the record. Repeating conditions alert
 once: overdue removals ride on the one-time `credential.removal_overdue`
 entry, failed revokes alert only when the credential had no earlier
-`credential.revoke_failed`.
+`credential.revoke_failed`. `vendor_needs_reconnect` fires from
+`markNeedsReconnect` only for the request whose compare-and-set won, so an
+incident alerts once however many requests hit the dead token.
+
+**Email and retries.** Email goes through an HTTP API (`EMAIL_PROVIDER` =
+`resend` | `postmark`; Workers cannot open SMTP connections), plain text
+only, up to 10 recipients per tenant; recipients are personal data, so the
+audit records their number, not the addresses. A delivery that fails
+transiently (network, timeout, 5xx, 408, 429) is written to `alert_outbox`
+(migration 0010) and retried by the scheduled maintenance (`maintainOne`,
+i.e. inside the tenant's Durable Object on Cloudflare): 5, 10, 20 … minutes,
+at most 6 h apart, 8 attempts (~17 h), then deleted with an `alerts.dropped`
+audit entry. Other 4xx mean a misconfigured channel and are not retried. The
+outbox holds the message but never the URL or the recipients, so a retry goes
+where the channel points *now*, and nothing goes to a channel removed
+meanwhile. One alert id is reused on every attempt: the JSON format carries
+it as `id`, Resend gets it as `Idempotency-Key` (24 h), Postmark as metadata.
+Queued messages may contain a person's name for up to ~17 h after they are
+erased (the audit log never does). At most 500 queued alerts per tenant.
 
 **RBAC coverage gate.** `rbac-core.js` fails closed: a path matching no rule
 needs the owner. That is safe but hides mistakes — a new manager-level route

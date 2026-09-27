@@ -465,18 +465,24 @@ $('#a-verify').addEventListener('click',async()=>{
     ?`✓ ${v.count} entries intact · head #${v.head.seq} ${v.head.hash.slice(0,12)}…`
     :`✗ chain broken at entry #${v.brokenAt}: ${v.problem}`;
 });
-const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins'};
+const ALERT_LABELS={approval_requested:'Approval requests',removal_overdue:'Codes past the removal target',revoke_failed:'Failed revocations',break_glass:'Break-glass sign-ins',vendor_needs_reconnect:'TTLock account must be reconnected'};
 async function loadAlerts(){
   const r=await api('/api/alerts');
   $('#alerts-box').hidden=!r.ok;
   if(!r.ok)return;
   const a=r.alerts;
-  $('#alerts-state').textContent=(a.configured?`Sending to ${a.host} as ${a.format}`:'No webhook yet.')+
-    ` · removal target ${a.slaHours} h`+(a.lastDelivery?` · last delivery ${new Date(a.lastDelivery.at).toLocaleString()}: ${a.lastDelivery.status}`:'')+
+  const when=d=>`${new Date(d.at).toLocaleString()}: ${d.status}`;
+  $('#alerts-state').textContent=(a.host?`Webhook: ${a.host} as ${a.format}`:'No webhook.')+
+    (a.emails.length?` · email to ${a.emails.length} recipient${a.emails.length>1?'s':''} (${a.emailProvider})`:'')+
+    ` · removal target ${a.slaHours} h`+(a.lastDelivery?` · last webhook delivery ${when(a.lastDelivery)}`:'')+
+    (a.lastEmailDelivery?` · last email ${when(a.lastEmailDelivery)}`:'')+
+    (a.retrying&&a.retrying.count?` · ${a.retrying.count} waiting for retry (next ${new Date(a.retrying.nextAt).toLocaleTimeString()})`:'')+
     (a.secretsKeyConfigured?'':' · SECRETS_KEY is not set on the server, so a webhook cannot be stored');
   $('#al-sla').value=a.slaHours;
   $('#al-format').value=a.format||'';
-  $('#al-remove').hidden=!a.configured;$('#al-test').hidden=!a.configured;
+  $('#al-emails-wrap').hidden=!a.emailAvailable;
+  $('#al-emails').value=a.emails.join(', ');
+  $('#al-remove').hidden=!a.host;$('#al-test').hidden=!a.configured;
   $('#al-events').innerHTML=a.availableEvents.map(e=>`<label style="display:inline-flex;gap:6px;align-items:center;margin-right:14px;font-weight:normal"><input type="checkbox" data-alev="${esc(e)}" ${a.events.includes(e)?'checked':''}>${esc(ALERT_LABELS[e]||e)}</label>`).join('');
 }
 $('#alerts-form').addEventListener('submit',async e=>{
@@ -484,6 +490,7 @@ $('#alerts-form').addEventListener('submit',async e=>{
   const body={slaHours:Number($('#al-sla').value),events:[...document.querySelectorAll('[data-alev]')].filter(x=>x.checked).map(x=>x.dataset.alev)};
   if($('#al-format').value)body.format=$('#al-format').value;
   if($('#al-url').value.trim())body.webhookUrl=$('#al-url').value.trim();
+  if(!$('#al-emails-wrap').hidden)body.emails=$('#al-emails').value.split(/[\s,;]+/).filter(Boolean);
   const r=await api('/api/alerts',{method:'PUT',body:JSON.stringify(body)});
   $('#al-url').value='';
   $('#alerts-msg').textContent=r.ok?'Saved.':errText(r);
