@@ -591,17 +591,23 @@ function createApi({
   // --- credentials -----------------------------------------------------
   route('POST', /^\/api\/passcode$/, async ctx => {
     const snap = await ctx.snap();
-    const { lockId, name, userId, startAt, acknowledgeScheduleGap } = ctx.body;
+    const { lockId, name, userId, acknowledgeScheduleGap } = ctx.body;
     let { endAt } = ctx.body;
     if (lockId === undefined || lockId === null || lockId === '') throw new HttpError(400, 'lockId is required');
-    // endLocal = wall-clock time AT THE DOOR ("2026-10-31T23:59"), not in the admin's browser.
-    if (ctx.body.endLocal !== undefined) {
-      const site = policy.siteForLock(snap, lockId);
-      const tz = policy.siteTimeZone(snap, site ? site.id : null);
-      const t = policy.zonedTimeToDate(String(ctx.body.endLocal), tz);
-      if (Number.isNaN(t.getTime())) throw new HttpError(400, 'endLocal must look like 2026-10-31T23:59');
-      endAt = t.toISOString();
-    }
+    let { startAt } = ctx.body;
+    // startLocal / endLocal = wall-clock time AT THE DOOR ("2026-10-31T08:00"), not in the admin's browser.
+    // A later start matters on TTLock: a period code must be used within 24 h of its start or the lock voids it.
+    const site = policy.siteForLock(snap, lockId);
+    const tz = policy.siteTimeZone(snap, site ? site.id : null);
+    const atDoor = (v, name) => {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(v))) throw new HttpError(400, `${name} must look like 2026-10-31T08:00 (time at the door)`);
+      const t = policy.zonedTimeToDate(String(v), tz, { prefer: name === 'startLocal' ? 'later' : 'earlier' });
+      if (Number.isNaN(t.getTime())) throw new HttpError(400, `${name} is not a valid time`);
+      return t.toISOString();
+    };
+    if (ctx.body.startLocal !== undefined && ctx.body.startLocal !== '') startAt = atDoor(ctx.body.startLocal, 'startLocal');
+    if (ctx.body.endLocal !== undefined) endAt = atDoor(ctx.body.endLocal, 'endLocal');
+    if (startAt && Date.parse(startAt) > Date.now() + 90 * 864e5) throw new HttpError(400, 'a passcode can start at most 90 days ahead');
     await ctx.requireLock(lockId);
     if (!ctx.scope.lock(lockId)) throw forbiddenSite(lockId);
     const user = snap.users.find(u => u.id === userId);

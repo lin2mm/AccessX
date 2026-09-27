@@ -56,3 +56,26 @@ test('site managers can only issue and revoke at their sites', async t => {
   const revoked = await api.call('DELETE', `/api/credentials/${id}`, { token: 'gym-token' });
   assert.equal(revoked.body.credential.status, 'revoked');
 });
+
+test('a passcode can start later, on the door clock — so TTLock\'s 24 h first-use rule counts from the first day of use', async t => {
+  const api = await boot({ ADMIN_TOKEN: 'owner-token', OPERATORS });
+  t.after(api.close);
+  const owner = { token: 'owner-token' };
+  const day = n => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date(Date.now() + n * 864e5));
+  const local = iso => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso)).replace(', ', 'T');
+  const r = await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2', startLocal: `${day(3)}T08:00`, endLocal: `${day(10)}T00:00` } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(local(r.body.credential.startAt), `${day(3)}T08:00`);
+  assert.equal(local(r.body.credential.endAt), `${day(10)}T00:00`);
+  const rule = r.body.warnings.find(w => /within 24 h/.test(w));
+  assert.ok(rule && rule.includes(`${day(4)} 08:00`), `deadline counts from the chosen start: ${rule}`);
+  assert.ok(!r.body.warnings.some(w => /whole hours/.test(w)), 'already whole hours: no rounding notice');
+  // Without an end: the default 7 days run from the start, not from now.
+  const d = await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2', startLocal: `${day(3)}T08:00` } });
+  assert.equal(Date.parse(d.body.credential.endAt) - Date.parse(d.body.credential.startAt), 7 * 864e5);
+  for (const bad of ['tomorrow', `${day(3)} 08:00`]) {
+    assert.equal((await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2', startLocal: bad } })).status, 400, bad);
+  }
+  assert.equal((await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2', startLocal: `${day(120)}T08:00` } })).status, 400, 'at most 90 days ahead');
+  assert.equal((await api.call('POST', '/api/passcode', { ...owner, body: { lockId: 9002, userId: 'u2', startLocal: `${day(5)}T08:00`, endLocal: `${day(4)}T00:00` } })).status, 400, 'end before start');
+});

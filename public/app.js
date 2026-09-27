@@ -103,7 +103,7 @@ function tzNote(lockId){
 function refreshTzNotes(prefill=false){
   const e=$('#e-door').value,p=$('#p-door').value;
   if(e){$('#e-tz').innerHTML=tzNote(e);if(prefill){const n=tzParts(new Date(),doorTz(e));$('#e-when').value=`${n.date}T${n.time}`;}}
-  if(p){$('#p-tz').innerHTML=tzNote(p);$('#p-end').min=tzParts(new Date(),doorTz(p)).date;}
+  if(p){const today=tzParts(new Date(),doorTz(p)).date;$('#p-tz').innerHTML=tzNote(p);$('#p-end').min=$('#p-start').value||today;$('#p-start').min=today;}
 }
 async function loadDoors(){
   const d=await api('/api/doors');DOORS=d.doors||[];
@@ -425,10 +425,11 @@ $('#appr-list').addEventListener('click',async e=>{
 
 /* ---- passcodes ---- */
 async function issuePasscode(acknowledge=false){
-  const end=$('#p-end').value;
+  const end=$('#p-end').value,start=$('#p-start').value;
   const body={userId:$('#p-user').value,lockId:Number($('#p-door').value),acknowledgeScheduleGap:acknowledge};
   // End of that day = 00:00 the next day at the door (TTLock codes run on whole hours).
   if(end)body.endLocal=nextDay(end)+'T00:00'; // converted in the door's time zone on the server
+  if(start)body.startLocal=`${start}T${$('#p-start-h').value||'08:00'}`;
   const r=await post('/api/passcode',body);
   const out=$('#p-res');
   if(r._status===409&&r.needs==='acknowledgeScheduleGap'){
@@ -585,6 +586,8 @@ $('#ai-in').addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 /* ---- visitors: a code per door, valid only for the visit ---- */
 function nextDay(ymd){const d=new Date(ymd+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+1);return d.toISOString().slice(0,10);}
 const hh=h=>String(h).padStart(2,'0')+':00';
+$('#p-start-h').innerHTML=Array.from({length:24},(_,h)=>`<option value="${hh(h)}"${h===8?' selected':''}>${hh(h)}</option>`).join('');
+$('#p-start').addEventListener('change',()=>{refreshTzNotes();if($('#p-end').value&&$('#p-end').value<$('#p-start').value)$('#p-end').value='';});
 let VIS={hosts:[],settings:null};
 function visDoors(){return DOORS.filter(d=>d.siteId);}
 /** Doors of one site per visit: once a door is ticked, other sites' doors are disabled. */
