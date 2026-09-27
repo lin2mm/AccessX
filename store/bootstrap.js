@@ -74,4 +74,35 @@ async function seedTenant(store, tenantId, { data, sealedAudit = null, legacyAud
   return { seeded: true, counts };
 }
 
-module.exports = { seedTenant, inferGroupSites };
+/**
+ * Put a demo tenant back to its sample data (R15, POST
+ * /api/platform/tenants/:id/demo-reset). One transaction. The audit chain is
+ * append-only and stays: the reset is one more entry on it. Operators,
+ * sessions, settings, billing and roles already present are kept; everything
+ * a demo visitor could have typed (people, groups, rules, codes, visitors,
+ * approvals, alarms) is replaced. The caller checks that the tenant has no
+ * real doors.
+ */
+const DEMO_RESET_TABLES = ['approvals', 'credentials', 'visit_invites', 'visits', 'alert_outbox', 'lock_alarms', 'lock_battery', 'lock_health',
+  'directory_groups', 'assignments', 'users', 'user_groups', 'door_groups', 'schedules', 'holidays', 'sites'];
+async function resetDemoTenant(store, tenantId, { data, actor = 'platform' } = {}) {
+  const t = store.tenant(tenantId);
+  const snap = await t.snapshot();
+  const { data: sample } = inferGroupSites(data || {});
+  const haveRoles = new Set((snap.roles || []).map(r => r.id));
+  const uow = t.unit();
+  for (const table of DEMO_RESET_TABLES) uow.raw(`DELETE FROM ${table} WHERE tenant_id = ?`, [tenantId]);
+  const counts = {};
+  for (const collection of Object.keys(COLLECTIONS)) {
+    let items = Array.isArray(sample[collection]) ? sample[collection] : [];
+    if (collection === 'roles') items = (items.length ? items : rbac.DEFAULT_ROLES).filter(r => !haveRoles.has(r.id));
+    items.forEach(item => uow.insert(collection, { ...item, id: item.id || policy.uid(collection.slice(0, 3)) }));
+    counts[collection] = items.length;
+  }
+  const summary = Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${k}=${n}`).join(' ');
+  uow.audit('demo.reset', `sample data restored: ${summary}`, actor);
+  await uow.commit();
+  return counts;
+}
+
+module.exports = { resetDemoTenant, DEMO_RESET_TABLES, seedTenant, inferGroupSites };

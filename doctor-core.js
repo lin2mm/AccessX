@@ -122,6 +122,18 @@ function checkConfig(env = {}, { runtime = 'node', production = true, present = 
     else add('ok', 'SMS_PROVIDER', 'SMS via Twilio with a monthly cap');
   } else if (val('SMS_PROVIDER')) add('error', 'SMS_PROVIDER', `SMS_PROVIDER "${val('SMS_PROVIDER')}" is not twilio`);
 
+  // --- self-service signup (R15)
+  if (val('SIGNUP_ENABLED') === '1') {
+    const miss = [!has('EMAIL_PROVIDER') && 'EMAIL_PROVIDER', !has('PUBLIC_URL') && 'PUBLIC_URL'].filter(Boolean);
+    if (miss.length) add('error', 'SIGNUP_ENABLED', `signup is on but stays off without ${miss.join(' and ')} (the emailed link proves the address)`);
+    else {
+      if (!val('SIGNUP_TERMS_URL')) add('warn', 'SIGNUP_TERMS_URL', 'signup has no terms link: new customers accept terms they cannot read', 'SIGNUP_TERMS_URL=https://your-site/terms');
+      else if (!/^https:\/\//.test(val('SIGNUP_TERMS_URL'))) add(bad, 'SIGNUP_TERMS_URL', 'SIGNUP_TERMS_URL must be an https URL');
+      if (val('BILLING_ENABLED') !== '1') add('warn', 'SIGNUP_ENABLED', 'signup is open and billing is off: every new account is free with no end date');
+      add('ok', 'SIGNUP_ENABLED', `self-service signup is on (at most ${val('SIGNUP_DAILY_LIMIT') || 50} per day)`);
+    }
+  }
+
   // --- billing
   if (val('BILLING_ENABLED') === '1' || present.has('BILLING_ENABLED')) {
     const c = billingConfigFromEnv(env);

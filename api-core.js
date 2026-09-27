@@ -19,10 +19,12 @@ const health = require('./lock-health-core');
 const onboarding = require('./onboarding-core');
 const billingCore = require('./billing-core');
 const doctorCore = require('./doctor-core');
+const signupCore = require('./signup-core');
+const { ipKey } = require('./rate-limit-core');
 // The newest migration this code needs. GET /api/healthz answers 503 until the
 // database has it ("always migrate before deploying"). A test keeps it equal
 // to the last file in migrations/.
-const SCHEMA_VERSION = '0021_billing_ops';
+const SCHEMA_VERSION = '0022_signups';
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -35,7 +37,7 @@ const { segments: smsSegments, normalizePhone } = require('./sms-core');
 const { createSecretsRotation } = require('./secrets-rotation');
 const { revocationReport } = require('./reports-core');
 const { createScim, membershipChanges, errorBody: scimErrorBody, CONTENT_TYPE: SCIM_TYPE } = require('./scim-core');
-const { seedTenant } = require('./store/bootstrap');
+const { seedTenant, resetDemoTenant } = require('./store/bootstrap');
 
 class HttpError extends Error {
   constructor(status, error, extra = {}) { super(error); this.status = status; this.extra = extra; }
@@ -121,7 +123,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null,
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null, doctor = null, signup = null, demoData = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -2116,6 +2118,105 @@ function createApi({
 
   route('POST', /^\/api\/ai$/, async ctx => ({ answer: await copilot(ctx) }));
 
+  // --- self-service signup (docs/21-SIGNUP.md) ------------------------------
+  // Off unless SIGNUP_ENABLED=1, and only usable with email and PUBLIC_URL:
+  // the emailed link is the proof of the address.
+  const signupCfg = { ...signupCore.signupConfigFromEnv({}), ...(signup || {}) };
+  const signupOn = () => Boolean(signupCfg.enabled && alerts && alerts.emailAvailable && publicUrl);
+  const signupOff = { status: 404, body: { ok: false, error: 'Self-service signup is not available here. Contact us for an account.' } };
+  function signupInfo() {
+    return { status: 200, body: { ok: true, enabled: signupOn(), termsUrl: signupCfg.termsUrl || null, billing: billingOn(), linkHours: signupCore.DEFAULTS.linkHours } };
+  }
+  async function signupPublic(body = {}, { ip = 'unknown' } = {}) {
+    await whenReady();
+    if (!signupOn()) return signupOff;
+    const D = signupCore.DEFAULTS;
+    // Same answer for new, known and capped addresses: no account oracle.
+    const sent = { status: 200, body: { ok: true, message: `Check your inbox: we sent a link to confirm the address. It works for ${D.linkHours} hours.` } };
+    if (body && typeof body.website === 'string' && body.website) return sent; // form field people never see
+    let s;
+    try { s = signupCore.validateSignup(body || {}); } catch (error) {
+      if (error instanceof signupCore.SignupError) return { status: error.status, body: { ok: false, error: error.message } };
+      throw error;
+    }
+    const now = Date.now();
+    const since = new Date(now - 864e5).toISOString();
+    const count = async (where, params) => Number(((await store.sql.first(`SELECT COUNT(*) AS n FROM signups WHERE ${where}`, params)) || {}).n || 0);
+    if (await count('created_at >= ?', [since]) >= signupCfg.dailyLimit) {
+      log('signup: daily limit reached', signupCfg.dailyLimit);
+      return { status: 429, body: { ok: false, error: 'Signups are paused for today. Please try again tomorrow, or contact us.' }, headers: { 'retry-after': '3600' } };
+    }
+    const ipk = ipKey(ip);
+    if (await count('ip_key = ? AND created_at >= ?', [ipk, since]) >= D.perIpPerDay) {
+      return { status: 429, body: { ok: false, error: 'Too many signups from this network today. Please try again tomorrow.' }, headers: { 'retry-after': '3600' } };
+    }
+    const capped = await count('email = ? AND created_at >= ?', [s.email, since]) >= D.perEmailPerDay;
+    const token = randomToken(32);
+    const id = policy.uid('sgn');
+    await store.sql.batch([{
+      sql: 'INSERT INTO signups (id, email, company, name, time_zone, token_sha256, ip_key, sent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      params: [id, s.email, s.company, s.name, s.timeZone, sha256Hex(token), ipk, capped ? 'skipped: address limit' : null, new Date(now).toISOString(), new Date(now + D.linkHours * 3600e3).toISOString()],
+    }]);
+    if (capped) return sent;
+    const link = `${publicUrl.replace(/\/+$/, '')}/signup.html#t=${token}`;
+    const delivery = await alerts.emailTo(s.email, signupCore.verificationEmail({ ...s, link, hours: D.linkHours }), `signup-${id}`);
+    await store.sql.batch([{ sql: 'UPDATE signups SET sent = ? WHERE id = ?', params: [String(delivery).slice(0, 200), id] }]);
+    if (delivery !== 'delivered') {
+      log('signup: email failed', id, delivery);
+      return { status: 502, body: { ok: false, error: 'We could not send the email just now. Please try again in a few minutes.' } };
+    }
+    return sent;
+  }
+  /** The emailed link: creates the tenant and its owner, once. */
+  async function signupVerifyPublic(body = {}) {
+    await whenReady();
+    if (!signupOn()) return signupOff;
+    const gone = { status: 410, body: { ok: false, error: 'This link has expired or was already used. You can start again from the signup page.' } };
+    const token = body && typeof body.token === 'string' ? body.token : '';
+    if (!/^[A-Za-z0-9_-]{20,100}$/.test(token)) return gone;
+    const nowIso = new Date().toISOString();
+    const row = await store.sql.first('SELECT * FROM signups WHERE token_sha256 = ?', [sha256Hex(token)]);
+    if (!row || row.used_at || row.expires_at <= nowIso || String(row.sent || '').startsWith('skipped')) return gone;
+    // Claim it (compare-and-set, then read back: only one opener wins).
+    const claim = policy.uid('clm');
+    await store.sql.batch([{ sql: 'UPDATE signups SET used_at = ?, claim = ? WHERE id = ? AND used_at IS NULL', params: [nowIso, claim, row.id] }]);
+    const mine = await store.sql.first('SELECT claim FROM signups WHERE id = ?', [row.id]);
+    if (!mine || mine.claim !== claim) return gone;
+    const tenantId = `t_${randomToken(6)}`;
+    await store.createTenant(tenantId, row.company);
+    await seedTenant(store, tenantId, { data: { settings: { defaultTimezone: row.time_zone } }, source: 'signup' });
+    const ownerToken = `ax_${randomToken()}`;
+    const op = { id: policy.uid('op'), name: row.name, role: 'r_owner', email: row.email, tokenSha256: sha256Hex(ownerToken), createdBy: 'signup' };
+    const stmt = operatorStatement(tenantId, op);
+    await store.tenant(tenantId).unit().raw(stmt.sql, stmt.params)
+      .audit('operator.create', `${op.id} role=r_owner sites=* (self-service signup; email ${row.email} verified by link)`, 'signup').commit();
+    await store.sql.batch([{ sql: 'UPDATE signups SET tenant_id = ? WHERE id = ?', params: [tenantId, row.id] }]);
+    log('signup: tenant created', tenantId);
+    return { status: 200, body: { ok: true, tenant: { id: tenantId, name: row.company }, owner: { id: op.id, name: row.name, token: ownerToken }, billing: billingOn() } };
+  }
+
+  // Platform: recent signups (who asked, was the email sent, which tenant came of it).
+  route('GET', /^\/api\/platform\/signups$/, async () => {
+    const since = new Date(Date.now() - 864e5).toISOString();
+    const rows = await store.sql.all('SELECT id, email, company, name, time_zone, sent, created_at, expires_at, used_at, tenant_id FROM signups ORDER BY created_at DESC LIMIT 100');
+    const today = await store.sql.first('SELECT COUNT(*) AS n FROM signups WHERE created_at >= ?', [since]);
+    return { signups: { enabled: signupOn(), last24h: Number(today.n || 0), dailyLimit: signupCfg.dailyLimit, keepDays: signupCore.DEFAULTS.keepDays,
+      recent: rows.map(r => ({ id: r.id, email: r.email, company: r.company, name: r.name, timeZone: r.time_zone, sent: r.sent, createdAt: r.created_at, expiresAt: r.expires_at, usedAt: r.used_at, tenantId: r.tenant_id })) } };
+  });
+
+  // Platform: put a demo tenant back to the sample data. Refused for any
+  // tenant that could have real doors or a customer relationship.
+  route('POST', /^\/api\/platform\/tenants\/([^/]+)\/demo-reset$/, async (ctx, [tenantId]) => {
+    if (!demoData) throw new HttpError(501, 'no sample data on this server');
+    if (!(await store.tenant(tenantId).info())) throw new HttpError(404, 'tenant not found');
+    if (ctx.body.confirm !== tenantId) throw new HttpError(400, 'confirm must repeat the tenant id');
+    if (await store.sql.first('SELECT 1 AS x FROM vendor_accounts WHERE tenant_id = ?', [tenantId])) throw new HttpError(409, 'this tenant has a TTLock account connected: only demo tenants can be reset');
+    if (!(await resolveVendor(tenantId)).demo) throw new HttpError(409, 'this tenant uses real locks: only demo tenants can be reset');
+    if (await store.sql.first('SELECT 1 AS x FROM billing_accounts WHERE tenant_id = ?', [tenantId])) throw new HttpError(409, 'this tenant has a billing account: only demo tenants can be reset');
+    const counts = await serialize(tenantId, () => resetDemoTenant(store, tenantId, { data: demoData, actor: 'platform' }));
+    return { reset: { tenantId, counts } };
+  });
+
   // --- platform: tenants ---------------------------------------------------
   route('GET', /^\/api\/tenants$/, async () => ({ tenants: await store.listTenants() }));
   route('POST', /^\/api\/tenants$/, async ctx => {
@@ -2786,6 +2887,7 @@ function createApi({
     try {
       if (path === '/api/auth' && method === 'GET') return { status: 200, body: { ok: true, ...auth.status() } };
       if (path === '/api/healthz' && method === 'GET') return await liveness();
+      if (path === '/api/signup' && method === 'GET') return signupInfo();
       await whenReady();
       const sessionRoute = sessionRoutes[`${method} ${path}`];
       if (sessionRoute) {
@@ -2874,6 +2976,13 @@ function createApi({
       if (d) out.digest = d;
     }
     try {
+      // Signup requests (email, name) go after keepDays, used or not. Global
+      // table; any tenant's run may do it, the DELETE is idempotent.
+      await store.sql.batch([{ sql: 'DELETE FROM signups WHERE created_at < ?', params: [new Date(Date.now() - signupCore.DEFAULTS.keepDays * 864e5).toISOString()] }]);
+    } catch (error) {
+      log('maintenance signup retention failed', error);
+    }
+    try {
       const n = await pollArrivals(tenantId);
       if (n) out.arrivals = n;
     } catch (error) {
@@ -2951,7 +3060,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, signupPublic, signupVerifyPublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError, SCHEMA_VERSION };

@@ -18,6 +18,9 @@ const LIMITS = {
   visitorLink: { limit: 20, periodSec: 60, binding: 'RL_PUBLIC' },
   // Stripe webhooks: signed, but a flood of bad signatures still costs an HMAC each.
   stripe: { limit: 600, periodSec: 60, binding: 'RL_NOTIFY' },
+  // Self-service signup and its emailed link (R15). The daily caps per
+  // address and in total are in signup-core (counted in the database).
+  signup: { limit: 10, periodSec: 60, binding: 'RL_PUBLIC' },
 };
 
 /** Rate-limit key for an address: IPv4 as is; IPv6 by its /64 (one host gets a whole /64). */

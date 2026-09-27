@@ -23,6 +23,9 @@ function showSession(s){
   $('#admin-logout').hidden=!signedIn;
   $('#admin-token').hidden=signedIn;$('#admin-submit').hidden=signedIn;
   $('#sso-btn').hidden=signedIn||!(s&&s.sso);
+  // Self-service signup (R15): the link shows only when this server takes signups.
+  if(signedIn)$('#signup-link').hidden=true;
+  else fetch('/api/signup',{cache:'no-store'}).then(r=>r.json()).then(i=>{$('#signup-link').hidden=!i.enabled||signedIn;}).catch(()=>{});
   if(signedIn){
     const op=s.operator||{};
     const scope=(op.siteIds||['*']).includes('*')?'all sites':(op.siteNames||op.siteIds).join(', ');

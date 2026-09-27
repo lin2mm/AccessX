@@ -78,6 +78,7 @@ const vendorAccounts = createVendorAccounts({
 });
 
 const { checkConfig, resolveOpenReads } = require('./doctor-core');
+const { signupConfigFromEnv } = require('./signup-core');
 const startupEnv = { ...process.env };
 // Anonymous read-only (the public demo) is refused once real locks are configured.
 const openReads = resolveOpenReads(process.env, { demoDefault: tt.demo });
@@ -106,7 +107,9 @@ if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABL
 const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
 const api = createApi({
   store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing,
-  doctor: () => checkConfig(startupEnv, { runtime: 'node' }), // the settings this process started with
+  doctor: () => checkConfig(startupEnv, { runtime: 'node' }),
+  signup: signupConfigFromEnv(process.env),
+  demoData: require('./data/acl.json'), // the settings this process started with
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
@@ -166,11 +169,15 @@ app.post('/api/stripe/webhook', express.raw({ type: () => true, limit: '256kb' }
 });
 // Visitor self check-out: no login; the token (in the body) is the only credential.
 // Visitor pre-registration: no login; the invite token (in the body) is the only credential.
-for (const [path, fn, what] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out'], ['/api/visit-invite', 'visitInvitePublic', 'Registration']]) {
+// Self-service signup and its emailed link (R15): no login; rate-limited per address.
+for (const [path, fn, what, kind] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out', 'visitorLink'], ['/api/visit-invite', 'visitInvitePublic', 'Registration', 'visitorLink'],
+  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup']]) {
   app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
-    if (!(await allow(limiterFor, 'visitorLink', peerIp(req)))) return tooMany(res, true);
+    if (!(await allow(limiterFor, kind, peerIp(req)))) return tooMany(res, true);
     try {
-      const out = await api[fn](req.body || {});
+      const out = await api[fn](req.body || {}, { ip: peerIp(req) });
+      if (out.headers) res.set(out.headers);
+      res.set('cache-control', 'no-store');
       res.status(out.status).json(out.body);
     } catch (error) {
       console.error(`${path} failed`, error);

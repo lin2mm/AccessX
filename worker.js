@@ -11,6 +11,7 @@ import { seedTenant } from './store/bootstrap.js';
 import { createAuthenticator, DEFAULT_TENANT } from './auth-core.js';
 import { createApi } from './api-core.js';
 import { checkConfig, resolveOpenReads } from './doctor-core.js';
+import { signupConfigFromEnv } from './signup-core.js';
 import { createDemoVendor, staticMirror } from './vendor-demo.js';
 import { createVendorAccounts } from './vendor-accounts.js';
 import { createAuditOps } from './audit-ops.js';
@@ -49,7 +50,7 @@ let limiters = null; // per isolate; returns the RL_* bindings when configured
 const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
 const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
 function apiFor(env) {
-  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP].join('\u0000');
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL].join('\u0000');
   if (cached && cached.key === key && cached.db === env.DB) return cached.api;
 
   const sql = d1Adapter(env.DB);
@@ -104,7 +105,7 @@ function apiFor(env) {
   const billingConfig = billingConfigFromEnv(env);
   if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
   const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), signup: signupConfigFromEnv(env), demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -203,17 +204,19 @@ function jobDispatcher(env) {
 }
 
 /** Visitor self check-out / pre-registration (no login; the token in the body is the credential). */
-async function handlePublicJson(request, env, fn, what) {
+async function handlePublicJson(request, env, fn, what, kind = 'visitorLink') {
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
   limiters = limiters || createLimiters(env);
-  if (!(await allow(limiters, 'visitorLink', clientIp(request)))) return tooMany('json');
+  if (!(await allow(limiters, kind, clientIp(request)))) return tooMany('json');
   const text = await request.text();
   if (text.length > 4096) return json(413, { ok: false, error: 'too large' });
   let body;
   try { body = JSON.parse(text || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON' }); }
   try {
-    const out = await apiFor(env)[fn](body, { dispatch: jobDispatcher(env) });
-    return json(out.status, out.body);
+    const out = await apiFor(env)[fn](body, { dispatch: jobDispatcher(env), ip: clientIp(request) });
+    const res = json(out.status, out.body);
+    for (const [k, v] of Object.entries(out.headers || {})) res.headers.set(k, v);
+    return res;
   } catch (error) {
     console.error(`${fn} failed`, error);
     return json(502, { ok: false, error: `${what} failed. Please try again, or contact your host.` });
@@ -271,6 +274,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/api/stripe/webhook') return handleStripeWebhook(request, env);
     if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handlePublicJson(request, env, 'visitCheckoutPublic', 'Check-out');
     if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
+    if (request.method === 'POST' && url.pathname === '/api/signup') return handlePublicJson(request, env, 'signupPublic', 'Signup', 'signup');
+    if (request.method === 'POST' && url.pathname === '/api/signup/verify') return handlePublicJson(request, env, 'signupVerifyPublic', 'Signup', 'signup');
     if (url.pathname === '/.well-known/security.txt') {
       const body = securityTxt(env);
       return new Response(body || 'not found', { status: body ? 200 : 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': body ? 'public, max-age=86400' : 'no-store' } });
