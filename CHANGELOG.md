@@ -5,6 +5,36 @@ All work is on branch `arena/01a0de29-accessx`, starting from `main` at `b74185b
 delivery each; details per round in [docs/90-ROUNDS.md](docs/90-ROUNDS.md) and
 `docs/rounds/`. Dates are 2026-09-27, Sydney time.
 
+## R23 — deploy from GitHub (part of v1.0-pilot)
+
+The repository is connected to Cloudflare Workers Builds, so a merge to `main`
+deploys production ([docs/13-CLOUDFLARE-GIT-DEPLOY.md](docs/13-CLOUDFLARE-GIT-DEPLOY.md)).
+
+**Security**
+- `wrangler.jsonc` no longer sets `AUTH_OPEN_READS=1`. A Git deploy would have
+  turned anonymous reads on in production. A public demo sets it in the dashboard.
+  `npm run doctor -- --worker` and CI fail if it comes back.
+- `"keep_vars": true`: variables and secrets set in the dashboard survive deploys.
+
+**Deploy**
+- `npm run deploy` (`scripts/cf-deploy.js`), also `cf:deploy`:
+  1. find the D1 database by name, or create it (`D1_LOCATION`);
+  2. apply migrations;
+  3. deploy;
+  4. wait for `/api/healthz` 200.
+
+  Any failure fails the build and keeps the previous version.
+  `--dry-run`, `--migrate-only` (`cf:db:migrate:remote`) and `--resolve-only`
+  (used by `npm run backup -- d1`).
+- No placeholder `database_id` in the repo. The real id is written only to the
+  gitignored `wrangler.deploy.jsonc`. This works around workers-sdk #13632.
+- A missing D1 permission on the Workers Builds token gets a precise fix in the build log.
+- CI: `npm run deploy -- --dry-run` and a `wrangler.jsonc` doctor check on every push and PR.
+
+**Local**
+- `support/dev-vars.js` writes `AUTH_OPEN_READS=1` to `.dev.vars` for the smoke test.
+  Existing checkouts: `node support/dev-vars.js --force`.
+
 ## v1.0-pilot — R22 (pilot freeze)
 
 The version meant for the first pilot office. From here on: fixes from pilot
