@@ -21,6 +21,13 @@
     "bindings": [{ "name": "TENANT_WRITER", "class_name": "TenantWriter" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantWriter"] }],
+  // Brakes for the unauthenticated endpoints (rate-limit-core.js): per
+  // Cloudflare location, eventually consistent. namespace_id must be unique
+  // in the Cloudflare account.
+  "ratelimits": [
+    { "name": "RL_NOTIFY", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
+    { "name": "RL_PUBLIC", "namespace_id": "4102", "simple": { "limit": 20, "period": 60 } }
+  ],
   // Reconcile credentials against policy every 15 minutes (worker.js scheduled()).
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {

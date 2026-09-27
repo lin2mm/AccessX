@@ -21,14 +21,42 @@ class AuditOpsError extends Error {
 }
 
 /** https only, no credentials, no loopback/private literals (SSRF). DNS rebinding: see docs. */
+const PRIVATE_V4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
+
+/**
+ * IPv6 literal that is loopback, unspecified, unique-local, link-local, or
+ * carries an IPv4 address (mapped ::ffff:a.b.c.d, compatible ::a.b.c.d, NAT64
+ * 64:ff9b::/96) that is private: [::ffff:a9fe:a9fe] is 169.254.169.254.
+ * The URL parser has already normalised the literal (hex groups, "::").
+ */
+function privateV6(host) {
+  if (!host.includes(':')) return false;
+  const [head, tail] = host.split('::');
+  const part = x => (x ? x.split(':') : []);
+  let left = part(head), right = tail === undefined ? [] : part(tail);
+  const v4 = (right.length ? right : left).slice(-1)[0] || '';
+  if (v4.includes('.')) { // dotted tail: turn it into two hex groups
+    const o = v4.split('.').map(Number);
+    const hex = [((o[0] << 8) | o[1]).toString(16), ((o[2] << 8) | o[3]).toString(16)];
+    if (right.length) right = [...right.slice(0, -1), ...hex]; else left = [...left.slice(0, -1), ...hex];
+  }
+  const g = (tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right]).map(x => parseInt(x || '0', 16));
+  if (g.length !== 8 || g.some(n => !(n >= 0 && n <= 0xffff))) return true; // unparseable: refuse
+  if ((g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80) return true;
+  const zero5 = g.slice(0, 5).every(n => n === 0);
+  const embedded = (zero5 && (g[5] === 0 || g[5] === 0xffff)) || (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(n => n === 0));
+  if (!embedded) return false;
+  const ip4 = [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255].join('.');
+  return PRIVATE_V4.test(ip4) || ip4 === '0.0.0.1' || (g[6] === 0 && g[7] <= 1); // also ::, ::1
+}
+
 function checkWebhookUrl(raw, { allowHttp = false, field = 'anchorWebhook' } = {}) {
   let u;
   try { u = new URL(String(raw)); } catch { throw new AuditOpsError(400, `${field} must be a URL`); }
   if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw new AuditOpsError(400, `${field} must use https`);
   if (u.username || u.password) throw new AuditOpsError(400, `${field} must not contain credentials`);
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  const privateV4 = /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
-  if (!allowHttp && (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || privateV4.test(host) || host === '::1' || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host))) {
+  if (!allowHttp && (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || PRIVATE_V4.test(host) || privateV6(host))) {
     throw new AuditOpsError(400, `${field} must be a public address`);
   }
   return u.toString();

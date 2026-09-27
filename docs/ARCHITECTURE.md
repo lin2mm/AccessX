@@ -480,6 +480,20 @@ and a fake TTLock that rotates refresh tokens.
 - Recorded once (CAS on `arrived_at IS NULL`); cancelled/checked-out visits
   and unlocks outside the window are ignored.
 
+### Rate limits and outgoing requests
+
+- The three endpoints without a login (TTLock callback, visitor check-out,
+  invite submit) pass through `rate-limit-core.js` before any parsing or
+  database work: the Workers Rate Limiting bindings on Cloudflare (per
+  location, eventually consistent), an exact fixed window per process on
+  Node. Keys are the client address, IPv6 by /64. Errors fail open.
+- Owner-entered URLs the server fetches (alert and anchor webhooks, the SSO
+  issuer and every endpoint its discovery document names) must be https to a
+  public literal host; IPv4 embedded in IPv6 literals is unpacked and checked;
+  redirects are not followed. `ALLOW_HTTP_WEBHOOKS` / `ALLOW_HTTP_ISSUERS`
+  (development only) turn this off. DNS names resolving to private addresses
+  are a known gap on Node only (docs/SECURITY-TESTING.md).
+
 ### Office setup pack
 
 - `onboarding-core.js` is pure: `plan(locks, snapshot, {timeZone, hours})`.

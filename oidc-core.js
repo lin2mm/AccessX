@@ -22,12 +22,20 @@ async function pkceChallenge(verifier) {
   return b64url(await globalThis.crypto.subtle.digest('SHA-256', enc.encode(verifier)));
 }
 
-function createOidcClient({ fetchFn = (...a) => globalThis.fetch(...a), now = () => Date.now(), cacheMs = 3600e3 } = {}) {
+const { checkWebhookUrl } = require('./audit-ops');
+
+function createOidcClient({ fetchFn = (...a) => globalThis.fetch(...a), now = () => Date.now(), cacheMs = 3600e3, allowPrivate = false } = {}) {
   const discoveryCache = new Map();
   const jwksCache = new Map();
 
+  // Every URL here comes from an owner-entered issuer or its discovery
+  // document: https to a public host only, and no redirects (SSRF), unless
+  // the deployment allows http issuers (mock IdP / development).
   async function getJson(url, init) {
-    const res = await fetchFn(url, init);
+    if (!allowPrivate) {
+      try { checkWebhookUrl(url, { field: 'identity provider URL' }); } catch (e) { throw new OidcError('bad_discovery', e.message); }
+    }
+    const res = await fetchFn(url, { ...(init || {}), redirect: 'manual' });
     const text = await res.text();
     let body;
     try { body = JSON.parse(text); } catch { throw new OidcError('bad_response', `${url} did not return JSON (HTTP ${res.status})`); }

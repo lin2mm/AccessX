@@ -6,8 +6,10 @@ same SQL schema (Node's built-in `node:sqlite` locally, D1 on Cloudflare). Both
 use demo data and do not control physical locks. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
 [docs/PILOT.md](docs/PILOT.md) for trying it with real locks, and
-[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the visitor pre-registration design, and
-[docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md) for setting up an office (about 45 minutes).
+[docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the visitor pre-registration design,
+[docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md) for setting up an office (about 45 minutes),
+[docs/SECURITY-TESTING.md](docs/SECURITY-TESTING.md) for the external security test and rate limits, and
+[docs/BILLING.md](docs/BILLING.md) for the proposed Stripe billing.
 
 ## Run locally
 
@@ -43,6 +45,10 @@ operations are intentionally not enabled in the Worker.
    ```sh
    npx wrangler d1 create accessx-demo
    ```
+
+   The rate-limit bindings `RL_NOTIFY` / `RL_PUBLIC` in `wrangler.jsonc` use
+   `namespace_id` 4101 and 4102; change them if another Worker in your
+   Cloudflare account already uses those numbers.
 
 3. Apply the schema locally before `npm run dev:cloudflare`, or remotely before
    deployment (**always migrate before deploying new code**; `0003` moves the
@@ -300,4 +306,5 @@ This is still a prototype, not a production access-control service. Before
 connecting real locks or real user data: run `npm run ttlock:check` against
 each lock model on site, set `AUDIT_SIGNING_KEY` and an anchor webhook,
 verify your SSO domains (TXT record) and turn on *Require single sign-on*
-with a break-glass owner, and complete an independent security review.
+with a break-glass owner, and complete an independent security review
+([docs/SECURITY-TESTING.md](docs/SECURITY-TESTING.md) has the scope).

@@ -90,6 +90,7 @@ const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNI
 // SSO domain proof (TXT over DoH). Tests set overrides via `dns.set()`.
 const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
 const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
+const { createLimiters, allow } = require('./rate-limit-core');
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const sms = createSms({ config: smsConfigFromEnv(process.env) });
@@ -126,7 +127,13 @@ app.use((req, res, next) => {
 });
 // SCIM clients (Entra ID, Okta) send application/scim+json.
 // TTLock's record callback is form-encoded and unauthenticated: the secret is the last path segment.
+// One process: exact per-address windows (rate-limit-core.js). Same limits as the Worker's RL_* bindings.
+const limiterFor = createLimiters();
+// Same client address as the auth limiter below (see the x-forwarded-for note there).
+const peerIp = (req) => (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+const tooMany = (res, json) => res.status(429).set('retry-after', '60')[json ? 'json' : 'send'](json ? { ok: false, error: 'Too many requests. Please wait a minute and try again.' } : 'too many requests');
 app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, limit: '256kb' }), async (req, res) => {
+  if (!(await allow(limiterFor, 'notify', peerIp(req)))) return tooMany(res, false);
   try {
     const out = await api.ttlockNotify({ secret: req.params.secret, form: req.body || {} });
     res.status(out.status).type('text/plain').send(out.status === 200 ? 'success' : 'not found');
@@ -139,6 +146,7 @@ app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, lim
 // Visitor pre-registration: no login; the invite token (in the body) is the only credential.
 for (const [path, fn, what] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out'], ['/api/visit-invite', 'visitInvitePublic', 'Registration']]) {
   app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
+    if (!(await allow(limiterFor, 'visitorLink', peerIp(req)))) return tooMany(res, true);
     try {
       const out = await api[fn](req.body || {});
       res.status(out.status).json(out.body);
