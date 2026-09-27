@@ -140,11 +140,14 @@ themselves); `curl /api/healthz`.
 
 1. `npm run doctor -- --url … --platform-token …`, then `GET /api/audit/verify` per tenant.
 2. **Door codes issued after the restore point still work on the locks**, but
-   AccessX no longer knows them, so it will not revoke them. Until an automatic
-   sweep exists (roadmap), open each affected lock in the TTLock app → Passcodes
-   and delete any code AccessX doesn't list. The opposite case (a code revoked
-   after the restore point) is harmless: it is gone from the lock, and the
-   person just needs a new one.
+   AccessX no longer knows them, so it will not revoke them. Run
+   **Activity → Passcode sweep** (`POST /api/passcode-sweep`, see
+   `24-ACCESS-REVIEW.md` §2): it lists them as "not from AccessX", and you can
+   remove them through the gateway. Codes AccessX lists but the lock lacks
+   (revoked after the restore point) show as "missing from the lock". Record
+   them as gone, and the next reconcile issues new ones. The sweep sees only
+   the vendor cloud's list: for locks without a gateway, or if staff used the
+   keypad admin mode, also check the lock in the TTLock app.
 3. External audit anchors received after the restore point will not match: the
    chain was rewound. That is expected, and it is evidence of what was lost.
    Record the restore (time, reason, restore point) as an incident; an auditor
@@ -159,9 +162,8 @@ Write the date and result in section 6.
 
 - Automatic off-site export: a scheduled Workflow to R2 (Cloudflare's guide
   "Export and save D1 database") would replace the weekly manual step.
-- Orphan-code sweep after a restore: compare each lock's passcode list
-  (`/v3/lock/listKeyboardPwd`, already in `ttlock.js`) with the registry and
-  offer to delete unknown codes.
+- Codes set at the keypad in admin mode, or deleted over Bluetooth without a
+  sync, are invisible to the passcode sweep (R18): it reads the vendor cloud.
 - A status page for tenants.
 
 ## 6. Drill log

@@ -17,6 +17,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/21-SIGNUP.md](docs/21-SIGNUP.md) for self-service signup and the demo reset (off unless `SIGNUP_ENABLED=1`),
 [docs/22-KIOSK.md](docs/22-KIOSK.md) for the front-desk tablet (visitor check-in, walk-ins, notice, printable list) and Turnstile,
 [docs/23-CALENDAR.md](docs/23-CALENDAR.md) for calendar invitations → visitor pre-registration (off unless `CALENDAR_INBOUND_DOMAIN` is set),
+[docs/24-ACCESS-REVIEW.md](docs/24-ACCESS-REVIEW.md) for access reviews, the passcode sweep, data retention and bulk invitations,
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
@@ -304,7 +305,19 @@ Operators (people who administer the system) are separate from door users.
   Google or Outlook meeting. The organiser gets a one-time link and picks which
   outside guests get a visitor invitation. Nothing is sent without that click.
   Moved and cancelled meetings are followed. See
-  [docs/23-CALENDAR.md](docs/23-CALENDAR.md).
+  [docs/23-CALENDAR.md](docs/23-CALENDAR.md). **Bulk invitations**: paste up
+  to 100 addresses; a wrong shared setting sends nothing.
+- **Access review** — site managers confirm who still has their doors,
+  and owners confirm the administrators. Nobody confirms themselves.
+  *Remove* takes effect at once: the person leaves that site's groups and
+  their codes there are revoked. Reviewers get a reminder, owners get an
+  overdue notice, and unconfirmed lines can be removed after the due date.
+  Reviews can start every quarter automatically and go into the evidence
+  pack. The **passcode sweep** compares the codes on each lock (vendor cloud
+  list) with the registry: it finds codes set outside AccessX, revokes that
+  never reached the lock, and codes the lock lost. Digits are never shown.
+  **Data retention** lists what is kept for how long. See
+  [docs/24-ACCESS-REVIEW.md](docs/24-ACCESS-REVIEW.md).
 - **Codes run on whole hours** — TTLock period codes are valid on whole
   hours only and must be used once within 24 h of their start, or the lock
   voids them. Windows are rounded on the door's clock (start down, end up,
@@ -364,7 +377,7 @@ Operators (people who administer the system) are separate from door users.
   break-glass operators, `0008` approvals and sensitive door groups, `0009`–`0011`
   sealed approval codes, alert outbox and snapshot versions, `0012`–`0018`
   visitors (arrivals, phone, alarms, check-out, SMS usage, invites), `0019` lock
-  health, `0020`–`0021` billing, `0022` signups, `0023` kiosks and walk-ins, `0024` calendar invitations. Set `SECRETS_KEY`
+  health, `0020`–`0021` billing, `0022` signups, `0023` kiosks and walk-ins, `0024` calendar invitations, `0025` access reviews and passcode sweeps. Set `SECRETS_KEY`
   as a Worker secret before configuring SSO with a client secret.
 
 This is still a prototype, not a production access-control service. Before
