@@ -36,6 +36,7 @@
 | [11-OFFICE-SETUP.md](11-OFFICE-SETUP.md) | 办公室 45 分钟安装指南 | 实施、客户 |
 | [12-GO-LIVE.md](12-GO-LIVE.md) | 上线清单、`npm run doctor`、健康检查与监控、日志、备份与恢复演练 | 部署与运维 |
 | [20-PREREGISTRATION.md](20-PREREGISTRATION.md) | 访客预登记设计 | 产品、开发 |
+| [21-SIGNUP.md](21-SIGNUP.md) | 自助开通（注册 → 邮件确认 → 新租户 + 所有者）、防滥用规则、演示租户一键重置 | 产品、开发、平台运维 |
 | [30-SECURITY-TESTING.md](30-SECURITY-TESTING.md) | 自动化安全门、外部渗透测试范围、限流 | 安全、测试方 |
 | [40-BILLING.md](40-BILLING.md) | Stripe 计费：计划、实现、运维 | 商业、开发 |
 | [90-ROUNDS.md](90-ROUNDS.md) | 每轮做了什么（总表） | 所有人 |

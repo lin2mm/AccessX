@@ -14,6 +14,7 @@ round and [docs/91-ROADMAP.md](docs/91-ROADMAP.md) the plan. See
 [docs/01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md) for the design,
 [docs/10-PILOT.md](docs/10-PILOT.md) for trying it with real locks, and
 [docs/20-PREREGISTRATION.md](docs/20-PREREGISTRATION.md) for the visitor pre-registration design,
+[docs/21-SIGNUP.md](docs/21-SIGNUP.md) for self-service signup and the demo reset (off unless `SIGNUP_ENABLED=1`),
 [docs/11-OFFICE-SETUP.md](docs/11-OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/12-GO-LIVE.md](docs/12-GO-LIVE.md) for the production checklist, `npm run doctor`, monitoring and backups,
 [docs/30-SECURITY-TESTING.md](docs/30-SECURITY-TESTING.md) for the external security test and rate limits, and
@@ -106,6 +107,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `TTLOCK_NOTIFY_SECRET` | instant visitor arrival | Random string (`openssl rand -hex 24`). Enter `https://<host>/api/ttlock/notify/<secret>` as the **Callback URL** of the TTLock developer app (open.ttlock.com → Management → your app); one URL serves all tenants. Without it, arrivals are found by reading lock records on each scheduled run. Arrival detection needs `SECRETS_KEY`. |
 | `COOKIE_SAMESITE` | iframes only | `None` only if the UI must run inside another site. |
 | `AUTH_OPEN_READS` | demo | `1`: read routes without a token (public demo). Explicit opt-in on the Worker; on Node the default only in demo mode. **Ignored whenever `TTLOCK_CLIENT_ID` is set** (R14). Production: `0`. |
+| `SIGNUP_ENABLED` | SaaS, optional | `1` opens `/signup`: company + email → emailed link (24 h, once) → new empty tenant and its owner key ([docs/21-SIGNUP.md](docs/21-SIGNUP.md)). Needs email and `PUBLIC_URL`. `SIGNUP_DAILY_LIMIT` (default 50 per 24 h), `SIGNUP_TERMS_URL` (https). |
 | `EMAIL_PROVIDER`, `EMAIL_API_KEY`, `EMAIL_FROM` | email alerts | `resend` or `postmark` (HTTP APIs; Workers cannot use SMTP). `EMAIL_FROM` must be a sender verified with the provider, e.g. `AccessX <alerts@example.com>`. Without them only webhooks are offered. |
 | `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `SMS_FROM` | texting visitor codes | `twilio`. `SMS_FROM` is a Twilio number (+E.164), an alphanumeric sender ID where the country allows it, or a Messaging Service SID (`MG…`). An API key may replace the auth token (`TWILIO_API_KEY` + `TWILIO_API_SECRET`). Codes are sent once and never queued; Twilio keeps message bodies in its logs according to your account settings. |
 | `SMS_MONTHLY_CAP` | optional | Texts per tenant per calendar month (default unlimited). The platform can set a tenant's own cap (`PUT /api/platform/tenants/:id/limits`); usage for billing: `GET /api/platform/usage?period=YYYY-MM`. At the cap, visits are still created and the code is shown on screen. |
@@ -329,6 +331,10 @@ Operators (people who administer the system) are separate from door users.
   is unreachable or behind the code's migration (`SCHEMA_VERSION`).
 - `npm run test:worker` — smoke test against a running `wrangler dev`
   (`BASE`, `OWNER`, `GYM`, `AUDIT`, `PLATFORM`, optional `IDP` env vars; see `support/worker-smoke.js`).
+  With `MAIL_PORT=8799` (and `EMAIL_API_BASE=http://127.0.0.1:8799`, `SIGNUP_ENABLED=1` in `.dev.vars`)
+  it also runs a signup on D1. Fails on any new `[ERROR]` line in the wrangler log (`WRANGLER_LOG` to point at it).
+- `POST /api/platform/tenants/:id/demo-reset` `{"confirm":":id"}` — put a demo tenant back to the sample data
+  (refused for tenants with TTLock or billing; audit chain kept).
 - Cloudflare: apply migrations (`npm run cf:db:migrate:local|remote`) after
   pulling — `0003_multitenant.sql` adds the relational multi-tenant schema,
   `0004_identity.sql` sessions, SSO and directory tables, `0005` per-tenant
