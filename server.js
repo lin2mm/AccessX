@@ -92,11 +92,15 @@ const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
 const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
 const { createLimiters, allow } = require('./rate-limit-core');
 const { securityTxt } = require('./security-txt');
+const { billingConfigFromEnv, createStripe } = require('./billing-core');
 const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
 const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
 const sms = createSms({ config: smsConfigFromEnv(process.env) });
+const billingConfig = billingConfigFromEnv(process.env);
+if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
+const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
 const api = createApi({
-  store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady,
+  store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing,
   serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
   cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
   secretsKey: process.env.SECRETS_KEY || '',
@@ -141,6 +145,17 @@ app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, lim
   } catch (error) {
     console.error('ttlock notify failed', error);
     res.status(500).type('text/plain').send('error');
+  }
+});
+// Stripe webhook: the signature covers the exact bytes, so keep the raw body.
+app.post('/api/stripe/webhook', express.raw({ type: () => true, limit: '256kb' }), async (req, res) => {
+  if (!(await allow(limiterFor, 'stripe', peerIp(req)))) return tooMany(res, true);
+  try {
+    const out = await api.stripeWebhook({ rawBody: Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '', signature: req.headers['stripe-signature'] || '' });
+    res.status(out.status).json(out.body);
+  } catch (error) {
+    console.error('stripe webhook failed', error);
+    res.status(500).json({ ok: false, error: 'webhook failed' }); // Stripe retries
   }
 });
 // Visitor self check-out: no login; the token (in the body) is the only credential.

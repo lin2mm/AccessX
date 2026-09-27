@@ -17,6 +17,7 @@ const visitors = require('./visitors-core');
 const lockEvents = require('./lock-events-core');
 const health = require('./lock-health-core');
 const onboarding = require('./onboarding-core');
+const billingCore = require('./billing-core');
 const compiler = require('./compiler-core');
 const reconciler = require('./reconcile-core');
 const { validate, ValidationError, escapeHtml: h, referencedBy } = require('./validate-core');
@@ -115,7 +116,7 @@ const DOMAIN_RE = /^(?=.{3,190}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 function createApi({
   store, auth, vendorFor, ensureReady = async () => {}, log = () => {}, cookieSameSite = 'Lax',
-  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null,
+  secretsKey = '', ttlockNotifySecret = '', publicUrl = '', smsMonthlyCap = 0, fetchFn, allowHttpIssuers = false, oidc = createOidcClient({ fetchFn, allowPrivate: allowHttpIssuers }), vendorAccounts = null, auditOps = null, dns = null, alerts = null, sms = null, billing = null,
   // Runs a tenant's background work in that tenant's write queue (tenant-queue.js).
   serialize = (tenantId, fn) => fn(),
 }) {
@@ -1318,6 +1319,7 @@ function createApi({
     if (job && job.type === 'alarm') return recordAlarm(tenantId, job);
     if (job && job.type === 'checkout') return visitorCheckout(tenantId, job);
     if (job && job.type === 'invite_submit') return inviteSubmit(tenantId, job);
+    if (job && job.type === 'billing') return applyBillingEvent(tenantId, job);
     return recordArrival(tenantId, job);
   }
 
@@ -2136,6 +2138,173 @@ function createApi({
   route('GET', /^\/api\/platform\/secrets$/, async () => rotation().status());
 
   // --- platform: metered usage (billing) and per-tenant limits -------------
+  // --- billing (Stripe; docs/BILLING.md) -------------------------------------
+  const billingOn = () => Boolean(billing && billing.config && billing.config.active);
+  async function billingAccount(tenantId) {
+    const r = await store.sql.first('SELECT * FROM billing_accounts WHERE tenant_id = ?', [tenantId]);
+    return r ? { customerId: r.stripe_customer_id, subscriptionId: r.stripe_subscription_id, status: r.status, pastDueSince: r.past_due_since, lastEventAt: Number(r.last_event_at) || 0, updatedAt: r.updated_at } : null;
+  }
+  /** 402 for additions while the subscription is unpaid past the grace period. Removals always pass. */
+  async function billingBlock(tenantId, method, path) {
+    if (!billingOn() || !billingCore.isAddition(method, path)) return null;
+    const st = billingCore.standing(await billingAccount(tenantId));
+    if (!st.restricted) return null;
+    return { status: 402, body: { ok: false, reason: 'billing_restricted', billing: st,
+      error: `The subscription is ${st.status === 'canceled' ? 'cancelled' : 'unpaid'}: adding people, visitors, codes or rules is paused until billing is sorted (owner: People → Billing). Removing access, exports and the audit still work, and existing codes keep opening doors.` } };
+  }
+  const billingBase = ctx => String(publicUrl || ctx.origin || '').replace(/\/+$/, '');
+  const monthUsage = async (tenantId, p) => {
+    const d = await store.sql.first("SELECT COALESCE(SUM(value), 0) AS n FROM billing_reports WHERE tenant_id = ? AND meter = 'door_days' AND report_key LIKE ?", [tenantId, `${p}-%`]);
+    const s = await store.sql.first("SELECT n FROM usage_counters WHERE tenant_id = ? AND period = ? AND kind = 'sms_segments'", [tenantId, p]);
+    return { doorDays: Number((d || {}).n || 0), smsSegments: Number((s || {}).n || 0) };
+  };
+
+  route('GET', /^\/api\/billing$/, async ctx => {
+    if (!billingOn()) return { billing: { enabled: false } };
+    const account = await billingAccount(ctx.tenantId);
+    const p = period();
+    const unsent = await store.sql.first('SELECT COUNT(*) AS n FROM billing_reports WHERE tenant_id = ? AND sent_at IS NULL', [ctx.tenantId]);
+    return { billing: { enabled: true, testMode: billing.config.testMode, subscribed: Boolean(account && !['canceled', 'incomplete_expired'].includes(account.status)),
+      standing: billingCore.standing(account), since: account ? account.updatedAt : null, period: p, usage: await monthUsage(ctx.tenantId, p), unsentReports: Number((unsent || {}).n || 0),
+      smsBilled: Boolean(billing.config.priceSms) } };
+  });
+
+  route('POST', /^\/api\/billing\/checkout$/, async ctx => {
+    if (!billingOn()) throw new HttpError(404, 'billing is not enabled on this deployment');
+    const account = await billingAccount(ctx.tenantId);
+    if (account && !['canceled', 'incomplete_expired'].includes(account.status)) throw new HttpError(409, 'already subscribed: use Manage billing to change the card or plan');
+    const base = billingBase(ctx);
+    if (!/^https?:\/\//.test(base)) throw new HttpError(503, 'PUBLIC_URL is needed to come back from Stripe Checkout');
+    const c = billing.config;
+    const params = {
+      mode: 'subscription',
+      line_items: [{ price: c.priceDoorDays }, ...(c.priceSms ? [{ price: c.priceSms }] : [])],
+      client_reference_id: ctx.tenantId,
+      metadata: { tenant_id: ctx.tenantId },
+      subscription_data: { metadata: { tenant_id: ctx.tenantId } },
+      success_url: `${base}/#billing-done`,
+      cancel_url: `${base}/#billing`,
+      tax_id_collection: { enabled: true },
+      ...(c.automaticTax ? { automatic_tax: { enabled: true }, billing_address_collection: 'required' } : {}),
+      ...(account ? { customer: account.customerId } : ctx.operator && ctx.operator.email ? { customer_email: ctx.operator.email } : {}),
+    };
+    // A double click inside the same minute returns the same session.
+    const session = await billing.stripe.checkout(params, `checkout:${ctx.tenantId}:${Math.floor(Date.now() / 60e3)}`);
+    await ctx.t.unit().audit('billing.checkout', `Stripe Checkout session ${String(session.id || '').slice(0, 40)}`, ctx.actor).commit();
+    return { url: session.url };
+  });
+
+  route('POST', /^\/api\/billing\/portal$/, async ctx => {
+    if (!billingOn()) throw new HttpError(404, 'billing is not enabled on this deployment');
+    const account = await billingAccount(ctx.tenantId);
+    if (!account) throw new HttpError(409, 'no subscription yet: start one first');
+    const session = await billing.stripe.portal({ customer: account.customerId, return_url: `${billingBase(ctx)}/#billing` });
+    return { url: session.url };
+  });
+
+  /**
+   * POST /api/stripe/webhook (raw body, Stripe-Signature). Only subscription
+   * state is taken from Stripe: checkout.session.completed links the tenant
+   * to its customer, customer.subscription.* carries the status. Each event is
+   * applied once, in the tenant's write queue; older events never overwrite
+   * newer state (Stripe does not guarantee order).
+   */
+  async function stripeWebhook({ rawBody, signature }, { dispatch = null } = {}) {
+    if (!billingOn()) return { status: 404, body: { ok: false, error: 'not found' } };
+    let event;
+    try { event = await billingCore.verifyWebhook(String(rawBody || ''), signature, billing.config.webhookSecret); } catch (error) {
+      return { status: 400, body: { ok: false, error: error.message } };
+    }
+    await whenReady();
+    if (await store.sql.first('SELECT event_id FROM billing_events WHERE event_id = ?', [event.id])) return { status: 200, body: { ok: true, duplicate: true } };
+    const o = (event.data && event.data.object) || {};
+    const exists = async id => Boolean(id && await store.sql.first('SELECT id FROM tenants WHERE id = ?', [String(id)]));
+    let tenantId = null;
+    let change = null;
+    if (event.type === 'checkout.session.completed' && o.mode === 'subscription') {
+      tenantId = o.client_reference_id || (o.metadata || {}).tenant_id;
+      const paid = ['paid', 'no_payment_required'].includes(o.payment_status);
+      change = { customer: o.customer, subscription: o.subscription, status: paid ? 'active' : 'incomplete', statusIsHint: true };
+    } else if (/^customer\.subscription\.(created|updated|deleted|paused|resumed)$/.test(event.type)) {
+      const byCustomer = o.customer ? await store.sql.first('SELECT tenant_id FROM billing_accounts WHERE stripe_customer_id = ?', [String(o.customer)]) : null;
+      tenantId = byCustomer ? byCustomer.tenant_id : (o.metadata || {}).tenant_id;
+      change = { customer: o.customer, subscription: o.id, status: event.type === 'customer.subscription.deleted' ? 'canceled' : String(o.status || '') };
+    }
+    if (!change || !(await exists(tenantId)) || !change.customer || !change.status) {
+      // Not ours or not relevant: acknowledge so Stripe stops retrying.
+      await store.sql.batch([{ sql: 'INSERT OR IGNORE INTO billing_events (event_id, tenant_id, type, received_at) VALUES (?, ?, ?, ?)', params: [event.id, null, event.type, new Date().toISOString()] }]);
+      return { status: 200, body: { ok: true, ignored: true } };
+    }
+    const job = { type: 'billing', eventId: event.id, eventType: event.type, created: Number(event.created) || 0, ...change };
+    const out = dispatch ? await dispatch(tenantId, job) : await serialize(tenantId, () => runTenantJob(tenantId, job));
+    return { status: 200, body: { ok: true, ...(out && typeof out === 'object' ? { applied: Boolean(out.applied) } : {}) } };
+  }
+
+  async function applyBillingEvent(tenantId, job) {
+    if (await store.sql.first('SELECT event_id FROM billing_events WHERE event_id = ?', [job.eventId])) return { applied: false, duplicate: true };
+    const prev = await billingAccount(tenantId);
+    const now = new Date().toISOString();
+    const stale = prev && job.created && job.created < prev.lastEventAt;
+    // A checkout "paid" hint never downgrades a status a subscription event already set.
+    const keepStatus = stale || (job.statusIsHint && prev && prev.lastEventAt && prev.customerId === job.customer);
+    const status = keepStatus ? prev.status : job.status;
+    const next = billingCore.nextAccountState(prev, status, now);
+    const u = store.tenant(tenantId).unit()
+      .raw(`INSERT INTO billing_accounts (tenant_id, stripe_customer_id, stripe_subscription_id, status, past_due_since, last_event_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (tenant_id) DO UPDATE SET stripe_customer_id = excluded.stripe_customer_id, stripe_subscription_id = COALESCE(excluded.stripe_subscription_id, billing_accounts.stripe_subscription_id),
+        status = excluded.status, past_due_since = excluded.past_due_since, last_event_at = MAX(billing_accounts.last_event_at, excluded.last_event_at), updated_at = excluded.updated_at`,
+      [tenantId, String(job.customer), job.subscription ? String(job.subscription) : null, next.status, next.pastDueSince, job.created || 0, now])
+      .raw('INSERT OR IGNORE INTO billing_events (event_id, tenant_id, type, received_at) VALUES (?, ?, ?, ?)', [job.eventId, tenantId, job.eventType, now]);
+    if (!prev || prev.status !== next.status) u.audit('billing.status', `${prev ? prev.status : 'none'} -> ${next.status} (Stripe ${job.eventType} ${job.eventId})`, 'stripe');
+    await u.commit();
+    return { applied: true, status: next.status, stale: Boolean(stale) };
+  }
+
+  /**
+   * Daily usage to Stripe: door-days (doors in the connected fleet today; demo
+   * doors are free) and SMS segments since the last report. A row is written
+   * before sending and marked sent after, so retries reuse the identifier.
+   */
+  async function meterUsage(tenantId) {
+    if (!billingOn()) return null;
+    const account = await billingAccount(tenantId);
+    if (!account || ['canceled', 'incomplete_expired', 'incomplete'].includes(account.status)) return null;
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const today = nowIso.slice(0, 10);
+    const out = {};
+    if (!(await store.sql.first("SELECT 1 AS x FROM billing_reports WHERE tenant_id = ? AND meter = 'door_days' AND report_key = ?", [tenantId, today]))) {
+      const vendor = await resolveVendor(tenantId);
+      const doors = vendor.demo ? 0 : ((await vendor.listLocks()) || []).length; // throws: retried next run
+      await store.sql.batch([{ sql: 'INSERT OR IGNORE INTO billing_reports (tenant_id, meter, report_key, value, event_at) VALUES (?, ?, ?, ?, ?)', params: [tenantId, 'door_days', today, doors, nowIso] }]);
+      out.doors = doors;
+    }
+    const p = today.slice(0, 7);
+    const used = await store.sql.first("SELECT n FROM usage_counters WHERE tenant_id = ? AND period = ? AND kind = 'sms_segments'", [tenantId, p]);
+    const reported = await store.sql.first("SELECT COALESCE(SUM(value), 0) AS n FROM billing_reports WHERE tenant_id = ? AND meter = 'sms_segments' AND report_key LIKE ?", [tenantId, `${p}:%`]);
+    const n = Number((used || {}).n || 0);
+    if (billing.config.priceSms && n > Number(reported.n)) {
+      await store.sql.batch([{ sql: 'INSERT OR IGNORE INTO billing_reports (tenant_id, meter, report_key, value, event_at) VALUES (?, ?, ?, ?, ?)', params: [tenantId, 'sms_segments', `${p}:${n}`, n - Number(reported.n), nowIso] }]);
+    }
+    const due = await store.sql.all('SELECT meter, report_key, value, event_at FROM billing_reports WHERE tenant_id = ? AND sent_at IS NULL AND event_at >= ? ORDER BY event_at',
+      [tenantId, new Date(nowMs - billingCore.MAX_BACKFILL_DAYS * 864e5).toISOString()]);
+    let sent = 0;
+    for (const r of due) {
+      if (Number(r.value) > 0) {
+        await billing.stripe.meterEvent({
+          event_name: r.meter === 'door_days' ? billing.config.meterDoorDays : billing.config.meterSms,
+          payload: { stripe_customer_id: account.customerId, value: Number(r.value) },
+          identifier: `${tenantId}:${r.meter}:${r.report_key}`,
+          timestamp: Math.floor(Math.min(Date.parse(r.event_at), nowMs) / 1000),
+        }); // throws: the rest waits for the next run
+        sent++;
+      }
+      await store.sql.batch([{ sql: 'UPDATE billing_reports SET sent_at = ? WHERE tenant_id = ? AND meter = ? AND report_key = ?', params: [new Date().toISOString(), tenantId, r.meter, r.report_key] }]);
+    }
+    if (sent) out.sent = sent;
+    return Object.keys(out).length ? out : null;
+  }
+
   route('GET', /^\/api\/platform\/usage$/, async ctx => {
     const p = ctx.query.get('period') || period();
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(p)) throw new HttpError(400, 'period must be YYYY-MM');
@@ -2146,7 +2315,9 @@ function createApi({
       const mine = rows.filter(r => r.tenant_id === t.id);
       const limits = (((await store.tenantSettings(t.id)) || {}).limits) || {};
       const n = k => Number((mine.find(r => r.kind === k) || {}).n || 0);
-      out.push({ tenantId: t.id, name: t.name, sms: n('sms'), smsSegments: n('sms_segments'), smsMonthlyCap: Number.isInteger(limits.smsMonthlyCap) ? limits.smsMonthlyCap : (smsMonthlyCap || null) });
+      const acct = billingOn() ? await billingAccount(t.id) : null;
+      out.push({ tenantId: t.id, name: t.name, sms: n('sms'), smsSegments: n('sms_segments'), smsMonthlyCap: Number.isInteger(limits.smsMonthlyCap) ? limits.smsMonthlyCap : (smsMonthlyCap || null),
+        ...(billingOn() ? { doorDays: (await monthUsage(t.id, p)).doorDays, billing: acct ? billingCore.standing(acct) : null } : {}) });
     }
     return { period: p, tenants: out };
   });
@@ -2389,6 +2560,8 @@ function createApi({
     if (!rbac.hasPermission(await t.snapshot(), who.operator, 'directory.sync')) return fail(403, 'this token lacks the directory.sync permission');
     if (!/^\/scim\/v2(\/|$)/.test(path)) return fail(404, 'SCIM lives under /scim/v2');
     const query = req.query instanceof URLSearchParams ? req.query : new URLSearchParams(req.query || {});
+    const unpaid = await billingBlock(who.tenantId, method, path);
+    if (unpaid) return fail(402, unpaid.body.error);
     const adoptDomains = verifiedDomains(await ssoSettings(who.tenantId));
     return scim.handle({ t, tenantId: who.tenantId, method, path, query, body: req.body, origin: req.origin || '', actor: who.operator.id, adoptDomains });
   }
@@ -2466,6 +2639,8 @@ function createApi({
         return { status: 403, body: { ok: false, error: 'forbidden', required: who.perm } };
       }
       ctx.scope = scopeFor(snap, who.operator);
+      const unpaid = await billingBlock(who.tenantId, method, path);
+      if (unpaid) return unpaid;
       const out = await found.fn(ctx, params);
       if (out && out._status) {
         const { _status, ...rest } = out;
@@ -2475,7 +2650,7 @@ function createApi({
     } catch (error) {
       if (error instanceof HttpError) return { status: error.status, body: { ok: false, error: error.message, ...error.extra } };
       if (error instanceof ValidationError) return { status: 400, body: { ok: false, error: error.message } };
-      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError')) return { status: error.status, body: { ok: false, error: error.message } };
+      if (error && (error.name === 'AccountError' || error.name === 'AuditOpsError' || error.name === 'AlertsError' || error.name === 'BillingError')) return { status: error.status, body: { ok: false, error: error.message } };
       if (error && error.status === 409) return { status: 409, body: { ok: false, error: 'conflicting change, please retry' }, headers: { 'retry-after': '2' } };
       if (error && error.status === 501) return { status: 501, body: { ok: false, error: error.message } };
       // Lock vendor unusable (token revoked, TTLock down): say why, never a 500 or an empty fleet.
@@ -2543,6 +2718,13 @@ function createApi({
       log(`maintenance ${tenantId} lock health failed`, error);
     }
     try {
+      const b = await meterUsage(tenantId);
+      if (b) out.billing = b;
+    } catch (error) {
+      log(`maintenance ${tenantId} billing usage failed`, error && error.message);
+      out.billingError = String((error && error.message) || error);
+    }
+    try {
       // Snapshot-cache change log: keep the newest rows; caches further behind reload in full.
       const pruned = await store.tenant(tenantId).pruneChanges();
       if (pruned) out.changesPruned = pruned;
@@ -2570,7 +2752,7 @@ function createApi({
     } catch { return null; } // store not ready yet etc.: handle unqueued, authenticate() decides
   }
 
-  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
+  return { handle, writeKey, tenantIds, reconcileOne, maintainOne, reconcileAll, maintenance, reconcileTenant, whenReady, ttlockNotify, recordArrival, recordAlarm, runTenantJob, visitCheckoutPublic, visitInvitePublic, stripeWebhook, routes: routes.map(r => ({ method: r.method, pattern: r.pattern })) };
 }
 
 module.exports = { createApi, scopeFor, createDetail, HttpError };

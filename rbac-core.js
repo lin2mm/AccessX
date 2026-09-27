@@ -70,6 +70,9 @@ const ROUTES = [
   ['GET', /^\/api\/doors\/health$/, 'door.read'],
   ['GET', /^\/api\/onboarding\/office$/, OWNER],
   ['POST', /^\/api\/onboarding\/office$/, OWNER],
+  // Billing: the owner only (money, and the Stripe customer portal).
+  ['GET', /^\/api\/billing$/, OWNER],
+  ['POST', /^\/api\/billing\/(checkout|portal)$/, OWNER],
   ['GET', /^\/api\/tenants$/, PLATFORM],
   ['POST', /^\/api\/tenants$/, PLATFORM],
   ['GET', /^\/api\/platform\/secrets$/, PLATFORM],

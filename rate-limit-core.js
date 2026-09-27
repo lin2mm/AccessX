@@ -16,6 +16,8 @@ const LIMITS = {
   notify: { limit: 600, periodSec: 60, binding: 'RL_NOTIFY' },
   // A visitor opens one link once or twice. Per address (IPv6: per /64).
   visitorLink: { limit: 20, periodSec: 60, binding: 'RL_PUBLIC' },
+  // Stripe webhooks: signed, but a flood of bad signatures still costs an HMAC each.
+  stripe: { limit: 600, periodSec: 60, binding: 'RL_NOTIFY' },
 };
 
 /** Rate-limit key for an address: IPv4 as is; IPv6 by its /64 (one host gets a whole /64). */

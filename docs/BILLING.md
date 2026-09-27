@@ -1,8 +1,9 @@
 # Billing plan (Stripe): per door per month, SMS at cost plus
 
-Status: **proposal, not implemented.** What exists today: SMS are counted
-per tenant and month in `usage_counters` (`sms`, `sms_segments`), capped per
-tenant, and listed by `GET /api/platform/usage`.
+Status: **implemented behind a flag** (`BILLING_ENABLED=1`, off by default;
+tested against Stripe test mode through a fake Stripe server). See
+[Implemented](#implemented) at the end for where the code differs from this
+plan. Prices are placeholders created in the Stripe dashboard, not in code.
 
 ## What we charge
 
@@ -114,3 +115,62 @@ CREATE TABLE billing_reports (
   door-days and SMS segments.
 - `GET /api/platform/usage` gains `doorDays` next to `sms` so what we bill
   is visible before Stripe sees it.
+
+## Implemented
+
+Code: `billing-core.js` (Stripe client without the SDK, webhook signatures,
+standing), `migrations/0020_billing.sql`, routes in `api-core.js`, raw-body
+webhook endpoints in `server.js` and `worker.js`. Tests:
+`test/billing.test.js` against `support/fake-stripe.js`.
+
+**Setup (test mode first):**
+
+1. Stripe dashboard → Billing → Meters: create `accessx_door_days` and
+   `accessx_sms_segments` (aggregation *sum*), then one metered monthly price
+   on each. The per-unit price is the business decision (e.g. 10–15 per door
+   per month ÷ 30 per door-day).
+2. Webhook endpoint `https://<your host>/api/stripe/webhook` with
+   `checkout.session.completed` and `customer.subscription.*`.
+3. Customer portal: enable card update, invoice history and cancel.
+4. Set `BILLING_ENABLED=1`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+   `STRIPE_PRICE_DOOR_DAYS`, optionally `STRIPE_PRICE_SMS`,
+   `STRIPE_AUTOMATIC_TAX=1` (after Stripe Tax is configured). A misconfigured
+   flag logs the problems and stays inactive rather than half-billing.
+
+**API:** `GET /api/billing` (owner: standing, month usage, unsent reports),
+`POST /api/billing/checkout` and `/portal` (owner, return a Stripe URL),
+`POST /api/stripe/webhook` (Stripe only: signature within 5 minutes, event id
+deduplicated in `billing_events`, rate-limited on `RL_NOTIFY`).
+`GET /api/platform/usage` gains `doorDays` and `billing` when the flag is on.
+
+**Differences from the plan above:**
+
+- Door-day events carry the time the report row was created (within the
+  35-day window), not 12:00 UTC; the identifier is still
+  `<tenant>:door_days:<date>`, so a retry can never double-count. Missed
+  days are backfilled for up to 30 days (`MAX_BACKFILL_DAYS`).
+- SMS identifier is `<tenant>:sms_segments:<YYYY-MM>:<running total>`, value
+  = the delta since the last report; the running total makes it idempotent.
+- `invoice.*` events are not needed: `customer.subscription.updated` already
+  carries `past_due` / `unpaid` / `active`. They are recorded and ignored.
+- The thin event `v1.billing.meter.error_report_triggered` is not consumed
+  yet; failed reports stay in `billing_reports` with `sent_at` empty and show
+  as `unsentReports` for the owner and in the maintenance result.
+- Out-of-order events: an event older than `last_event_at` is recorded but
+  does not change the status.
+- No account (pilot / trial / flag off) restricts nothing. The 402 gate
+  covers additions only (`POST` people, visitors, visit invites, codes,
+  rules, office onboarding, SCIM create; list in `billing-core.js`
+  `ADDITIONS`). Removals, suspensions, exports, reads and the doors
+  themselves are never gated. Deliberately open: approving requests that
+  were already pending (four-eyes, reception approval of pre-registrations)
+  and adding operators, so an owner can bring in a bookkeeper to fix
+  billing. Closing after 45 days stays a manual step.
+- The owner sees a Billing card (People view) and a banner on Doors during
+  the 15-day grace period and while additions are paused.
+
+**Before live mode:** run a test-clock month (door added day 10, removed day
+20) and compare the invoice with `GET /api/platform/usage`; decide the price
+and the minimum (e.g. 5 doors); write the terms that say non-payment never
+locks anyone out.
+

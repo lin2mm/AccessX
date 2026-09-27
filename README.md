@@ -9,7 +9,7 @@ use demo data and do not control physical locks. See
 [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md) for the visitor pre-registration design,
 [docs/OFFICE-SETUP.md](docs/OFFICE-SETUP.md) for setting up an office (about 45 minutes),
 [docs/SECURITY-TESTING.md](docs/SECURITY-TESTING.md) for the external security test and rate limits, and
-[docs/BILLING.md](docs/BILLING.md) for the proposed Stripe billing.
+[docs/BILLING.md](docs/BILLING.md) for Stripe billing (off unless `BILLING_ENABLED=1`).
 
 ## Run locally
 
@@ -83,6 +83,7 @@ and secrets (`npx wrangler secret put NAME`), locally from `.dev.vars`.
 | `SECURITY_CONTACT` | production | Published as `/.well-known/security.txt` (RFC 9116): `mailto:` / `https:` / `tel:` URIs, comma-separated. Unset: no file. `SECURITY_POLICY` (optional) adds the disclosure-policy URL. |
 | `OPERATORS` | optional | JSON list of seeded operators: `id`, `name`, `role`, `siteIds` (omit or `["*"]` = all sites), `tokenSha256` (SHA-256 hex of the token; plaintext tokens are refused). |
 | `PLATFORM_TOKEN` | SaaS | Creates tenants and runs deployment-wide jobs (`/api/tenants`, `/api/platform/*`). Never a tenant role. |
+| `BILLING_ENABLED` | SaaS, optional | `1` turns on Stripe billing per door-day and SMS segment ([docs/BILLING.md](docs/BILLING.md)). Needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_DOOR_DAYS`; optional `STRIPE_PRICE_SMS`, `STRIPE_METER_DOOR_DAYS` / `STRIPE_METER_SMS` (default `accessx_door_days` / `accessx_sms_segments`), `STRIPE_AUTOMATIC_TAX=1`. Non-payment pauses additions after 15 days; doors keep working. |
 | `SECRETS_KEY` | TTLock accounts, SSO, alerts, four-eyes passcodes | 32 random bytes, base64 (`openssl rand -base64 32`). May be a keyring `new,old`: the first key seals, all keys open. See *Rotating SECRETS_KEY*. |
 | `AUDIT_SIGNING_KEY` | signed audit anchors | Ed25519 JWK pair from `npm run audit:keygen`. Keep an offline copy: old anchors verify with the public half only. |
 | `PUBLIC_URL` | SSO, alerts | The public origin, e.g. `https://doors.example.com`. Used for the OIDC redirect URI, links in alerts, visitors' self check-out links and visitor invitations; without it those links are left out and the redirect URI follows the request host. |

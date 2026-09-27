@@ -19,6 +19,7 @@ import { createSms, smsConfigFromEnv } from './sms-core.js';
 import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
 import { createLimiters, allow } from './rate-limit-core.js';
 import { securityTxt } from './security-txt.js';
+import { billingConfigFromEnv, createStripe } from './billing-core.js';
 
 const MAX_BODY = 64 * 1024;
 
@@ -95,7 +96,10 @@ function apiFor(env) {
   const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
   const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
   const sms = createSms({ config: smsConfigFromEnv(env) });
-  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  const billingConfig = billingConfigFromEnv(env);
+  if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
+  const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
   cached = { key, db: env.DB, api };
   return api;
 }
@@ -165,6 +169,23 @@ async function handleTtlockNotify(request, env, url) {
   const api = apiFor(env);
   const out = await api.ttlockNotify({ secret: decodeURIComponent(url.pathname.slice('/api/ttlock/notify/'.length)), form }, { dispatch: jobDispatcher(env) });
   return new Response(out.status === 200 ? 'success' : 'not found', { status: out.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
+}
+
+/** Stripe webhook: raw body for the signature; the state change runs in the tenant's DO. */
+async function handleStripeWebhook(request, env) {
+  const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  limiters = limiters || createLimiters(env);
+  if (!(await allow(limiters, 'stripe', clientIp(request)))) return tooMany('json');
+  if (Number(request.headers.get('content-length') || 0) > 256 * 1024) return json(413, { ok: false, error: 'too large' });
+  const rawBody = await request.text();
+  if (rawBody.length > 256 * 1024) return json(413, { ok: false, error: 'too large' });
+  try {
+    const out = await apiFor(env).stripeWebhook({ rawBody, signature: request.headers.get('stripe-signature') || '' }, { dispatch: jobDispatcher(env) });
+    return json(out.status, out.body);
+  } catch (error) {
+    console.error('stripe webhook failed', error);
+    return json(500, { ok: false, error: 'webhook failed' }); // Stripe retries
+  }
 }
 
 /** Writes that arrive without a tenant session run in that tenant's Durable Object. */
@@ -242,6 +263,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
+    if (request.method === 'POST' && url.pathname === '/api/stripe/webhook') return handleStripeWebhook(request, env);
     if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handlePublicJson(request, env, 'visitCheckoutPublic', 'Check-out');
     if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
     if (url.pathname === '/.well-known/security.txt') {

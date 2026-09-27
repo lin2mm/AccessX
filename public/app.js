@@ -57,8 +57,8 @@ $('#admin-logout').addEventListener('click',async()=>{
 
 // Opening a view (or clicking it again) refreshes its data: another operator,
 // a visitor or the directory may have changed it since sign-in.
-const VIEW_LOADERS={doors:()=>[loadDoors(),loadHealth(),loadSetup()],access:()=>[loadRules(),loadCompile(),loadCreds()],
-  visitors:()=>[loadVisitors()],people:()=>[loadPeople(),loadRules(),loadAdmin()],log:()=>[loadApprovals(),loadAudit(),loadRevocation()]};
+const VIEW_LOADERS={doors:()=>[loadDoors(),loadHealth(),loadSetup(),loadBilling()],access:()=>[loadRules(),loadCompile(),loadCreds()],
+  visitors:()=>[loadVisitors()],people:()=>[loadPeople(),loadRules(),loadAdmin(),loadBilling()],log:()=>[loadApprovals(),loadAudit(),loadRevocation()]};
 let viewLoading=null;
 $$('nav button').forEach(b=>b.onclick=()=>{
   $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
@@ -82,7 +82,7 @@ async function init(){
     return;
   }
   await loadMode();
-  await loadDoors();refreshTzNotes(true);await loadHealth();await loadSetup();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();
+  await loadDoors();refreshTzNotes(true);await loadHealth();await loadSetup();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();await loadVisitors();await loadBilling();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
 }
 /* ---- door-local time: every time the operator types or reads is in the door's time zone ---- */
@@ -376,6 +376,43 @@ async function loadRevocation(){
     <td>${dur(i.ageSec)}</td></tr>`).join('')+'</table>'
     :`<div class="meta">Nothing open. ${Number(r.credentials)||0} credentials of ${r.triggers??'—'} leavers were removed in this window.</div>`;
 }
+
+/* ---- billing (owner) ---- */
+async function loadBilling(){
+  const r=await api('/api/billing');
+  const b=r.ok&&r.billing&&r.billing.enabled?r.billing:null;
+  $('#billing-card').hidden=!b;
+  const st=b?b.standing:null;
+  const warn=st&&(st.restricted||st.restrictsInDays!==null&&st.restrictsInDays!==undefined);
+  $('#billing-banner').hidden=!warn;
+  if(!b)return;
+  if(warn)$('#billing-banner').innerHTML=st.restricted
+    ?`<span class="tag r">billing</span> <b>Adding people, visitors, codes and rules is paused</b> until the subscription is paid. Doors keep opening; removing access works. <a href="#" data-goto-billing>Billing</a>`
+    :`<span class="tag o">billing</span> The last payment failed. Adding people and visitors pauses in <b>${Number(st.restrictsInDays)} day(s)</b> unless the card is updated. <a href="#" data-goto-billing>Billing</a>`;
+  const label={none:'No subscription yet',active:'Active',trialing:'Trial',past_due:'Payment failed',unpaid:'Unpaid',canceled:'Cancelled',incomplete:'Waiting for payment',incomplete_expired:'Checkout expired',paused:'Paused'}[st.status]||st.status;
+  const tag=st.restricted?'r':st.status==='active'||st.status==='trialing'?'g':st.status==='none'?'':'o';
+  $('#billing-state').innerHTML=`<div><span class="tag ${tag}">${esc(label)}</span>${b.testMode?' <span class="tag">Stripe test mode</span>':''}</div>
+    <div class="meta" style="margin-top:6px">This month (${esc(b.period)}): <b>${Number(b.usage.doorDays)}</b> door-days${b.smsBilled?` · <b>${Number(b.usage.smsSegments)}</b> text segments`:''}${b.unsentReports?` · ${Number(b.unsentReports)} usage report(s) waiting to reach Stripe`:''}</div>`;
+  $('#bill-start').hidden=b.subscribed;
+  $('#bill-manage').hidden=st.status==='none';
+}
+const billGo=async(url,btn)=>{
+  btn.disabled=true;
+  const r=await post(url,{});
+  btn.disabled=false;
+  if(r.ok&&r.url&&/^https:\/\//.test(r.url)){location.href=r.url;return;}
+  $('#bill-msg').innerHTML=`<span class="tag r">not started</span> ${esc(errText(r))}`;
+};
+$('#bill-start').addEventListener('click',e=>billGo('/api/billing/checkout',e.currentTarget));
+$('#bill-manage').addEventListener('click',e=>billGo('/api/billing/portal',e.currentTarget));
+document.addEventListener('click',e=>{
+  const a=e.target.closest&&e.target.closest('[data-goto-billing]');
+  if(!a)return;
+  e.preventDefault();
+  $('nav button[data-v="people"]').click();
+  $('#billing-card').scrollIntoView({behavior:'smooth'});
+});
+if(location.hash==='#billing-done')$('#bill-msg').innerHTML='<span class="tag g">thank you</span> The subscription shows as active once Stripe confirms the payment (usually a few seconds).';
 
 /* ---- rules editor: rules, door groups, holidays, people groups, schedules ---- */
 const canRules=()=>Boolean(ME&&(ME.perms||[]).some(p=>p==='*'||p==='rule.manage'));
