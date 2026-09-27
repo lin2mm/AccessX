@@ -228,7 +228,12 @@ in the repeated fall-back hour the **earlier** instant wins (a code "valid
 until 02:30" on the first Sunday of April in Sydney ends at the first 02:30,
 not an hour later), and a time inside the spring-forward gap moves forward by
 the gap. The passcode API takes `endLocal` (`YYYY-MM-DDTHH:mm`, site time);
-`endAt` (an absolute instant) is still accepted.
+`endAt` (an absolute instant) is still accepted. `GET /api/doors` returns each
+door's `timeZone` so the console can say so: the passcode and evaluate forms
+show the door's zone (flagged when it differs from the browser's), the
+evaluate time is prefilled with *now at that door*, and issued codes and the
+credentials list show times at the door with the zone abbreviation — never a
+bare UTC date that can read as the next day.
 
 **48 h removal SLA.** A revoked code on a lock the cloud cannot reach stays
 `pending_removal` until someone confirms it was removed at the door.

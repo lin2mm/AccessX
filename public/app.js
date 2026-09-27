@@ -75,10 +75,35 @@ async function init(){
     return;
   }
   await loadMode();
-  const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
-  $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();
+  await loadDoors();refreshTzNotes(true);await loadHealth();await loadPeople();await loadRules();await loadAudit();await loadCreds();await loadCompile();await loadAdmin();await loadRevocation();await loadAnchors();await loadApprovals();await loadAlerts();
   if(!$('#chat').children.length)addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
+}
+/* ---- door-local time: every time the operator types or reads is in the door's time zone ---- */
+const BROWSER_TZ=(()=>{try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}catch{return 'UTC';}})();
+function doorTz(lockId){const d=DOORS.find(x=>Number(x.lockId)===Number(lockId));return (d&&d.timeZone)||'UTC';}
+function tzParts(date,tz){
+  const f=new Intl.DateTimeFormat('en-CA',{timeZone:tz,hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const p=Object.fromEntries(f.formatToParts(date).map(x=>[x.type,x.value]));
+  return {date:`${p.year}-${p.month}-${p.day}`,time:`${p.hour}:${p.minute}`};
+}
+function tzAbbr(date,tz){try{return (new Intl.DateTimeFormat('en-GB',{timeZone:tz,timeZoneName:'short'}).formatToParts(date).find(x=>x.type==='timeZoneName')||{}).value||tz;}catch{return tz;}}
+/** "5 Oct 2026, 23:59 BST" — an instant shown as wall-clock time at the door. */
+function atDoor(iso,lockId,{dateOnly=false}={}){
+  const d=new Date(iso);if(Number.isNaN(d.getTime()))return String(iso||'');
+  const tz=doorTz(lockId);
+  const opts=dateOnly?{timeZone:tz,dateStyle:'medium'}:{timeZone:tz,dateStyle:'medium',timeStyle:'short',hourCycle:'h23'};
+  return new Intl.DateTimeFormat('en-GB',opts).format(d)+(dateOnly?'':' '+tzAbbr(d,tz));
+}
+function tzNote(lockId){
+  const tz=doorTz(lockId),now=new Date();
+  const same=tz===BROWSER_TZ||tzParts(now,tz).time===tzParts(now,BROWSER_TZ).time&&tzParts(now,tz).date===tzParts(now,BROWSER_TZ).date;
+  return same?`Door time zone: ${tz} (same as yours).`
+    :`<span class="tag o">different time zone</span> Door time zone: <b>${esc(tz)}</b> — now ${esc(tzParts(now,tz).time)} there, ${esc(tzParts(now,BROWSER_TZ).time)} where you are (${esc(BROWSER_TZ)}). Times you enter here are read at the door.`;
+}
+function refreshTzNotes(prefill=false){
+  const e=$('#e-door').value,p=$('#p-door').value;
+  if(e){$('#e-tz').innerHTML=tzNote(e);if(prefill){const n=tzParts(new Date(),doorTz(e));$('#e-when').value=`${n.date}T${n.time}`;}}
+  if(p){$('#p-tz').innerHTML=tzNote(p);$('#p-end').min=tzParts(new Date(),doorTz(p)).date;}
 }
 async function loadDoors(){
   const d=await api('/api/doors');DOORS=d.doors||[];
@@ -316,6 +341,9 @@ async function evaluate(){
       x.path.map(p=>`· ${esc(p.group)} → ${esc(p.doorGroup)} (${esc(p.schedule)}): ${esc(p.reason)}`).join('<br>')+'</div>':''}</div>`;
 }
 $('#e-go').addEventListener('click',evaluate);
+// Switching door: re-anchor the time to "now at that door" so a London slot is not tested with a Sydney clock.
+$('#e-door').addEventListener('change',()=>refreshTzNotes(true));
+$('#p-door').addEventListener('change',()=>refreshTzNotes(false));
 
 /* ---- enforcement map (policy compiler) ---- */
 const lv=l=>`<span class="tag lv-${esc(l)}">${esc(l)}</span>`;
@@ -379,7 +407,7 @@ $('#appr-ready').addEventListener('click',async e=>{
   const r=await post(`/api/approvals/${encodeURIComponent(b.dataset.collect)}/collect`,{});
   const msg=$('#appr-msg');
   if(!r.ok)msg.textContent=errText(r);
-  else msg.innerHTML=`Passcode (shown once): <b class="code" style="font-size:18px">${esc(r.passcode.keyboardPwd)}</b>${r.credential?` <span class="meta">door ${esc(r.credential.lockId)} · until ${esc(new Date(r.credential.endAt).toLocaleString())}</span>`:''}`;
+  else msg.innerHTML=`Passcode (shown once): <b class="code" style="font-size:18px">${esc(r.passcode.keyboardPwd)}</b>${r.credential?` <span class="meta">door ${esc(r.credential.lockId)} · until ${esc(atDoor(r.credential.endAt,r.credential.lockId))} (door time)</span>`:''}`;
   loadApprovals();loadAudit();
 });
 $('#appr-list').addEventListener('click',async e=>{
@@ -416,7 +444,7 @@ async function issuePasscode(acknowledge=false){
   const c=r.credential;
   out.innerHTML=`<div class="res y"><div class="code">${esc(r.passcode.keyboardPwd)}</div>
     <div class="meta" style="margin-top:6px">Shown once — the system only keeps ${esc(c.codeHint)}.</div>
-    <div style="margin-top:6px">${esc(c.startAt.slice(0,16).replace('T',' '))} → ${esc(c.endAt.slice(0,16).replace('T',' '))} UTC ·
+    <div style="margin-top:6px">${esc(atDoor(c.startAt,c.lockId))} → ${esc(atDoor(c.endAt,c.lockId))} <span class="meta">(door time)</span> ·
       ${c.enforcement==='lock'?'<span class="tag g">lock-enforced</span>':'<span class="tag o">partial</span>'}</div>
     ${(r.warnings||[]).map(w=>`<div class="meta" style="margin-top:4px">⚠ ${esc(w)}</div>`).join('')}</div>`;
   loadCreds();loadAudit();loadCompile();
@@ -432,7 +460,7 @@ async function loadCreds(){
   const list=(r.credentials||[]).slice().reverse();
   $('#creds').innerHTML=list.length?`<tr><th>Person</th><th>Door</th><th>Valid until</th><th>Enforcement</th><th>Status</th><th></th></tr>`+
     list.map(c=>`<tr><td>${esc(uname(c.userId))}<div class="meta">${esc(c.codeHint||'')}</div></td><td>${esc(dname(c.lockId))}</td>
-      <td>${esc(String(c.endAt).slice(0,10))}</td>
+      <td title="${esc(atDoor(c.endAt,c.lockId))}">${esc(atDoor(c.endAt,c.lockId,{dateOnly:true}))}</td>
       <td>${c.enforcement==='lock'?'<span class="tag g">lock</span>':'<span class="tag o">partial</span>'}</td>
       <td>${c.status==='pending_removal'?'<span class="tag o">remove on site</span>':c.status!=='active'?'<span class="tag">'+esc(c.status)+'</span>':flags[c.id]?'<span class="tag r">revoke</span><div class="meta">'+esc(flags[c.id].join('; '))+'</div>':'<span class="tag g">ok</span>'}</td>
       <td>${c.status==='active'?`<button class="btn2 sm" type="button" data-revoke="${esc(c.id)}">Revoke</button>`:c.status==='pending_removal'?`<button class="btn2 sm" type="button" data-confirm="${esc(c.id)}">Confirm removed</button>`:''}</td></tr>`).join('')

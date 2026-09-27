@@ -190,7 +190,8 @@ Operators (people who administer the system) are separate from door users.
   encrypted) and/or up to 10 email recipients. Undelivered alerts are
   retried for about a day, then recorded as `alerts.dropped`.
 - **Local times mean the site's clock** — passcode end dates and schedules
-  are converted in the door's time zone; on a daylight-saving fall-back the
+  are converted in the door's time zone, and the console labels every time
+  field and result with that zone; on a daylight-saving fall-back the
   ambiguous hour uses the *earlier* instant, a skipped hour moves forward
   (RFC 5545 / Temporal "compatible").
 - **Burst-safe writes** — each tenant's writes run one at a time (a Durable

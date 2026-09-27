@@ -119,4 +119,8 @@ test('passcode endLocal is converted in the door\'s time zone, not the admin\'s'
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.credential.endAt, '2026-10-20T22:59:00.000Z');
   assert.equal((await api.call('POST', '/api/passcode', { token: 'o', body: { lockId: 9002, userId: 'u2', endLocal: 'soon' } })).status, 400);
+  // The UI labels, prefills and displays in the zone /api/doors reports — it must be the one used above.
+  const doors = (await api.call('GET', '/api/doors', { token: 'o' })).body.doors;
+  assert.ok(doors.length && doors.every(d => typeof d.timeZone === 'string' && d.timeZone), 'every door carries its time zone');
+  assert.equal(doors.find(d => d.lockId === 9002).timeZone, 'Europe/London');
 });

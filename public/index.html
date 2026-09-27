@@ -176,7 +176,8 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="hint">Ask the policy engine whether a person may open a door at a given moment — and see the exact rule path behind the answer.</div>
       <label>Person</label><select id="e-user"></select>
       <label>Door</label><select id="e-door"></select>
-      <label>Date &amp; time (local time at the door's site)</label><input type="datetime-local" id="e-when">
+      <label>Date &amp; time at the door</label><input type="datetime-local" id="e-when">
+      <div class="meta tz-note" id="e-tz"></div>
       <div style="margin-top:14px"><button class="btn" type="button" id="e-go">Evaluate access</button></div>
       <div id="e-res"></div>
     </div>
@@ -196,7 +197,8 @@ details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
       <div class="hint">Codes go through the same policy engine as remote unlocks. The system tells you honestly whether the lock itself can enforce the rule.</div>
       <label>Person</label><select id="p-user"></select>
       <label>Door</label><select id="p-door"></select>
-      <label>Valid until (optional, default 7 days)</label><input type="date" id="p-end">
+      <label>Valid until — end of that day at the door (optional, default 7 days)</label><input type="date" id="p-end">
+      <div class="meta tz-note" id="p-tz"></div>
       <div style="margin-top:14px"><button class="btn" type="button" id="p-issue">Issue passcode</button></div>
       <div id="p-res"></div>
     </div>
