@@ -1,7 +1,7 @@
 # SEO / ASO 关键词矩阵(90 天内容作战图)
 
 > 版本 v1.0 · 2026-09-28 · 状态: active
-> 角色:网站 = 获客机器([体系文档](../05-system/accessx-complete-growth-system.md) §5);本文是网站全部内容的单一关键词索引。
+> 角色:网站 = 获客机器([体系文档](../90-archive/README.md#item-15) §5);本文是网站全部内容的单一关键词索引。
 > 维护规则:每季度用 Search Console 实际数据回刷"实测难度/排名"列。访谈原话库([jtbd-interview-guide.md](jtbd-interview-guide.md) §5)产出后优先回填。
 
 ## 1. 关键词分组总览(五大内容集群)
@@ -65,7 +65,7 @@
 | W7–8 | `/guidebook/` + `/no-subscription/` | 产品页 + 情绪差位页 |
 | W9–10 | `/family/arrival-alerts/` + `/hosts/lockbox-vs-lock/` | 场景页 + 对比页 |
 | W11–12 | `/compare/august-vs-switchbot/` + `/doors/` 剩余 6 锁型页 | 对比页 + 程序化页收尾 |
-| W13–14 | **《租屋智能锁白皮书》首发版**:`/research/renter-lock-report/`(扫描数据库匿名统计:"N 扇门中 X% 可无损升级"+锁型地图)+ 媒体通稿 + 可嵌入图表 | 数据公关页(Cloudflare Radar 式)——同时为 M4 白皮书 PR 波弹药,见 [growth-plan-1m-10k.md](../05-system/growth-plan-1m-10k.md) §6 |
+| W13–14 | **《租屋智能锁白皮书》首发版**:`/research/renter-lock-report/`(扫描数据库匿名统计:"N 扇门中 X% 可无损升级"+锁型地图)+ 媒体通稿 + 可嵌入图表 | 数据公关页(Cloudflare Radar 式)——同时为 M4 白皮书 PR 波弹药,见 [growth-plan-1m-10k.md](../90-archive/README.md#item-18) §6 |
 
 之后进入"一月一锁型国家版本 + 每月一篇数据洞察"(用扫描数据库匿名统计做 PR 稿,"我们扫描了 N 扇门,发现 X% 其实能无损升级")。
 
@@ -81,7 +81,7 @@
 - 短描述(80 字符): `Guest passes, check-in guides & arrival alerts. Add the lock later/no rush.`
 - 长描述首屏(前 167 字符决定展开前信息): `No smart lock? No problem. AccessX works from day one: check your door's compatibility, send guests a check-in pass, and know when family gets home.`
 
-**商店素材纪律**(见 [app-marketing-gtm-methodology.md](../01-foundations/app-marketing-gtm-methodology.md) §6):截图第 1 张=扫描报告页 + 文案 "Snap your door. Know in 30 seconds.";预览视频复用 [presale-campaign-copy.md](../03-design/presale-campaign-copy.md) §2 开场视频 8–20s 段落。
+**商店素材纪律**(见 [app-marketing-gtm-methodology.md](../01-foundations/app-marketing-gtm-methodology.md) §6):截图第 1 张=扫描报告页 + 文案 "Snap your door. Know in 30 seconds.";预览视频复用 [presale-campaign-copy.md](../90-archive/README.md#item-14) §2 开场视频 8–20s 段落。
 
 **本地化波次**:EN(首发) → ES(美国西语裔,低成本高增量) → DE/FR(欧洲期与硬件欧洲上市同步,[iot-gtm](../01-foundations/iot-gtm-methodology.md) §6)。
 
@@ -89,4 +89,4 @@
 
 - SEO:Search Console 周更——各集群曝光/点击/排名;**核心资产指标:`/doors/` 矩阵页进入扫描器的过桥率(目标 >12%)**
 - ASO:商店页转化率(iOS App Analytics,目标 >25%)、关键词排名周追踪、`smart lock` 大词不进 Top 50 不加大投入,长尾词 Top 5 达标数
-- 归因:网站→App 商店用带参 smartlink(UTM 贯通到 [smoke-test-landing-pages.md](smoke-test-landing-pages.md) §4 同一套命名)
+- 归因:网站→App 商店用带参 smartlink(UTM 贯通到 [smoke-test-landing-pages.md](../90-archive/README.md#item-10) §4 同一套命名)

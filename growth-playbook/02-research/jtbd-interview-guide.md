@@ -1,7 +1,7 @@
 # JTBD 深访执行手册(P0 阶段 · 需求验证第 1 级)
 
 > 版本 v1.0 · 2026-09-28 · 状态: **archived**(用户决策:跳过人工访谈,以全网桌面调研替代——见 [../04-case-studies/competitor-360-analysis.md](../04-case-studies/competitor-360-analysis.md);本手册保留备查,若桌面调研判据未达标则重启)
-> 对应体系: [accessx-complete-growth-system.md](../05-system/accessx-complete-growth-system.md) P0 出门条件:「20–30 场深访 + 同一痛点复现 ≥5 次」
+> 对应体系: [accessx-complete-growth-system.md](../90-archive/README.md#item-15) P0 出门条件:「20–30 场深访 + 同一痛点复现 ≥5 次」
 > 方法依据: [market-research-methodology.md](../01-foundations/market-research-methodology.md) §4
 
 ## 1. 目标与判据(先写死,防自欺)

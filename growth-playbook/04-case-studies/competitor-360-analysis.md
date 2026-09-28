@@ -219,4 +219,4 @@
 
 ---
 
-*关联: [monetization-case-studies.md](monetization-case-studies.md)(变现双流向案例) · [../05-system/accessx-complete-growth-system.md](../05-system/accessx-complete-growth-system.md)(学习结论将回流至体系文档 v1.1)*
+*关联: [monetization-case-studies.md](monetization-case-studies.md)(变现双流向案例) · [../05-system/accessx-complete-growth-system.md](../90-archive/README.md#item-15)(学习结论将回流至体系文档 v1.1)*

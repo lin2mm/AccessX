@@ -60,7 +60,7 @@ low = [r for r in app.reviews if r["rating"]<=3]
 ```
 - Google Play 同理(`google-play-scraper` 的 `Sort.NEWEST`,`filter_score_with=3`)
 - Amazon 评论:手动采样各锁详情页 1–3 星 `most recent` 前 30 条爬表(遵守 ToS,低速)
-- 产出入库:`02-research/review-mining-dataset.csv`(date, app, source, rating, cluster, quote, helpful_votes)→ 回填本表 §1 计数列,形态与 [P0 判据](../05-system/accessx-complete-growth-system.md) §8 对齐。
+- 产出入库:`02-research/review-mining-dataset.csv`(date, app, source, rating, cluster, quote, helpful_votes)→ 回填本表 §1 计数列,形态与 [P0 判据](../90-archive/README.md#item-15) §8 对齐。
 
 ## 5. 来源
 

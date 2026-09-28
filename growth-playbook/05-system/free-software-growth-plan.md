@@ -17,6 +17,8 @@
 
 > **最新竞争门（2026-09-28）**：本轮完整读取[Hospitable官方定价](https://hospitable.com/pricing)，其免费Essentials已有日历、收件箱、定时消息和Tasks团队管理；Turno官方定价也列免费情景。[1](https://turno.com/pricing/) 因此Host优先仅适用于现有免费替代未解决的明确任务。先做替代对照，不以免费、模板或普通清洁协作自称差异；无缺口则停止复制，考虑租客任务。功能分层唯一细节入口为[产品计划](../03-design/free-app-commercial-operations-plan.md)，硬件与GEO见主决策板，不增设平行总计划。
 
+> **商机补充反证**：Breezeway已有首房源免费运营方案，RentCheck已有住户自助检查/报告能力。租客不是Host竞争后的自动蓝海；必须验证特定交接缺口。新来源、O1–O4假设与每周筛选方法统一见[主决策板§8](strategy-master-summary.md)。不因此增加开发范围。
+
 ## 1. 四类用户重新筛选
 
 |人群|首批筛选画像（假设范围）|不依赖硬件的任务|替代方案与反证|适合的频率指标|当前建议|

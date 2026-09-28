@@ -4,7 +4,7 @@
 
 > 版本 v1.0 · 2026-09-28 · 状态: active
 > 任务来源: 用户任务 5 · 方法: JTBD + Kano + 加权评分(均见 [market-research-methodology.md](../01-foundations/market-research-methodology.md))
-> 结论协同: 与 [software-first-gtm-strategy.md](../01-foundations/software-first-gtm-strategy.md) §3 一致,本文是其功能层的深挖与重排。
+> 结论协同: 与 [software-first-gtm-strategy.md](../90-archive/README.md#item-01) §3 一致,本文是其功能层的深挖与重排。
 
 ## 1. 筛选框架:一个功能必须过三道门
 
@@ -59,7 +59,7 @@
 2. **收件人永不装 App**:通行证/指南/回执全部 H5 落地页打开(Operto/Touch Stay 验证准则,[案例库](../04-case-studies/monetization-case-studies.md) 引用源)。
 3. **空状态不空**:新用户进门先玩 Demo 虚拟锁 + 一键"扫描我的门",拒绝空仪表盘。
 4. **离线可用**:已生成的指南/通行证离线缓存(房东客人地下室没信号的高发场景)。
-5. **隐私可解释**:geofence 提醒明示"位置不出手机,只发到家事件"(Latch 案的公众情绪教训,[战略文档来源 9](../01-foundations/software-first-gtm-strategy.md))。
+5. **隐私可解释**:geofence 提醒明示"位置不出手机,只发到家事件"(Latch 案的公众情绪教训,[战略文档来源 9](../90-archive/README.md#item-01))。
 6. **数据资产感**:家门档案、历史日志、通行证记录——用户投入越多,离开成本越高(Hook 模型的 Investment)。
 
 ## 6. 反目标:明确不做的(防范围蔓延)
@@ -71,4 +71,4 @@
 
 ---
 
-*下游使用: [../03-design/feature-tier-design.md](../03-design/feature-tier-design.md)(本文 P0/P1/P2 → 免费/Pro 栅栏);[../05-system/accessx-complete-growth-system.md](../05-system/accessx-complete-growth-system.md)*
+*下游使用: [../03-design/feature-tier-design.md](../03-design/feature-tier-design.md)(本文 P0/P1/P2 → 免费/Pro 栅栏);[../05-system/accessx-complete-growth-system.md](../90-archive/README.md#item-15)*

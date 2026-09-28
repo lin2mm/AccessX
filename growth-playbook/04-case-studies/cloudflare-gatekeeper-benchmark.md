@@ -67,7 +67,7 @@ Free $0(全功能 CDN+DNS+WAF 基础,数百万站点)
 ## 5. 落地行动(并入既有体系)
 
 - [ ] 把"75% 毛利目标带"改为双侧限写进 [iot-gtm](../01-foundations/iot-gtm-methodology.md) §1(软件 80±5%,硬件 50–55%)
-- [ ] 预售页口号对照定价攻击:"No subscription. No egress. No brick."——三段式对齐 R2 话术结构(见 [presale-campaign-copy.md](../03-design/presale-campaign-copy.md))
+- [ ] 预售页口号对照定价攻击:"No subscription. No egress. No brick."——三段式对齐 R2 话术结构(见 [presale-campaign-copy.md](../90-archive/README.md#item-14))
 - [ ] 扫描数据库季度《锁型兼容白皮书》发布——Cloudflare 银河报告式的数据公关(喂 [seo 矩阵](../02-research/seo-aso-keyword-matrix.md))
 - [ ] 隐私立场做成"一页人话+可验证条款"(对照 1.1.1.1 审计),进 FAQ 与 B 标书
 

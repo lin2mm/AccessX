@@ -1,4 +1,0 @@
-scenario,net_units,net_asp_usd,revenue_usd,contribution_before_fixed_usd,planning_surplus_before_tax_usd,peak_unfunded_cash_gap_usd
-negotiated_deposit,30000,87.6667,2630000.0,800000.0,220000.0,719066.67
-no_deposit_net60,30000,87.6667,2630000.0,800000.0,220000.0,1443666.67
-cost_up20_net60,30000,87.6667,2630000.0,500000.0,-80000.0,1743666.67

@@ -2,7 +2,7 @@
 
 > **最新具体分级：**以 [免费App商业运营计划](free-app-commercial-operations-plan.md) 为准。用户要求的交接与异常处理基础模块免费；付费卖规模和自动化，住户基本入门权不与订阅绑定。
 
-> **新口径优先：** [双主线战略](../05-system/dual-engine-growth-strategy.md) §3替代下文价格与功能无限量假设；家庭基础协作免费；第三方设备控制取决于授权/兼容/商业费用。12期与24期旧分期稿冲突，暂停对外使用。
+> **新口径优先：** [双主线战略](../90-archive/README.md#item-16) §3替代下文价格与功能无限量假设；家庭基础协作免费；第三方设备控制取决于授权/兼容/商业费用。12期与24期旧分期稿冲突，暂停对外使用。
 
 > 版本 v1.0 · 2026-09-28 · 状态: active
 > 任务来源: 用户任务 6 · 输入: [no-hardware-feature-research.md](../02-research/no-hardware-feature-research.md) 的 P0–P2 清单
@@ -14,7 +14,7 @@
 2. **栅栏只加在"规模与自动化"上**:一个房源免费,十个房源收费;手动发免费,定时自动发收费。个人用户几乎永远不会撞到栅栏,撞到栅栏的人恰好是最付得起的人(多房源房东)。
 3. **先尝后买**:所有 Pro 功能允许"一次性试用一次"(如免费发出 1 次自动定时指引),体验过自动化再回到手动,落差即转化。
 4. **降级不惩罚**:订阅到期→回到免费功能,数据完整保留,不做任何惩罚性清空(差评防火墙,也是召回钩子)。
-5. **硬件即会员**:买过锁的用户自动获得该设备维度的高级功能(Device Pro),硬件与软件互相背书——详见 [bundle-hardware-to-software.md](bundle-hardware-to-software.md)。
+5. **硬件即会员**:买过锁的用户自动获得该设备维度的高级功能(Device Pro),硬件与软件互相背书——详见 [bundle-hardware-to-software.md](../90-archive/README.md#item-11)。
 
 ## 2. 四道收费栅栏(Fences)
 
@@ -64,7 +64,7 @@
 | 第 3 次手动发送指引后 | "您本月手动发了 3 次——Pro 可自动发"+一次免费试用自动发 | 落差体验,服装间策略 |
 | 翻看 31 天前日志时 | Pro 页(历史栅栏) | 回忆钩 |
 | 邀请第 2 位家庭成员时 | Pro 页(协作栅栏) | 家庭场景情绪高点 |
-| 扫描报告页"此门适配"徽章下发 | Pro+Lock 页 + $11.9/月 拆解 | 硬件转化主场,见 [bundle-software-to-hardware.md](bundle-software-to-hardware.md) |
+| 扫描报告页"此门适配"徽章下发 | Pro+Lock 页 + $11.9/月 拆解 | 硬件转化主场,见 [bundle-software-to-hardware.md](../90-archive/README.md#item-12) |
 
 **绝不在以下时刻出现 paywall**:安装后 24h 内、客人到达流程中、告警/安全事件流程中。
 
@@ -76,4 +76,4 @@
 
 ---
 
-*相关文档: [bundle-software-to-hardware.md](bundle-software-to-hardware.md)(任务 7) · [bundle-hardware-to-software.md](bundle-hardware-to-software.md)(任务 8) · [../04-case-studies/monetization-case-studies.md](../04-case-studies/monetization-case-studies.md)*
+*相关文档: [bundle-software-to-hardware.md](../90-archive/README.md#item-12)(任务 7) · [bundle-hardware-to-software.md](../90-archive/README.md#item-11)(任务 8) · [../04-case-studies/monetization-case-studies.md](../04-case-studies/monetization-case-studies.md)*

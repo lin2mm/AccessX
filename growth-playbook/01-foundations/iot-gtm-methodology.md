@@ -27,7 +27,7 @@ Peloton/Ring 谱系    打印机的现代版        Whoop/运营商手机谱系 
 └ 现金流简单          └ 最常见 IoT 形态      └ 需有复购配件            └ 转化最强,垫资最重      └ B 端物业适配
 ```
 
-**选择逻辑不是选"一个模式",是设计模式之间的阶梯**——用户可以从 A 起步平滑升到 D,详见 [../03-design/bundle-software-to-hardware.md](../03-design/bundle-software-to-hardware.md)。
+**选择逻辑不是选"一个模式",是设计模式之间的阶梯**——用户可以从 A 起步平滑升到 D,详见 [../03-design/bundle-software-to-hardware.md](../90-archive/README.md#item-12)。
 
 ## 3. 定价方法论
 

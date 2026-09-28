@@ -25,9 +25,9 @@
    - A 级:行业报告(Grand View、IMARC、Statista)、上市公司财报/招股书、官方 API/文档
    - B 级:行业协会数据(NMHC、NAA)、主流媒体(CNBC、CBS)
    - C 级:垂直媒体评测、博客、案例文章(用于细节,不用于大盘数字)
-2. **多口径交叉**:同一指标至少取两个独立机构;口径差异 >30% 时在文档中并列呈现而非取平均(例:智能锁 2025 规模 $2.87B–$4.09B,四机构口径不一,见 [software-first-gtm-strategy.md](software-first-gtm-strategy.md) §1.1——并列展示、注明口径差异即可)。
+2. **多口径交叉**:同一指标至少取两个独立机构;口径差异 >30% 时在文档中并列呈现而非取平均(例:智能锁 2025 规模 $2.87B–$4.09B,四机构口径不一,见 [software-first-gtm-strategy.md](../90-archive/README.md#item-01) §1.1——并列展示、注明口径差异即可)。
 3. **数据年龄检查**:超过 24 个月的数据标注年份;预测数据永远带发布机构名。
-4. **引用纪律**:正文行内引用 [n](url),文末统一来源表(本库所有文档遵守)。
+4. **引用纪律**:正文行内使用“编号 + 来源URL”的引用格式,文末统一来源表(本库所有文档遵守)。
 
 ## 3. 市场规模测算:TAM / SAM / SOM
 
@@ -41,7 +41,7 @@ SOM(可获得)   = SAM × 现实渗透率(3 年内拿 0.5–1% 已属优秀)
 - 自上而下:行业报告数字 × 细分比例。
 - 自下而上:目标城市数 × 目标户数 × 渗透率假设 × 单价。**自下而上比报告更接近真相**,因为每一个假设都可以被质疑和实测。
 
-示例(逻辑演示):美国约 4,400 万租住户 × 67% 想要无钥匙(NMHC,[见战略文档来源 8](software-first-gtm-strategy.md))≈ 2,950 万意向户;其中 3 年内能触达并转化 0.2% = 5.9 万把锁 ≈ $700 万硬件收入——这个量级完全够支撑首阶段。
+示例(逻辑演示):美国约 4,400 万租住户 × 67% 想要无钥匙(NMHC,[见战略文档来源 8](../90-archive/README.md#item-01))≈ 2,950 万意向户;其中 3 年内能触达并转化 0.2% = 5.9 万把锁 ≈ $700 万硬件收入——这个量级完全够支撑首阶段。
 
 ## 4. 定性研究:JTBD(Jobs-To-Be-Done)访谈法
 
@@ -116,4 +116,4 @@ SOM(可获得)   = SAM × 现实渗透率(3 年内拿 0.5–1% 已属优秀)
 
 ---
 
-*本方法论的实战应用样例: [../02-research/no-hardware-feature-research.md](../02-research/no-hardware-feature-research.md)(Kano+RICE)、[software-first-gtm-strategy.md](software-first-gtm-strategy.md)(桌面研究全流程)。*
+*本方法论的实战应用样例: [../02-research/no-hardware-feature-research.md](../02-research/no-hardware-feature-research.md)(Kano+RICE)、[software-first-gtm-strategy.md](../90-archive/README.md#item-01)(桌面研究全流程)。*

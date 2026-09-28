@@ -54,7 +54,7 @@
 |---|---|---|---|
 | Latch(现 DOOR) | 多户住宅全栈门禁,软件按门/月收 SaaS | 软件 $7–12/门/月,硬件 $200–400/单元;合同 6+ 年期且常**预付费**;客户卖点:每次换租省 $150/单元换锁芯成本([Bagger Holder](https://www.baggerholder.com/p/attached-to-latch-smitten-by-smartrent) · [Latch/DOOR](https://www.latch.com/) · [Big Multifamily](https://www.bigmultifamilyvendors.com/blog/top-smart-lock-access-control-vendors-for-large-multifamily-buildings/)) | per-door 计费 + 长租约预付 = B2B 印钞机结构;换租省换锁芯 $150 是最锋利的 B 端话术 |
 | SmartRent | 同类,智能家居+门禁平台 | $13–34/门/月按模块;硬件 $100–250/单元;同样 6 年预付合同([Bagger Holder](https://www.baggerholder.com/p/attached-to-latch-smitten-by-smartrent) · [Big Multifamily](https://www.bigmultifamilyvendors.com/blog/top-smart-lock-access-control-vendors-for-large-multifamily-buildings/)) | 模块叠加提价(ARM 扩张)路径 |
-| Latch 纽约诉讼 ⚠️ | 强制租客用 App 进门被判须提供实体钥匙选择 | [战略文档来源 9](../01-foundations/software-first-gtm-strategy.md) | B2B 红线:住户选择权必须写进产品与合同 |
+| Latch 纽约诉讼 ⚠️ | 强制租客用 App 进门被判须提供实体钥匙选择 | [战略文档来源 9](../90-archive/README.md#item-01) | B2B 红线:住户选择权必须写进产品与合同 |
 | Operto | B 端短租全栈 + 锁租赁 | [Operto](https://operto.com/) | B 端硬件租赁先行案例(任务 7 的 B 端版本) |
 
 ## §6 十条可复用规律(全库结论)
@@ -72,4 +72,4 @@
 
 ---
 
-*下游使用: [../03-design/bundle-software-to-hardware.md](../03-design/bundle-software-to-hardware.md) · [../03-design/bundle-hardware-to-software.md](../03-design/bundle-hardware-to-software.md) · [../05-system/accessx-complete-growth-system.md](../05-system/accessx-complete-growth-system.md)*
+*下游使用: [../03-design/bundle-software-to-hardware.md](../90-archive/README.md#item-12) · [../03-design/bundle-hardware-to-software.md](../90-archive/README.md#item-11) · [../05-system/accessx-complete-growth-system.md](../90-archive/README.md#item-15)*

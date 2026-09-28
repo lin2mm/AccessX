@@ -2,17 +2,19 @@
 
 # Growth Playbook — 从这里开始
 
+> 最新精简版：86个分析文件，26份停用原件已无损归档。当前工作分支提供可直接下载的GitHub ZIP，无需workspace按钮或Live Preview。
+
 当前主线：**免费软件独立使用、推广与验证**。硬件历史名单、DM、目录与网站保留在硬件线，不计为软件潜客。资料中的功能和数字必须区分需求、假设、历史记录与实测。
 
 ## 在哪里查看和下载
 
-- GitHub分析目录：[工作分支growth-playbook](https://github.com/lin2mm/AccessX/tree/arena/01a0e546-accessx/growth-playbook)。不要切到main找这些新成果。
-- 浏览文档：打开下方主决策板或产品分层；CSV可在GitHub表格视图或下载后用Excel打开。
-- 单文件下载：进入对应文件，使用Raw/Download raw file；Markdown也可以用本地Markdown阅读器查看。
-- 整仓下载：在该工作分支使用Code → Download ZIP，解压后进入growth-playbook。整仓ZIP还含既有App源码；只看分析时忽略其他目录。
-- 本会话另提供`accessx-analysis-pack.zip`，只打包分析目录，不含App源码、Git历史、Drive原件或本地私有书签。下载包是生成当时的快照，GitHub工作分支是后续更新入口。
+- **直接下载最新分支ZIP**：[点击下载](https://github.com/lin2mm/AccessX/archive/refs/heads/arena/01a0e546-accessx.zip)。这是GitHub原生下载，不依赖Arena预览入口。若要求登录，使用你自己的GitHub账号登录。
+- 解压后打开`growth-playbook/README.md`。ZIP还含原有App源码；分析成果全部在growth-playbook内，App文件本轮未修改。
+- 在线阅读：[工作分支分析目录](https://github.com/lin2mm/AccessX/tree/arena/01a0e546-accessx/growth-playbook)。不要切到main寻找新成果。
+- 单文件下载：打开文件后使用Raw/Download raw file。
+- 历史停用资料在`90-archive/retired-materials.zip`中，定位页和哈希清单可供追溯，不直接执行。
 
-当前发布只涉及工作分支，不合并main，不部署任何旧HTML或脚本。
+只在固定工作分支发布，不合并main，不部署旧HTML或脚本。此前本地下载页面在用户界面不可见，不再作为主要交付方式。
 
 ## 平时只读三份
 
@@ -28,7 +30,7 @@
 
 - 不再往本页追加每一轮新方案，不维护多份“唯一总纲”。
 - 新决策改主决策板；实验细节改软件计划；文件状态改登记表。
-- 历史方案原位归档，顶部状态优先于正文旧active/ready标签；不自动部署旧HTML、运行旧脚本、外发旧模板。
+- 历史停用方案已压缩至[历史包](90-archive/README.md)，归档状态优先于正文旧active/ready标签；不自动部署旧HTML、运行旧脚本、外发旧模板。
 - 不合并不同来源的证据，不把预测和真实数据放同一结果栏。
 - 文件名用ASCII；链接/敏感源资料不进Git；保留本地不代表已经推送GitHub。
 - 本轮只整理growth-playbook策略产物，不读写App实现，不修改其他仓库。

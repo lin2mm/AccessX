@@ -71,7 +71,7 @@ Nir Eyal 四步循环,做功能设计时逐条检查:
 | 评分与评论 | 评分提示的时机在**用户刚获得成功体验后**(创建第一个通行证之后);评分 <4.0 会杀死转化 | 成功动作后触发;差评 24h 内回复 |
 | 转化率 | 商店页 A/B 测试(Android 原生支持,iOS 用 PPO) | 每季度一轮 |
 
-ASO 与 SEO 的分工细节见 [software-first-gtm-strategy.md](software-first-gtm-strategy.md) §6:**网站内容要能被 Google 收录,App 内价值要能在 30 秒内证明**。
+ASO 与 SEO 的分工细节见 [software-first-gtm-strategy.md](../90-archive/README.md#item-01) §6:**网站内容要能被 Google 收录,App 内价值要能在 30 秒内证明**。
 
 ## 7. 付费墙(Paywall)设计 -- freemium 的生死之门
 
@@ -109,4 +109,4 @@ ASO 与 SEO 的分工细节见 [software-first-gtm-strategy.md](software-first-g
 
 ---
 
-*相关文档: [iot-gtm-methodology.md](iot-gtm-methodology.md) · [market-research-methodology.md](market-research-methodology.md) · [../05-system/accessx-complete-growth-system.md](../05-system/accessx-complete-growth-system.md)*
+*相关文档: [iot-gtm-methodology.md](iot-gtm-methodology.md) · [market-research-methodology.md](market-research-methodology.md) · [../05-system/accessx-complete-growth-system.md](../90-archive/README.md#item-15)*

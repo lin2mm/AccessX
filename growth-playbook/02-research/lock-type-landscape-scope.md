@@ -2,7 +2,7 @@
 
 > 版本 v1.0-FROZEN · 2026-09-28 · 状态: active(冻结)
 > 冻结范围(更改需走变更流程): ① 首发仅攻家族 A(美标单舌呆锁) ② BOM 红线 ≤$38 ③ 扫描器 v1 十类目与 §3 置信度策略 ④ §5 范围外四项"不做"。修改本文=发起人写变更说明→产品/工程双签字→版本号进位。
-> 用途: ① 定义 v1 硬件物理覆盖范围 ② 定义扫描器 AI 分类体系 ③ 喂 [presale-campaign-copy.md](../03-design/presale-campaign-copy.md) 的"兼容性 FAQ"与 [/doors/ 页面矩阵](seo-aso-keyword-matrix.md)
+> 用途: ① 定义 v1 硬件物理覆盖范围 ② 定义扫描器 AI 分类体系 ③ 喂 [presale-campaign-copy.md](../90-archive/README.md#item-14) 的"兼容性 FAQ"与 [/doors/ 页面矩阵](seo-aso-keyword-matrix.md)
 > 原则: **首发打透一个最大锁型家族,宣称即做到**;靠扫描器数据决定扩展顺序,不靠拍脑袋。
 
 ## 1. 全球民用锁型家族地图
@@ -45,7 +45,7 @@
 | v1 类目(图像分类) | A 单舌呆锁-腰形钮 / A 单舌呆锁-圆钮 / A 单舌呆锁-条钮 / B 双钥匙呆锁 / D Rim 夜锁 / E 欧标旋钮锁芯 / E′ 欧标双钥匙锁芯 / F 提把手多点锁 / G 其它-可判断 / Z 其它-不可判断 |
 | 置信度策略 | ≥0.9 直接出报告;0.6–0.9 "人工复核 12h 内"(上线初期=运营人工,后接 MLOps);<0.6 引导补拍 |
 | 报告输出 | 锁型 + A 家族判定(✅/❌/v2 支持预告)+ 难度(免工具/建议协助)+ 下一步 CTA |
-| 数据采集 | 每张图+分类结果入数据池(用户授权条款内)→ 反哺 [SEO 数据回路](../05-system/accessx-complete-growth-system.md) §6-5 |
+| 数据采集 | 每张图+分类结果入数据池(用户授权条款内)→ 反哺 [SEO 数据回路](../90-archive/README.md#item-15) §6-5 |
 
 v1 发布时 Z 类目标占比 <15%;每降 1pp,Z 类被重分入新类,类目表季度扩容(首扩:D/E)。
 
@@ -56,7 +56,7 @@ v1 发布时 Z 类目标占比 <15%;每降 1pp,Z 类被重分入新类,类目表
 - [ ] 电池:4×AA ≥10 个月(日均 10 次行程) + USB-C 应急供电口(锁外底部)
 - [ ] 离线自治:断网 BLE 全功能;云端仅做日志/客人码分发(对齐"永不远程变砖"军规)
 - [ ] 认证:FCC + BHMA 3 级起步;欧标版才启 CE
-- [ ] BOM 红线:≤$38([bundle-software-to-hardware.md](../03-design/bundle-software-to-hardware.md) §2 经济模型)
+- [ ] BOM 红线:≤$38([bundle-software-to-hardware.md](../90-archive/README.md#item-12) §2 经济模型)
 
 ## 5. 范围外声明(写清楚不做什么)
 
