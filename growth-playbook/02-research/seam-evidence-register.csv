@@ -1,0 +1,16 @@
+claim,value,source_type,url,period,qualification,research_date
+legal_identity,"Seam Labs, Inc.",official_terms,https://www.seam.co/legal/seam-platform-terms-of-service,current_page_terms_updated_2024-11-26,verified_public_statement,2026-09-28
+founded,2020; YC S20,yc_profile,https://www.ycombinator.com/companies/seam,profile_date_unspecified,profile_not_audited,2026-09-28
+total_funding,USD 15.8m,third_party_database,https://pitchbook.com/profiles/company/438412-51,cumulative_as_listed,unconfirmed_by_primary_amount_announcement,2026-09-28
+series_a,USD 13m; 2022-05-02,third_party_database,https://pitchbook.com/profiles/company/438412-51,2022-05-02,unconfirmed_by_primary_amount_announcement,2026-09-28
+revenue,,not_found,,,unknown_not_zero,2026-09-28
+profit,,not_found,,,unknown_not_zero,2026-09-28
+cash_flow,,not_found,,,unknown_not_zero,2026-09-28
+growth_rate,,insufficient_comparable_data,,,unknown_not_zero,2026-09-28
+companies_home,10000+,vendor_marketing,https://www.seam.co/,undated_current_page,not_paid_customer_count,2026-09-28
+companies_pricing,1000+,vendor_marketing,https://www.seam.co/pricing,undated_current_page,not_comparable_growth_series,2026-09-28
+device_scale,millions,vendor_marketing,https://www.seam.co/trust-center,undated_current_page,not_billable_device_count,2026-09-28
+unit_access,USD 5/device/month; 5 actions/device/day,public_list_price,https://www.seam.co/pricing,observed_2026-09-28,eligibility_and_action_definition_pending,2026-09-28
+high_traffic,USD 50/device/month; unlimited actions,public_list_price,https://www.seam.co/pricing,observed_2026-09-28,contract_scope_pending,2026-09-28
+ttlock_catalog,47 models,vendor_catalog,https://www.seam.co/integrations/ttlock,observed_2026-09-28,not_our_sku_validation,2026-09-28
+soc_report,,document_request_available,https://www.seam.co/trust-center,observed_2026-09-28,report_not_obtained,2026-09-28

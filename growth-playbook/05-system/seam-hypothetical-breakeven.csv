@@ -1,0 +1,7 @@
+scenario,fixed_annual_usd,net_device_month_usd,assumed_contribution_rate,required_annual_average_paying_devices
+hypothetical_api_company_NOT_Seam_actuals,6000000,3,0.6,277778
+hypothetical_api_company_NOT_Seam_actuals,6000000,3,0.8,208334
+hypothetical_api_company_NOT_Seam_actuals,6000000,5,0.6,166667
+hypothetical_api_company_NOT_Seam_actuals,6000000,5,0.8,125000
+hypothetical_api_company_NOT_Seam_actuals,6000000,10,0.6,83334
+hypothetical_api_company_NOT_Seam_actuals,6000000,10,0.8,62500

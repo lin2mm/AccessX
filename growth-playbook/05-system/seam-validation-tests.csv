@@ -1,0 +1,13 @@
+test_id,case,status,sku,observed_result,evidence,owner,date
+SV01,model_firmware_gateway,not_run,,,,,
+SV02,regional_account,not_run,,,,,
+SV03,unsupported_capability,not_run,,,,,
+SV04,issuance_pending_failure,not_run,,,,,
+SV05,offline_revocation_residual,not_run,,,,,
+SV06,duplicate_out_of_order,not_run,,,,,
+SV07,cross_tenant_denial,not_run,,,,,
+SV08,ai_unauthorized_request,not_run,,,,,
+SV09,credential_redaction,not_run,,,,,
+SV10,subscription_fallback,not_run,,,,,
+SV11,exit_billing_and_data,not_run,,,,,
+SV12,physical_state_uncertain,not_run,,,,,

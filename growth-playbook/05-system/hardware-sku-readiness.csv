@@ -1,0 +1,21 @@
+item_id,category,required_information,current_value,evidence_reference,owner,status
+SKU-01,mechanical,SKU/model and sample readiness,,,,unknown
+SKU-02,mechanical,Supported original lock and door types,,,,unknown
+SKU-03,mechanical,Mounting dimensions and tolerances,,,,unknown
+SKU-04,mechanical,Original-key outside access and interior manual egress,,,,unknown
+SKU-05,mechanical,Approved adapters and mounting method,,,,unknown
+SKU-06,electronics,TTLock board and firmware version,,,,unknown
+SKU-07,electronics,Gateway model and connectivity,,,,unknown
+SKU-08,electronics,Keypad digits and supported PIN modes,,,,unknown
+SKU-09,electronics,Power and battery specification,,,,unknown
+SKU-10,electronics,Available diagnostics and sensor telemetry,,,,unknown
+SKU-11,permissions,Online and offline revocation behavior,,,,unknown
+SKU-12,permissions,Account ownership and authorized integration method,,,,unknown
+SKU-13,supply,Factory price and included BOM/accessories,,,,unknown
+SKU-14,supply,MOQ lead time and supplier payment milestones,,,,unknown
+SKU-15,supply,Yield test records and spare-parts provision,,,,unknown
+SKU-16,compliance,Target countries and existing applicable certificates,,,,unknown
+SKU-17,compliance,Exporter importer and local responsible parties,,,,unknown
+SKU-18,support,DOA warranty RMA and emergency procedure,,,,unknown
+SKU-19,service,Recurring cloud/API costs and service-life policy,,,,unknown
+SKU-20,commercial,Authorized company identity and quote approver,,,,unknown

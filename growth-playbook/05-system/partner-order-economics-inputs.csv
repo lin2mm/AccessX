@@ -1,0 +1,8 @@
+scenario,units,net_price,lock_export_cost,keypad_cost,gateway_cost,gateways_per_lock,other_variable,support_minutes,support_hourly,supplier_paid_platform_monthly,endbuyer_platform_monthly,months,setup_cost,deposit_fraction,retail_price,reseller_freight_import_cost,reseller_support,reseller_payment,reseller_warranty,buyer_setup_labor
+bundle_standard,50,139,50,18,22,1,11,15,30,0,6,12,300,0.5,179,10,5,4,3,10
+bundle_at_old_bare_price,50,89,50,18,22,1,11,15,30,0,6,12,300,0.5,179,10,5,4,3,10
+bundle_custom_integration,50,139,50,18,22,1,11,15,30,0,6,12,2400,0.5,179,10,5,4,3,10
+bundle_shared_gateway,50,139,50,18,22,0.2,11,15,30,0,6,12,300,0.5,179,10,5,4,3,10
+bundle_supplier_funds_platform,50,139,50,18,22,1,11,15,30,6,0,12,300,0.5,179,10,5,4,3,10
+bundle_high_support,50,139,50,18,22,1,11,60,30,0,6,12,300,0.5,179,10,5,4,3,10
+bundle_20_units,20,139,50,18,22,1,11,15,30,0,6,12,300,0.5,179,10,5,4,3,10

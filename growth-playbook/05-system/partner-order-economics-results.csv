@@ -1,0 +1,8 @@
+scenario,units,gateway_count,supplier_unit_cost,supplier_unit_contribution,supplier_batch_surplus_before_corporate_fixed,supplier_batch_bridge_cash,approximate_setup_recovery_units,reseller_unit_contribution,reseller_batch_contribution,buyer_first_year_cost_per_door,review
+bundle_standard,50,50,108.5,30.5,1225.0,1325.0,10,18.0,900.0,261.0,economic_candidate_only
+bundle_at_old_bare_price,50,50,108.5,-19.5,-1275.0,2575.0,never,68.0,3400.0,261.0,reprice_or_reduce_scope
+bundle_custom_integration,50,50,108.5,30.5,-875.0,3425.0,79,18.0,900.0,261.0,reprice_or_reduce_scope
+bundle_shared_gateway,50,10,90.9,48.1,2105.0,445.0,7,18.0,900.0,261.0,economic_candidate_only
+bundle_supplier_funds_platform,50,50,180.5,-41.5,-2375.0,2375.0,never,18.0,900.0,189.0,reprice_or_reduce_scope
+bundle_high_support,50,50,131.0,8.0,100.0,1325.0,38,18.0,900.0,261.0,economic_candidate_only
+bundle_20_units,20,20,108.5,30.5,310.0,710.0,10,18.0,360.0,261.0,economic_candidate_only

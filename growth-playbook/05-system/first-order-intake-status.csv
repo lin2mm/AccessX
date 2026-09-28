@@ -1,0 +1,5 @@
+item,user_provided_information,evidence_level,qualification,next_required_input,status,date
+existing_sample,R_and_D_completed_sample_available,user_report,Not independent compatibility safety or production validation,Model BOM fit recovery cost and supporting evidence,pending_details,2026-09-28
+ttlock_entry,Existing_TTLock_contact_entry,user_report,No signed partnership or commercial terms inferred,Technical and commercial reply,not_contacted_this_round,2026-09-28
+troublemaker_entry,Existing_Troublemaker_contact_entry,user_report,Locker need ownership and budget unconfirmed,Need owner cabinet dimensions incidents budget,not_contacted_this_round,2026-09-28
+existing_icps,Thousands_previously_scraped_and_screened_by_Arena,user_report,List not read or independently verified this round,User supplied attachment or pasted candidate rows,pending_list,2026-09-28

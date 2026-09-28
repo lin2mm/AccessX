@@ -1,0 +1,11 @@
+domain,http_status,result,source,limitation,checked_at_utc
+getaccessx.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/getaccessx.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.016489+00:00
+accessx.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/accessx.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:05.997809+00:00
+latchora.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/latchora.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:05.977964+00:00
+dwellivo.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/dwellivo.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:05.976543+00:00
+entryvia.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/entryvia.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.004788+00:00
+havenrelay.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/havenrelay.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.082714+00:00
+porchiva.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/porchiva.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.080552+00:00
+dwellaro.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/dwellaro.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.098799+00:00
+entrynook.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/entrynook.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.101189+00:00
+porchivo.com,network_error,unknown,https://rdap.verisign.com/com/v1/domain/porchivo.com,<urlopen error TLS/SSL connection has been closed (EOF) (_ssl.c:992)>,2026-09-28T02:10:06.104929+00:00

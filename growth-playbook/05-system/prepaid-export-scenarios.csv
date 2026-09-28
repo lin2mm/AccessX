@@ -1,0 +1,5 @@
+scenario,net_units,net_asp_usd,revenue_usd,contribution_usd,planning_surplus_before_tax_usd,peak_event_cash_gap_usd,peak_gap_with_additional_buffer_usd
+deposit50,30000,87.0,2610000.0,780000.0,200000.0,258750.0,263470.0
+deposit30,30000,87.0,2610000.0,780000.0,200000.0,317350.0,335910.0
+cost_up20,30000,87.0,2610000.0,480000.0,-100000.0,336250.0,440650.0
+volume12000,12000,87.0,1044000.0,312000.0,-268000.0,338500.0,380260.0

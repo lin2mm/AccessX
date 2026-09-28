@@ -1,0 +1,13 @@
+test_id,case,status,sku,firmware,observed_result,evidence,tester,test_date
+L01,mechanical_fit_restore,not_run,,,,,,
+L02,concurrent_assignment,not_run,,,,,,
+L03,previous_user_revocation,not_run,,,,,,
+L04,offline_recovery,not_run,,,,,,
+L05,battery_emergency_access,not_run,,,,,,
+L06,physical_state_uncertain,not_run,,,,,,
+L07,admin_offboarding,not_run,,,,,,
+L08,cross_tenant_access,not_run,,,,,,
+L09,overdue_property_handling,not_run,,,,,,
+L10,replay_ordering,not_run,,,,,,
+L11,subscription_expiry,not_run,,,,,,
+L12,pilot_exit,not_run,,,,,,

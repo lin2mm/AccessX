@@ -1,0 +1,10 @@
+scenario,devices,months,seam_fee_device_month,hypothetical_direct_fee_device_month,extra_seam_support_annual,direct_total_usd,seam_total_usd,seam_saving_vs_direct_usd,quote_status
+unit_list_price_reference,20,36,5,0,0,26880,11760.0,15120.0,illustrative_not_a_quote
+unit_list_price_reference,100,36,5,0,0,26880,26160.0,720.0,illustrative_not_a_quote
+unit_list_price_reference,500,36,5,0,0,26880,98160.0,-71280.0,illustrative_not_a_quote
+unit_list_price_reference,2000,36,5,0,0,26880,368160.0,-341280.0,illustrative_not_a_quote
+high_traffic_reference,20,36,50,0,0,26880,44160.0,-17280.0,illustrative_not_a_quote
+premium_support_reference,100,36,5,0,20000,26880,86160.0,-59280.0,illustrative_not_a_quote
+direct_fee_sensitivity,100,36,5,1,0,30480,26160.0,4320.0,illustrative_not_a_quote
+direct_simple_scope,100,36,5,0,0,9760,26160.0,-16400.0,illustrative_not_a_quote
+seam_harder_scope,100,36,5,0,0,26880,39600.0,-12720.0,illustrative_not_a_quote

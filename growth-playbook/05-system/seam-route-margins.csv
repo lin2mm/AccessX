@@ -1,0 +1,6 @@
+scenario,our_monthly_price_usd,upstream_fee_paid_by_us,our_infra_usd,our_support_usd,contribution_before_fixed_usd,contribution_rate,contract_status
+resell_low,3,5,0.75,0.5,-3.25,-1.083333,resale_not_authorized
+resell_mid,8,5,0.75,0.5,1.75,0.21875,resale_not_authorized
+resell_higher,12,5,0.75,0.5,5.75,0.479167,resale_not_authorized
+resell_high_traffic,12,50,0.75,0.5,-39.25,-3.270833,resale_not_authorized
+byo_seam_workflow_only,3,0,0.75,0.5,1.75,0.583333,partner_pays_seam_separately

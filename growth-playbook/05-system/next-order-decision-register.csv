@@ -1,0 +1,17 @@
+item_id,route,gate,topic,status,required_evidence,observed_result,evidence_url_or_path,score,owner,evidence_date,planning_date
+D01,all,G1,site_purchase_install_data_authority,pending_external_input,Record authorized roles and scope without sensitive credentials,,,,,,2026-09-28
+D02,all,G2,exact_sku_firmware_bom,pending_external_input,Supplier model firmware accessories and dated specification,,,,,,2026-09-28
+D03,all,G2,single_door_or_cabinet_fit,pending_external_input,Dimensions consented redacted photos and reversible fit requirements,,,,,,2026-09-28
+D04,all,G3,local_emergency_and_basic_access,pending_external_input,Named responsible role and recovery plan; later approved physical exercise,,,,,,2026-09-28
+D05,all,G4,prepaid_terms,not_contacted,Buyer accepts deposit and cleared balance before shipment,,,,,,2026-09-28
+D06,all,G5,complete_cost_quote,pending_external_input,Consistent bundle supplier quote support warranty freight and tax allocation,,,,,,2026-09-28
+D07,R1,G6,ttlock_authorization_cost_capability,pending_external_input,Regional account gateway API scope fees and revocation limitations,,,,,,2026-09-28
+D08,R2,G6,seam_byo_scope_actions_contract,not_contacted,Partner contract billing action definition and exact SKU evidence,,,,,,2026-09-28
+D09,R3,G7,troublemaker_need_owner,not_contacted,Own member locker or third-party need with budget owner,,,,,,2026-09-28
+D10,R4,G2,storage_unit_vs_gate,not_contacted,One unit-door type separated from gate and local recovery,,,,,,2026-09-28
+D11,all,G7,actual_event_ledger,not_contacted,Recent 30-day incidents actual time and existing alternative,,,,,,2026-09-28
+D12,all,G7,full_tco_budget_feedback,not_contacted,Budget owner responds to full cost and separate software option,,,,,,2026-09-28
+D13,all,G5,cash_and_stress_review,blocked_on_quotes,Per-event cash and doubled support cost-up delay low-volume scenarios,,,,,,2026-09-28
+D14,all,selection,one_route_only,blocked_on_evidence,Stage-appropriate hard gates and unfilled until evidenced scorecard,,,,,,2026-09-28
+D15,selected_route,approval,finite_bench_pilot_budget,requires_approval,Explicit spending site authorization safety and exit approval,,,,,,2026-09-28
+D16,selected_route,validation,repeatability_observation,not_run,Actual test results support minutes acceptance and second independent demand,,,,,,2026-09-28
