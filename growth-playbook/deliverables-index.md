@@ -11,7 +11,7 @@
 3. [免费软件验证计划](05-system/free-software-growth-plan.md)：实验、渠道与指标，不混入硬件名单。
 4. [文件登记](file-register.csv)：全部当前物理文件的类别与处理方式。
 
-按需：[软件潜客表](05-system/free-software-prospect-register.csv)（仅表头） · [工作规则](05-system/session-working-rules.md)。
+按需：[软件潜客表](05-system/free-software-prospect-register.csv)（10家公司、SW1/SW2、分项评分、公开联系人及证据；均未联系） · [工作规则](05-system/session-working-rules.md)。
 
 ## 2. 本轮真正做了什么
 

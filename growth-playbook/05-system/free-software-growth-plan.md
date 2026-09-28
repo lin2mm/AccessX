@@ -8,7 +8,7 @@
 
 - RetrofitLock的54/67/69、F02、Wave DM、目录请求和目录网站：全部留在**硬件历史获客资料**。不导入软件潜客表，不计软件用户、软件回复、免费软件需求或软件渠道验证。
 - 之前的软件公司名单研究的是硬件转售/集成伙伴，不能改名成为免费软件用户名单。
-- 本会话已有软件场景假设和公开痛点资料，但**尚未建立经过筛选、主动同意参与的免费软件潜客名单**。没有证据不能断言实际产品用户总数为0；本计划仅说未取得相应数据。
+- 现已新增**10家公开研究候选（§9：SW1五家、SW2五家）**；尚未取得任何候选的参与同意或完成任务资格筛选。没有证据不能断言实际产品用户总数为0；本计划仅说未取得相应数据。
 - 旧`no-hardware-feature-research.md`把“硬件转化钩子”纳入评分，本轮撤销这一筛选标准。免费软件必须在不买锁、不绑定设备、不接受销售的情况下独立有用。
 
 **建议：先验证C类小型Host的“交接与异常协作”，B类租客的“入住/退租交接”做小规模对照；A家庭与D商业保留独立假设，但不同时推广四套产品。Scanner继续作为独立免费入口并可嵌入各工具，但不承担主留存指标。**
@@ -138,3 +138,74 @@ S4：当前检索到的r/airbnb_hosts规则明确禁止研究/调查及自我推
 3. **证实规模需求后**：验证组织效率付费，硬件作为自愿选择且独立核算；基础访问/交接与安全退出继续保护。
 
 建议下一次决策只围绕“哪个免费任务值得先验证、现有软件是否能完整兑现”，不要再把硬件目录跟进当免费软件推广进展。
+
+## 9. 具体公司与软件研究Wave（2026-09-28）
+
+**这次不再留空：10家公开研究候选，SW1五家、SW2五家；SW3是满足条件后的下一轮，不虚构新公司。** 完整逐行证据、分项分数、联系人、问题和风险见[软件潜客登记](free-software-prospect-register.csv)。SW编号与历史硬件Wave完全独立。全部未联系、未获同意、未验证付费意愿；公司不等于已筛选访谈对象，更不等于软件用户。
+
+### 9.1 纳入标准及可复算分数
+
+A/B/C/D是用户细分；下文A/B/C是**研究优先等级**，不是同一含义。评分对象是公司级研究线索，不是市场大小、购买概率或产品适配认证。
+
+|维度|计分规则|
+|---|---|
+|T任务贴合，30|0无关；15服务相邻、没有明确交接任务；30官网有维护/钥匙/进退场等明确任务。不是证明存在痛点|
+|R重复与多方，20|0未知；10单方或单次；20官网描述持续服务/重复业务并有多类参与者。不是已量化频率|
+|C联系证据，20|0没有适当公开入口；10官方域名检索摘要；20官网正文公开商务邮箱/入口。邮箱未进行投递或SMTP验证|
+|O责任人，15|0无可识别职能；5仅目标岗位/职能邮箱；10具名团队但职责不明；15具名相关运营/管理岗位。无任何分数表示采购权已确认|
+|P试点范围，15|0必须先重集成或替换关键系统；5规模/多点隔离未知；10明确单点或精品经营线索；15明确对外开放非关键小试点。目前无人获15分|
+|扣分|旧版本流程有明显新鲜度风险扣15；关键身份/渠道矛盾扣20并冻结。多个独立风险可累计，总分最低0|
+
+总分=max(0,T+R+C+O+P−扣分)。A≥75；B=60–74；C<60。**覆盖规则：联系只在摘要中验证或已有平台且剩余缺口未明，最高B**，即使算术分≥75。分值是本轮研究者判断，不伪装成模型输出。CSV每行给出依据；未知痛点、软件准备度、下一任务和预算不靠分数补齐。
+
+公司进入公开研究池不要求已满足实际试用门槛。实际试用仍须满足§1：真实近期任务、合法权限、未解决步骤、自愿同意、硬件独立；C类另核1–5房源的小范围操作者。多房源公司只有能明确隔离符合条件的操作者/任务才可入组；否则只是专家访谈对象。单点志愿者空间也不能直接称“商业付费客户”。
+
+### 9.2 SW1：先谈这五家，先问缺口，不推销另一套普通清单
+
+|顺序/公司|细分与实际角色|T/R/C/O/P−扣分；分/级|公开联系人和方法|第一件要谈的事|
+|---|---|---|---|---|
+|1 Swan BnB Management，澳洲|C；运营使用候选|30/20/20/10/10−0；90/A|Mark / Angela，官网团队；mark@swanbnb.com；[官网联系页](https://www.swanbnb.com/contact)|一次维修或协管交接，现有系统在哪一步还需反复追问？先核房源/操作者范围|
+|2 Our Home Short Stays，英国|C；运营使用候选|30/20/20/15/5−0；90/A|Ryan Duffy，负责运营的Joint CEO；Leah Rolfe，Guest Services Manager；通过hello@ourhomeshortstays.co.uk请求转交；[团队证据](https://ourhomeshortstays.co.uk/landlord/about-us-landlords/)|保洁、维修和客服能否看到同一个异常处理结果？不假定现有系统不足|
+|3 Relocate Sydney / Relocate Melbourne，澳洲|B渠道；服务商自身也可能使用|30/20/20/15/5−0；90/A|Annie Sandor，Founder/CEO；annie@relocatemelbourne.com；[官网](https://www.relocatesydney.com/)|房况报告以外，搬入/离境时钥匙与未完成事项如何交接？两个品牌只计一个运营线索|
+|4 Makespace Cambridge，英国|D；会员空间运营候选|30/20/20/5/10−0；85/A|Management team，未查到具名负责人；management@makespace.org；[官方联系](https://web.makespace.org/contact-us/)|志愿者或设备维护负责人更替时，剩余任务如何交接？绝不替代设备安全认证/门禁|
+|5 PetSitAus，澳洲|A渠道；上门照看运营候选|30/20/20/15/5−15；75/A，有前置核验|Kerry，Founder；kerry@petsitaus.com.au；[官网](https://www.petsitaus.com.au/)|先确认目前仍开展服务，再谈新照看者接手时的钥匙和说明交接；旧疫情流程扣分|
+
+前两家用于检验Host重复痛点；第三家补租客渠道；第四、五家只做轻量需求发现，不是同时开发四套产品。总量仍≤5家研究接洽候选，不表示一次发五封。顺序兼顾覆盖，不是无条件按总分批量排序。
+
+**A/B缺口真实状态：** 已补公司级入口，尚没有经本人同意的家庭/租客直接参与者。宠物照看公司不是家庭用户，搬迁公司不是租客；服务商可成为自身业务流程的使用者，或在另行同意后分发招募说明。不能取得客户名单、代客户同意或把服务商的一次回复当成终端验证。
+
+### 9.3 SW2：五家备用，逐一过门而非扩大发送
+
+|公司/方向|分项；分/级|联系人/公开方法|启动条件与风险|
+|---|---|---|---|
+|Perth Airbnb Property Management / C|30/20/10/5/10；75/B封顶|姓名未知，目标Owner/operations lead；welcome@perthairbnbpropertymanagement.com；[1](https://www.perthairbnbpropertymanagement.com/)|官网限量经营/维护协调贴合；邮箱仅官方搜索摘要，先核。Swan不适配时可替代，不和转介站混淆|
+|Sydney Side Pet Care / A渠道|15/20/10/15/10；70/B|Paul，Manager；hello@sydneysidepetcare.com.au；[官网](https://www.sydneysidepetcare.com.au/)|服务正文已读，邮箱仅官方检索摘要；PetSitAus无法核当前业务时的替代；未明确钥匙交接痛点|
+|MakerSpace & Co Sydney / D|15/20/10/15/10；70/B|Kris Spann，Managing Director；Sean Kennon，Facilities Manager；hello@makerspace.org.au；[联系入口](https://www.makerspace.org.au/contact)、[邮箱来源](https://www.makerspace.org.au/faq)|上述信息仅官方检索摘要，正文读取失败；先核商务合作入口，不向两人分别重复发送。与Cambridge Makespace是不同公司|
+|HolidayHost / C|15/20/20/15/5；75/B封顶|Mel Pascoe，Host Success Leader；地方Host Zoe公开邮箱zoe.varney@holidayhost.co.uk；[团队页](https://holidayhost.co.uk/about-us/our-team/)|已有Owner App，先核跨团队缺口。Zoe不等于集团采购负责人；不可推导Mel个人邮箱或群发地方Host|
+|Relocation Specialists / B渠道|15/20/20/5/5；65/B|姓名未知；目标Destination services lead；service@relocationspecialists.com.au；[官方联系页](https://www.relocationspecialists.com.au/contact-us/)|Relocate Sydney不适配才考虑；全国顾问网络、企业流程可能增加采购阻力；具体钥匙交接未证实|
+
+SW2仅在SW1某细分退出/不适配，或明确缺口需第二独立运营者检验时启动；无回复不是需求反证，更不是自动扩大冷邮件理由。先复核摘要联系方式、岗位和可接洽范围。新回复若显示已有工具完全解决，记反证而非强行推新功能。
+
+### 9.4 SW3：不凑第三张冷名单，按反馈升级已有对象
+
+本轮具名后续对象明确为：**Swan或Our Home的一个授权小任务；Relocate Sydney自愿转介的成年租客；PetSitAus或Sydney Side自愿分发说明后的成年家庭；Makespace或MakerSpace & Co的一个非关键维护交接**。公司资格来自SW1/SW2，实际个人必须自己报名，当前姓名留空是保护隐私而非声称已有访谈者。
+
+进入SW3须同时有：①已同意交流；②可复述的真实事件；③当前替代的具体未解决步骤；④限定任务与参与权限；⑤没有额外现金/硬件要求。先一条任务链，不因列了四类就四线同时上线。若App能力未知，只可称匿名流程研究；不能把人工演示计成软件激活。购买者、操作者、受益家庭、渠道四种身份独立记录；“谁愿付费”另问，不从CEO头衔或公司规模推断。
+
+拒绝条件：对方不愿意、没有当前任务、已有工具足够、必须接入真实门锁/敏感记录/企业集成才有用、要求开门或安全责任。两轮只有泛泛兴趣停止该假设。拒绝即停止；不绕过拒绝换联系人。
+
+### 9.5 接洽草稿与记录方法（未发送）
+
+以下仅为用户后续审核的英文草稿。公开邮箱不自动等于接收商业招募的同意；先核当地规则、渠道许可及发件者身份。不要冒充客户填询价/搬迁表单，不投售后/法律援助工单；无法确认适当入口则暂缓，不为凑人数发出。
+
+> Hello [name/team], I’m researching how [co-host / relocation / home-care / member-space] teams hand over tasks when something changes. Your public site describes [specific service]. Would you be open to a short conversation about one anonymised example and how your current tools handle it? This is optional workflow research, not a hardware offer or a claim that we have a finished solution. No customer details, addresses, keys or access codes are needed. If this is not appropriate for your role or inbox, I won’t follow up. [Real sender name and affiliation]
+
+个性化首问用SW1表最后一列及CSV的qualification_question。先15分钟复盘：发生什么→谁接手→已有工具→剩余步骤→下一次何时→是否允许后续再谈。最后才问是否值得自主试用；不诱导“免费你要不要”。逐条记录实际发送/回复/同意时间、资格判定及支持时间；拒绝后删除不再需要的信息。此CSV是公开公司线索账，不存私人访谈内容，未来同意/私密联系方式留在非Git参与者记录中。
+
+### 9.6 明确排除与证据边界
+
+- AirbnbManagementPerth.com自称referral site，不是上表的Perth Airbnb Property Management；不把获客中介当小运营商。[2](http://airbnbmanagementperth.com/contact-us/)
+- Metro Assist与WestS Tenants Advice等援助服务：不把个案热线当营销/招募入口，不接触其求助者；本轮不列联系方式。
+- 不挪用历史TTLock、硬件目录或社交DM意向，不按硬件购买力给软件加分。没有安装队伍不是排除软件渠道的理由。
+- 来源核验日期2026-09-28；网页陈述只证明公开描述，不证明经营量、联系人仍在职、邮箱可投递或现有痛点。CSV区分正文与检索摘要、部分页读取；没有宣称穷尽全站。
+- 本轮研究地域为澳洲/英国的小样本，不宣称全球排名或市场覆盖；分数仅用于有限研究资源排序。基本家庭访问、搬家应急、Host异常/维护/离职流程继续免费，软件/硬件独立核算。
