@@ -3,17 +3,20 @@
     {
       "id": "site_river",
       "name": "Riverside Office",
-      "address": "12 Riverside Way, Bristol"
+      "address": "12 Riverside Way, Bristol",
+      "timezone": "Europe/London"
     },
     {
       "id": "site_gym",
       "name": "Northgate Gym",
-      "address": "4 Northgate, Leeds"
+      "address": "4 Northgate, Leeds",
+      "timezone": "Europe/London"
     },
     {
       "id": "site_store",
       "name": "Selfstore Depot",
-      "address": "Unit 7, Enfield"
+      "address": "Unit 7, Enfield",
+      "timezone": "Europe/London"
     }
   ],
   "doorGroups": [
@@ -70,27 +73,33 @@
   "userGroups": [
     {
       "id": "ug_staff",
-      "name": "Office Staff"
+      "name": "Office Staff",
+      "siteId": "site_river"
     },
     {
       "id": "ug_it",
-      "name": "IT Admins"
+      "name": "IT Admins",
+      "siteId": "site_river"
     },
     {
       "id": "ug_clean",
-      "name": "Cleaning Contractor"
+      "name": "Cleaning Contractor",
+      "siteId": "site_river"
     },
     {
       "id": "ug_member",
-      "name": "Gym Members"
+      "name": "Gym Members",
+      "siteId": "site_gym"
     },
     {
       "id": "ug_gymstaff",
-      "name": "Gym Staff"
+      "name": "Gym Staff",
+      "siteId": "site_gym"
     },
     {
       "id": "ug_tenant",
-      "name": "Storage Tenants"
+      "name": "Storage Tenants",
+      "siteId": "site_store"
     }
   ],
   "users": [
@@ -294,8 +303,10 @@
       "perms": [
         "door.read",
         "door.unlock",
+        "credential.issue",
         "user.manage",
-        "report.read"
+        "report.read",
+        "audit.read"
       ]
     },
     {
@@ -312,7 +323,8 @@
       "name": "Auditor",
       "perms": [
         "door.read",
-        "report.read"
+        "report.read",
+        "audit.read"
       ]
     }
   ],
@@ -415,5 +427,8 @@
       "action": "seed",
       "detail": "demo dataset created"
     }
-  ]
+  ],
+  "settings": {
+    "defaultTimezone": "UTC"
+  }
 }

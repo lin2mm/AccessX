@@ -1,425 +1,404 @@
+/**
+ * Cloudflare Worker adapter. All API behaviour lives in api-core.js
+ * (shared with server.js); this file wires D1, the demo vendor, HTTP
+ * plumbing and the cron-triggered reconciler.
+ */
 import aclDefaults from './data/acl.json';
 import mirrorDefaults from './data/mirror.json';
-import policy from './policy-core.js';
+import { d1Adapter } from './store/sql.js';
+import { createStore } from './store/repo.js';
+import { seedTenant } from './store/bootstrap.js';
+import { createAuthenticator, DEFAULT_TENANT } from './auth-core.js';
+import { createApi } from './api-core.js';
+import { checkConfig, resolveOpenReads } from './doctor-core.js';
+import { signupConfigFromEnv, withTurnstile } from './signup-core.js';
+import { createDemoVendor, staticMirror } from './vendor-demo.js';
+import { createVendorAccounts } from './vendor-accounts.js';
+import { createAuditOps } from './audit-ops.js';
+import { createDnsTxtResolver } from './dns-core.js';
+import { createAlerts, emailConfigFromEnv, needsReconnectMessage } from './alerts-core.js';
+import { createSms, smsConfigFromEnv } from './sms-core.js';
+import { createTenantQueue, busyResponse, QueueFullError } from './tenant-queue.js';
+import { createLimiters, allow } from './rate-limit-core.js';
+import { securityTxt } from './security-txt.js';
+import { billingConfigFromEnv, createStripe } from './billing-core.js';
+import { maybeExport, exportBackup, listBackups } from './backup-export-core.js';
 
-const DEMO_LOCKS = [
-  { lockId: 9001, lockAlias: 'Main Entrance', electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9002, lockAlias: 'Server Room', electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9003, lockAlias: 'Warehouse Side Door', electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9004, lockAlias: 'Cleaner Cupboard', electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office' },
-  { lockId: 9101, lockAlias: 'Gym Front Door', electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9102, lockAlias: 'Gym Staff Office', electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot' },
-];
+const MAX_BODY = 64 * 1024;
 
-const COLLECTIONS = new Set([
-  'sites', 'doorGroups', 'userGroups', 'users', 'schedules',
-  'assignments', 'holidays', 'roles',
-]);
-const RECORD_TYPES = {
-  1: 'App unlock', 4: 'Passcode unlock', 7: 'IC card unlock', 8: 'Fingerprint unlock',
-  9: 'Wireless keypad', 10: 'Auto lock', 11: 'App lock', 12: 'Gateway unlock',
-  46: 'Remote unlock', 47: 'Remote lock', 55: 'Remote control (fob)',
-  '-5': 'Face unlock', '-4': 'QR code unlock', 123: 'Network exception',
-};
+function toResponse(out) {
+  const headers = new Headers({ 'x-content-type-options': 'nosniff', 'cache-control': 'no-store', ...(out.headers || {}) });
+  for (const c of out.cookies || []) headers.append('set-cookie', c);
+  if (out.redirect) { headers.set('location', out.redirect); return new Response(null, { status: 302, headers }); }
+  if (out.body === null || out.body === undefined) return new Response(null, { status: out.status, headers });
+  headers.set('content-type', out.contentType || 'application/json');
+  return new Response(JSON.stringify(out.body), { status: out.status, headers });
+}
+const json = (body, status = 200) => toResponse({ status, body });
 
-const failedLogins = new Map();
-const RATE_LIMIT = 8;
-const RATE_WINDOW_MS = 10 * 60 * 1000;
-
-function json(data, status = 200, headers = {}) {
-  return Response.json(data, { status, headers });
+async function appState(sql, key) {
+  const row = await sql.first('SELECT value FROM app_state WHERE key = ?', [key]);
+  return row ? JSON.parse(row.value) : null;
 }
 
-function ok(data = {}) {
-  return { ok: true, demo: true, ...data };
-}
-
-function timingSafeEqual(left, right) {
-  let difference = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let i = 0; i < length; i++) {
-    difference |= (left.charCodeAt(i % (left.length || 1)) || 0)
-      ^ (right.charCodeAt(i % (right.length || 1)) || 0);
-  }
-  return difference === 0;
-}
-
-function authConfig(env) {
+/**
+ * One api instance per isolate+config, so the auth rate limiter and the
+ * "ready" flag survive between requests. (Isolates are recycled at will;
+ * the limiter is best-effort — see docs/01-ARCHITECTURE.md.)
+ */
+let cached = null;
+let limiters = null; // per isolate; returns the RL_* bindings when configured
+const tooMany = (type) => new Response(type === 'json' ? JSON.stringify({ ok: false, error: 'Too many requests. Please wait a minute and try again.' }) : 'too many requests', { status: 429, headers: { 'content-type': type === 'json' ? 'application/json' : 'text/plain', 'retry-after': '60', 'cache-control': 'no-store' } });
+const clientIp = (request) => request.headers.get('cf-connecting-ip') || 'unknown';
+/** Platform view of the weekly R2 export (GET/POST /api/platform/backups); null without a BACKUPS binding. */
+function backupsFor(env, sql) {
+  if (!env.BACKUPS) return null;
   return {
-    token: env.ADMIN_TOKEN || '',
-    openReads: env.AUTH_OPEN_READS !== '0',
+    list: () => listBackups(env.BACKUPS),
+    run: () => exportBackup({ sql, bucket: env.BACKUPS, keep: Number(env.BACKUP_KEEP || 8) }),
   };
 }
 
-function authStatus(env) {
-  const config = authConfig(env);
-  return {
-    mode: config.token ? 'TOKEN' : config.openReads ? 'DEMO-READ-ONLY' : 'LOCKED',
-    tokenConfigured: Boolean(config.token),
-    openReads: config.openReads,
-    writesRequireToken: true,
+function apiFor(env) {
+  const key = [env.ADMIN_TOKEN, env.OPERATORS, env.PLATFORM_TOKEN, env.AUTH_OPEN_READS, env.COOKIE_SAMESITE, env.SECRETS_KEY, env.ALLOW_HTTP_ISSUERS, env.TTLOCK_CLIENT_ID, env.TTLOCK_CLIENT_SECRET, env.TTLOCK_API_BASE, env.NUKI_API_BASE, env.NUKI_POLL_MS, env.AUDIT_SIGNING_KEY, env.ALLOW_HTTP_WEBHOOKS, env.DOH_URL, env.PUBLIC_URL, env.EMAIL_PROVIDER, env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_API_BASE, env.TTLOCK_NOTIFY_SECRET, env.SMS_PROVIDER, env.TWILIO_ACCOUNT_SID, env.TWILIO_AUTH_TOKEN, env.TWILIO_API_KEY, env.TWILIO_API_SECRET, env.SMS_FROM, env.SMS_API_BASE, env.SMS_MONTHLY_CAP, env.SIGNUP_ENABLED, env.SIGNUP_DAILY_LIMIT, env.SIGNUP_TERMS_URL, env.TURNSTILE_SITE_KEY, env.TURNSTILE_SECRET_KEY, env.TURNSTILE_VERIFY_URL, env.CALENDAR_INBOUND_DOMAIN, env.USAGE_METER].join('\u0000');
+  if (cached && cached.key === key && cached.db === env.DB) return cached.api;
+
+  // USAGE_METER=1 (load tests, R20): each /api response says what it cost in D1 (x-accessx-d1).
+  const meter = env.USAGE_METER === '1' ? { queries: 0, rowsRead: 0, rowsWritten: 0 } : null;
+  const sql = d1Adapter(env.DB, { meter });
+  // Per-isolate snapshot cache (Workers have 128 MB): budget in rows, 0 = off.
+  const store = createStore(sql, { snapshotCache: { maxRows: env.SNAPSHOT_CACHE_ROWS === undefined ? 100000 : Number(env.SNAPSHOT_CACHE_ROWS) } });
+  const mirror = {
+    // The hosted demo serves a read-only snapshot of the record mirror.
+    async doc() { return (await appState(sql, 'mirror')) || mirrorDefaults; },
+    sync: async body => staticMirror(null).sync(body),
+    coverage: async () => staticMirror(await mirror.doc()).coverage(),
+    query: async params => staticMirror(await mirror.doc()).query(params),
   };
-}
+  const demoVendor = createDemoVendor({ mirror });
+  const emptyVendor = createDemoVendor({ locks: [] });
+  const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? demoVendor : emptyVendor);
 
-function authorized(request, env) {
-  const config = authConfig(env);
-  const read = request.method === 'GET' || request.method === 'HEAD';
-  if (read && config.openReads) return null;
-  if (!config.token) {
-    return json({
-      ok: false,
-      error: read
-        ? 'API access is disabled until ADMIN_TOKEN is configured.'
-        : 'Writes are disabled until ADMIN_TOKEN is configured.',
-    }, 503);
-  }
-
-  const address = request.headers.get('cf-connecting-ip') || 'unknown';
-  const previous = failedLogins.get(address);
-  if (previous && Date.now() > previous.resetAt) failedLogins.delete(address);
-  const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (match && timingSafeEqual(match[1], config.token)) {
-    failedLogins.delete(address);
-    return null;
-  }
-
-  const entry = failedLogins.get(address);
-  if (!entry) failedLogins.set(address, { count: 1, resetAt: Date.now() + RATE_WINDOW_MS });
-  else entry.count++;
-  if (failedLogins.get(address).count >= RATE_LIMIT) {
-    return json({ ok: false, error: 'too many failed auth attempts, try later' }, 429);
-  }
-  return json({ ok: false, error: 'unauthorized' }, 401);
-}
-
-async function state(db, key, defaults) {
-  const row = await db.prepare('SELECT value FROM app_state WHERE key = ?').bind(key).first();
-  if (row) return JSON.parse(row.value);
-  const value = JSON.stringify(defaults);
-  await db.prepare('INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING')
-    .bind(key, value).run();
-  const seeded = await db.prepare('SELECT value FROM app_state WHERE key = ?').bind(key).first();
-  return JSON.parse(seeded.value);
-}
-
-async function saveState(db, key, value) {
-  await db.prepare(
-    'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-  ).bind(key, JSON.stringify(value)).run();
-}
-
-async function readBody(request) {
-  try {
-    const text = await request.text();
-    return text.trim() ? JSON.parse(text) : {};
-  } catch (error) {
-    if (error instanceof SyntaxError) return { __invalidJson: true };
-    throw error;
-  }
-}
-
-function filterMirrorRecords(records, params) {
-  let result = records;
-  const lockId = params.get('lockId');
-  const from = Number(params.get('from'));
-  const to = Number(params.get('to'));
-  const limitParam = Number(params.get('limit'));
-  if (lockId) result = result.filter(record => String(record.lockId) === lockId);
-  if (from) result = result.filter(record => (record.at || 0) >= from);
-  if (to) result = result.filter(record => (record.at || 0) <= to);
-  const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 1000) : 500;
-  return result.sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, limit);
-}
-
-function mirrorCoverage(db) {
-  const cutoff = Date.now() - 180 * 864e5;
-  const beyond = db.records.filter(record => (record.at || 0) < cutoff);
-  return {
-    total: db.records.length,
-    beyondVendorRetention: beyond.length,
-    vendorRetentionDays: 180,
-    vendorRetentionSource: 'TTLock Open Platform docs: "云端只保留半年内的操作记录"',
-    lastSync: db.lastSync,
-    note: beyond.length
-      ? `${beyond.length} records exist only in your mirror — the vendor cloud has dropped them.`
-      : 'No records older than the vendor retention window yet. Value accrues over time.',
-  };
-}
-
-function demoRecords(lockId) {
-  const types = [1, 4, 7, 8, 12, 55];
-  const people = ['Sarah Kelly', 'Dev Patel', 'CleanCo Ltd', 'Tom Nguyen'];
-  return Array.from({ length: 25 }, (_, index) => {
-    const recordType = types[index % types.length];
-    return {
-      recordId: 1e6 + index,
-      lockId,
-      recordType,
-      typeLabel: RECORD_TYPES[recordType],
-      success: index % 11 === 0 ? 0 : 1,
-      username: people[index % people.length],
-      lockDate: Date.now() - index * 3.4e6,
-    };
+  const openReads = resolveOpenReads(env);
+  if (openReads.refused) console.error('AUTH_OPEN_READS=1 ignored: TTLOCK_CLIENT_ID is set, anonymous reads stay off');
+  const auth = createAuthenticator({
+    store,
+    adminToken: env.ADMIN_TOKEN || '',
+    operatorsJson: env.OPERATORS || '',
+    platformToken: env.PLATFORM_TOKEN || '',
+    // Explicit opt-in (wrangler.jsonc vars sets it for the public demo), and
+    // refused once real-lock credentials exist. `npm run doctor` flags it.
+    openReads: openReads.open,
   });
+
+  // First request after migration 0003: move the old JSON blob into rows.
+  // Migration 0003 already copied audit_log into the tenant's chain.
+  const ensureReady = async () => {
+    const legacy = await appState(sql, 'acl');
+    await seedTenant(store, DEFAULT_TENANT, {
+      data: legacy || aclDefaults,
+      legacyAudit: legacy ? null : aclDefaults.auditLog,
+      source: legacy ? 'legacy app_state blob' : 'data/acl.json',
+    });
+  };
+
+  const vendorAccounts = createVendorAccounts({
+    store,
+    secretsKey: env.SECRETS_KEY || '',
+    apiBase: env.TTLOCK_API_BASE || '',
+    nukiApiBase: env.NUKI_API_BASE || '',
+    nukiPoll: env.NUKI_POLL_MS ? { pollMs: Math.max(50, Number(env.NUKI_POLL_MS) || 1500) } : {},
+    platformApp: { clientId: env.TTLOCK_CLIENT_ID || '', clientSecret: env.TTLOCK_CLIENT_SECRET || '' },
+    log: (...a) => console.error(...a),
+    onNeedsReconnect: (tenantId, info) => alerts.send(tenantId, 'vendor_needs_reconnect', needsReconnectMessage(info)),
+  });
+  const auditOps = createAuditOps({ store, signingKeyJson: env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: env.ALLOW_HTTP_WEBHOOKS === '1' });
+  const dns = createDnsTxtResolver({ dohUrl: env.DOH_URL || undefined });
+  const alerts = createAlerts({ store, secretsKey: env.SECRETS_KEY || '', allowHttp: env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: env.PUBLIC_URL || '', email: emailConfigFromEnv(env), log: (...a) => console.error(...a) });
+  const sms = createSms({ config: smsConfigFromEnv(env) });
+  const billingConfig = billingConfigFromEnv(env);
+  if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
+  const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
+  const api = createApi({ store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing, doctor: () => checkConfig(env, { runtime: 'worker' }), backups: backupsFor(env, sql), signup: signupConfigFromEnv(env), calendarDomain: env.CALENDAR_INBOUND_DOMAIN || '', demoData: aclDefaults, log: (...a) => console.error(...a), cookieSameSite: env.COOKIE_SAMESITE || 'Lax', secretsKey: env.SECRETS_KEY || '', ttlockNotifySecret: env.TTLOCK_NOTIFY_SECRET || '', publicUrl: env.PUBLIC_URL || '', smsMonthlyCap: Number(env.SMS_MONTHLY_CAP || 0), allowHttpIssuers: env.ALLOW_HTTP_ISSUERS === '1' });
+  cached = { key, db: env.DB, api, meter };
+  return api;
 }
 
-function aiTools(db, doors) {
+/** Parse an /api or /scim request into api.handle() input (or an error Response). */
+async function parseRequest(request, env) {
+  const url = new URL(request.url);
+  let body;
+  // Okta/Entra may PUT a group with its full member list: larger limit for SCIM only.
+  const limit = url.pathname.startsWith('/scim/') ? 1024 * 1024 : MAX_BODY;
+  if (!['GET', 'HEAD'].includes(request.method)) {
+    if (Number(request.headers.get('content-length') || 0) > limit) return json({ ok: false, error: 'request body too large' }, 413);
+    const text = await request.text();
+    if (text.length > limit) return json({ ok: false, error: 'request body too large' }, 413);
+    if (text) {
+      try { body = JSON.parse(text); } catch { return json({ ok: false, error: 'invalid JSON body' }, 400); }
+    }
+  }
   return {
-    whoCanOpen(name) {
-      const door = doors.find(item => (item.lockAlias || '').toLowerCase().includes(name));
-      if (!door) return null;
-      const people = db.users
-        .filter(user => policy.evaluate(db, user.id, door.lockId, new Date()).allowed)
-        .map(user => user.name);
-      return { door: door.lockAlias, people };
+    method: request.method,
+    path: url.pathname,
+    query: url.searchParams,
+    body,
+    headers: {
+      authorization: request.headers.get('authorization') || '',
+      cookie: request.headers.get('cookie') || '',
+      'x-csrf-token': request.headers.get('x-csrf-token') || '',
     },
-    serviceVisits() {
-      return {
-        low: doors.filter(item => item.electricQuantity <= 30)
-          .sort((a, b) => a.electricQuantity - b.electricQuantity),
-        off: doors.filter(item => !item.hasGateway),
-      };
-    },
-    anomalies() {
-      return {
-        denials: db.auditLog.filter(item => item.action === 'unlock.denied').length,
-        suspended: db.users.filter(user => user.suspended),
-        expiring: db.users.filter(user => user.validTo
-          && new Date(user.validTo) < new Date(Date.now() + 30 * 864e5)),
-      };
-    },
-    explainDenial(personName) {
-      const user = db.users.find(item => item.name.toLowerCase().includes(personName));
-      if (!user) return null;
-      const at = new Date();
-      at.setUTCHours(21, 0, 0, 0);
-      return {
-        user: user.name,
-        at: at.toISOString(),
-        res: doors.map(door => ({
-          door: door.lockAlias,
-          r: policy.evaluate(db, user.id, door.lockId, at),
-        })),
-      };
-    },
+    ip: request.headers.get('cf-connecting-ip') || 'unknown',
+    secure: url.protocol === 'https:',
+    origin: env.PUBLIC_URL || url.origin,
   };
+}
+
+/**
+ * D1 cost of one request (USAGE_METER=1 only). The meter is per isolate, so the
+ * numbers are exact only when requests are sent one at a time (the load test does).
+ */
+// Same isolate = same meter: never count twice. (No random values at global scope in Workers.)
+let isolateTag = null;
+const isolate = () => (isolateTag = isolateTag || crypto.randomUUID().slice(0, 8));
+const meterStart = () => (cached && cached.meter ? { ...cached.meter } : null);
+function withMeter(res, start, inner = null) {
+  if (!start || !cached || !cached.meter) return res;
+  const m = cached.meter;
+  const d = { q: m.queries - start.queries, read: m.rowsRead - start.rowsRead, written: m.rowsWritten - start.rowsWritten };
+  // A write forwarded to the Durable Object: add what the DO reported.
+  const fromDo = /q=(\d+);read=(\d+);written=(\d+);iso=(\w+)/.exec(inner || '');
+  if (fromDo && fromDo[4] !== isolate()) { d.q += Number(fromDo[1]); d.read += Number(fromDo[2]); d.written += Number(fromDo[3]); }
+  const out = new Response(res.body, res);
+  out.headers.set('x-accessx-d1', `q=${d.q};read=${d.read};written=${d.written};iso=${isolate()}`);
+  return out;
 }
 
 async function handleApi(request, env) {
-  const url = new URL(request.url);
-  const pathname = url.pathname;
-  const method = request.method;
-
-  if (method === 'GET' && pathname === '/api/auth') {
-    return json({ ok: true, ...authStatus(env) });
+  const req = await parseRequest(request, env);
+  if (req instanceof Response) return req;
+  const api = apiFor(env);
+  const start = meterStart();
+  // Writes go to the tenant's Durable Object, which runs them one at a time
+  // (tenant-queue.js explains why). Reads, and writes whose tenant can't be
+  // told from the credential (login, platform calls), are handled right here.
+  if (env.TENANT_WRITER) {
+    const tenantId = await api.writeKey(req);
+    if (tenantId) {
+      const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+      const headers = new Headers(request.headers);
+      headers.delete('content-length'); // the body is re-serialized below
+      const res = await stub.fetch(new Request(request.url, {
+        method: request.method,
+        headers,
+        body: req.body === undefined ? undefined : JSON.stringify(req.body),
+      }));
+      return withMeter(res, start, res.headers.get('x-accessx-d1'));
+    }
   }
-  const authError = authorized(request, env);
-  if (authError) return authError;
-  if (method === 'POST' && pathname === '/api/auth/verify') {
-    return json(ok({ authenticated: true }));
-  }
+  return withMeter(toResponse(await api.handle(req)), start);
+}
 
-  if (!env.DB) return json({ ok: false, error: 'D1 binding DB is not configured.' }, 503);
+/** TTLock record callback (form-encoded, secret in the path). Arrivals are written in each tenant's DO. */
+async function handleTtlockNotify(request, env, url) {
+  limiters = limiters || createLimiters(env);
+  if (!(await allow(limiters, 'notify', clientIp(request)))) return tooMany('text');
+  if (Number(request.headers.get('content-length') || 0) > 256 * 1024) return new Response('too large', { status: 413 });
+  const text = await request.text();
+  if (text.length > 256 * 1024) return new Response('too large', { status: 413 });
+  const params = new URLSearchParams(text);
+  const form = { records: params.getAll('records'), lockId: params.get('lockId') };
+  const api = apiFor(env);
+  const out = await api.ttlockNotify({ secret: decodeURIComponent(url.pathname.slice('/api/ttlock/notify/'.length)), form }, { dispatch: jobDispatcher(env) });
+  return new Response(out.status === 200 ? 'success' : 'not found', { status: out.status, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
+}
 
+/** Stripe webhook: raw body for the signature; the state change runs in the tenant's DO. */
+async function handleStripeWebhook(request, env) {
+  const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  limiters = limiters || createLimiters(env);
+  if (!(await allow(limiters, 'stripe', clientIp(request)))) return tooMany('json');
+  if (Number(request.headers.get('content-length') || 0) > 256 * 1024) return json(413, { ok: false, error: 'too large' });
+  const rawBody = await request.text();
+  if (rawBody.length > 256 * 1024) return json(413, { ok: false, error: 'too large' });
   try {
-    const db = env.DB;
-    const [acl, mirror] = await Promise.all([
-      state(db, 'acl', aclDefaults),
-      state(db, 'mirror', mirrorDefaults),
-    ]);
-
-    if (method === 'GET' && pathname === '/api/status') {
-      return json(ok({ mode: 'DEMO (Cloudflare demo; no physical lock operations)', region: 'demo' }));
-    }
-
-    if (method === 'GET' && pathname === '/api/doors') {
-      const doors = DEMO_LOCKS.map(lock => {
-        const group = acl.doorGroups.find(item => (item.lockIds || []).includes(lock.lockId));
-        const site = group && acl.sites.find(item => item.id === group.siteId);
-        return {
-          ...lock,
-          doorGroup: group ? group.name : null,
-          site: site ? site.name : (lock.groupName || 'Unassigned'),
-        };
-      });
-      return json(ok({ doors }));
-    }
-
-    const unlockMatch = pathname.match(/^\/api\/doors\/(\d+)\/unlock$/);
-    if (method === 'POST' && unlockMatch) {
-      const body = await readBody(request);
-      if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const lockId = Number(unlockMatch[1]);
-      const userId = body.userId;
-      if (userId) {
-        const decision = policy.evaluate(acl, userId, lockId, new Date());
-        if (!decision.allowed) {
-          policy.audit(acl, 'unlock.denied', `lock ${lockId} user ${userId}: ${decision.reason}`, userId);
-          await saveState(db, 'acl', acl);
-          return json({ ok: false, denied: true, reason: decision.reason, path: decision.path }, 403);
-        }
-      }
-      policy.audit(acl, 'unlock.granted', `lock ${lockId}${userId ? ` user ${userId}` : ' (admin override)'}`, userId || 'admin');
-      await saveState(db, 'acl', acl);
-      return json(ok({ unlocked: lockId, simulated: true }));
-    }
-
-    if (method === 'POST' && pathname === '/api/evaluate') {
-      const body = await readBody(request);
-      if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const at = body.when ? new Date(body.when) : new Date();
-      if (Number.isNaN(at.getTime())) return json({ ok: false, error: 'invalid date' }, 400);
-      return json(ok({
-        at: at.toISOString(),
-        result: policy.evaluate(acl, body.userId, Number(body.lockId), at),
-      }));
-    }
-
-    const userDoorsMatch = pathname.match(/^\/api\/users\/([^/]+)\/doors$/);
-    if (method === 'GET' && userDoorsMatch) {
-      return json(ok({ doors: policy.doorsForUser(acl, decodeURIComponent(userDoorsMatch[1]), new Date()) }));
-    }
-
-    const collectionMatch = pathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/);
-    if (collectionMatch && COLLECTIONS.has(collectionMatch[1])) {
-      const [, collection, id] = collectionMatch;
-      if (method === 'GET' && !id) return json(ok({ [collection]: acl[collection] }));
-      if (method === 'POST' && !id) {
-        const body = await readBody(request);
-        if (body.__invalidJson || !body || typeof body !== 'object' || Array.isArray(body)) {
-          return json({ ok: false, error: 'expected a JSON object' }, 400);
-        }
-        const item = { id: policy.uid(collection.slice(0, 3)), ...body };
-        acl[collection].push(item);
-        policy.audit(acl, `${collection}.create`, JSON.stringify(item).slice(0, 200));
-        await saveState(db, 'acl', acl);
-        return json(ok({ item }));
-      }
-      if (method === 'DELETE' && id) {
-        const decodedId = decodeURIComponent(id);
-        acl[collection] = acl[collection].filter(item => item.id !== decodedId);
-        policy.audit(acl, `${collection}.delete`, decodedId);
-        await saveState(db, 'acl', acl);
-        return json(ok());
-      }
-    }
-
-    if (method === 'POST' && pathname === '/api/passcode') {
-      const body = await readBody(request);
-      if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const name = String(body.name || 'Demo passcode').slice(0, 100);
-      const passcode = {
-        keyboardPwd: String(Math.floor(100000 + Math.random() * 899999)),
-        keyboardPwdId: Date.now(),
-      };
-      policy.audit(acl, 'passcode.create', `lock ${Number(body.lockId)} "${name}"`);
-      await saveState(db, 'acl', acl);
-      return json(ok({ passcode }));
-    }
-
-    const recordsMatch = pathname.match(/^\/api\/records\/(\d+)$/);
-    if (method === 'GET' && recordsMatch) {
-      return json(ok({ records: demoRecords(Number(recordsMatch[1])) }));
-    }
-
-    if (method === 'GET' && pathname === '/api/audit') {
-      return json(ok({ log: acl.auditLog.slice(0, 100) }));
-    }
-
-    if (method === 'GET' && pathname === '/api/vendor') {
-      return json(ok({
-        active: 'demo',
-        available: ['demo'],
-        capabilities: {
-          listLocks: true, unlock: true, lock: true, passcodes: true,
-          cards: false, fingerprints: false, records: true, recordsMaxDays: 3650,
-          gateways: true, video: false, offlineLocal: true, webhooks: true,
-        },
-        health: { vendor: 'demo', ok: true, mode: 'DEMO', note: 'Simulated data. No physical lock operations.' },
-      }));
-    }
-
-    if (method === 'POST' && pathname === '/api/mirror/sync') {
-      return json({ ok: false, demo: true, error: 'TTLock sync is unavailable in the hosted demo.' }, 501);
-    }
-
-    if (method === 'GET' && pathname === '/api/mirror/coverage') {
-      return json(ok(mirrorCoverage(mirror)));
-    }
-
-    if (method === 'GET' && pathname === '/api/mirror/records') {
-      return json(ok({ records: filterMirrorRecords(mirror.records, url.searchParams) }));
-    }
-
-    if (method === 'GET' && pathname === '/api/health') {
-      const lowBattery = DEMO_LOCKS.filter(door => door.electricQuantity <= 25);
-      const offline = DEMO_LOCKS.filter(door => !door.hasGateway);
-      return json(ok({
-        total: DEMO_LOCKS.length,
-        lowBattery,
-        offline,
-        score: Math.round(100 - (lowBattery.length * 12 + offline.length * 8)),
-      }));
-    }
-
-    if (method === 'POST' && pathname === '/api/ai') {
-      const body = await readBody(request);
-      if (body.__invalidJson) return json({ ok: false, error: 'invalid JSON body' }, 400);
-      const query = String(body.q || '').toLowerCase().slice(0, 1000);
-      const tools = aiTools(acl, DEMO_LOCKS);
-      let answer;
-
-      if (/batter|service|visit|maintenance|replace/.test(query)) {
-        const { low, off } = tools.serviceVisits();
-        answer = `<b>Suggested service run</b><br>`
-          + (low.length ? low.map(door => `· <b>${door.lockAlias}</b> — ${door.electricQuantity}% battery`
-            + (door.electricQuantity <= 15 ? ' <span class="tag r">urgent</span>' : '')).join('<br>') : 'No low batteries.')
-          + (off.length ? `<br>· <b>${off.map(door => door.lockAlias).join(', ')}</b> — no gateway, cannot be opened remotely` : '')
-          + '<br><br>Batching these into one visit saves a second call-out. Shall I draft the job sheet?';
-      } else if (/unusual|anomal|risk|suspicious|odd|wrong/.test(query)) {
-        const result = tools.anomalies();
-        answer = `<b>Risk review</b><br>· ${result.denials} denied unlock attempt(s) recorded<br>`
-          + `· ${result.suspended.length} suspended user(s): ${result.suspended.map(user => user.name).join(', ') || 'none'}<br>`
-          + `· ${result.expiring.length} credential(s) expiring within 30 days: ${result.expiring.map(user => user.name).join(', ') || 'none'}`
-          + '<br><br>Recommendation: remove suspended users from all groups so they disappear from reports, and renew expiring contractors before they lock themselves out.';
-      } else if (/who can|who has|access to/.test(query)) {
-        const match = query.match(/(server room|main entrance|warehouse|cleaner|gym front|gym staff|storage)/);
-        const result = match ? tools.whoCanOpen(match[1]) : null;
-        answer = result
-          ? `<b>${result.door}</b> — currently openable by: ${result.people.length ? result.people.join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
-          : 'Name a door and I will list who can open it right now — e.g. "who can open the Server Room?"';
-      } else if (/denied|why|refus|reject/.test(query)) {
-        const match = query.match(/(sarah|dev|tom|cleanco|cleaner)/);
-        const result = match ? tools.explainDenial(match[1]) : null;
-        if (result) {
-          const denied = result.res.filter(item => !item.r.allowed).slice(0, 4);
-          answer = `<b>${result.user}</b> at 21:00 UTC:<br>${denied.map(item => `· ${item.door}: ${item.r.reason}`).join('<br>')}`
-            + '<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.';
-        } else {
-          answer = 'Tell me who was denied — e.g. "why was Sarah denied at 9pm?"';
-        }
-      } else if (/give|grant|add|allow|extend/.test(query)) {
-        answer = '<b>Proposed change</b> (not yet applied)<br>I would add a rule: <b>Cleaning Contractor</b> → <b>Operations</b> on <b>Friday 18:00–21:00</b>.<br><br>Impact: 1 user group, 2 doors. No existing rule is removed.<br><i>Nothing is executed until you confirm.</i>';
-      } else {
-        answer = 'I can help with:<br>· <b>Diagnostics</b> — "which doors need a battery visit?"<br>'
-          + '· <b>Explaining decisions</b> — "why was Sarah denied at 9pm?"<br>'
-          + '· <b>Queries</b> — "who can open the Server Room?"<br>· <b>Risk review</b> — "anything unusual this week?"'
-          + '<br>· <b>Rule drafting</b> — "give the cleaners Friday evening access"<br><br><i>Demo data only.</i>';
-      }
-      return json(ok({ answer }));
-    }
-
-    return json({ ok: false, error: 'not found' }, 404);
+    const out = await apiFor(env).stripeWebhook({ rawBody, signature: request.headers.get('stripe-signature') || '' }, { dispatch: jobDispatcher(env) });
+    return json(out.status, out.body);
   } catch (error) {
-    return json({ ok: false, error: String(error.message || error) }, 500);
+    console.error('stripe webhook failed', error);
+    return json(500, { ok: false, error: 'webhook failed' }); // Stripe retries
+  }
+}
+
+/** Writes that arrive without a tenant session run in that tenant's Durable Object. */
+function jobDispatcher(env) {
+  return env.TENANT_WRITER ? async (tenantId, job) => {
+    const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+    const res = await stub.fetch(new Request('https://tenant-writer/__tenant/job', { method: 'POST', headers: { 'x-accessx-tenant': tenantId, 'content-type': 'application/json' }, body: JSON.stringify(job) }));
+    return res.json();
+  } : null;
+}
+
+/** Inbound calendar mail from a provider that POSTs raw MIME (Bearer CALENDAR_INBOUND_SECRET). */
+async function handleCalendarHttp(request, env, url) {
+  const secret = env.CALENDAR_INBOUND_SECRET || '';
+  const given = String(request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const enc = new TextEncoder();
+  const a = enc.encode(given); const b = enc.encode(secret);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a[i] || 0) ^ (b[i] || 0);
+  if (!secret || diff) {
+    limiters = limiters || createLimiters(env);
+    if (!(await allow(limiters, 'visitorLink', clientIp(request)))) return tooMany('json');
+    return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+  }
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.length > 600 * 1024) return Response.json({ ok: false, error: 'too large' }, { status: 413 });
+  try {
+    const out = await apiFor(env).calendarInbound({ to: request.headers.get('x-envelope-to') || url.searchParams.get('to') || '', raw }, { dispatch: jobDispatcher(env) });
+    return Response.json({ ok: true, accepted: out.accepted }, { status: 202 });
+  } catch (error) {
+    console.error('calendar inbound failed', error);
+    return Response.json({ ok: false, error: 'inbound failed' }, { status: 500 });
+  }
+}
+
+/** Visitor self check-out / pre-registration (no login; the token in the body is the credential). */
+async function handlePublicJson(request, env, fn, what, kind = 'visitorLink') {
+  const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  limiters = limiters || createLimiters(env);
+  if (!(await allow(limiters, kind, clientIp(request)))) return tooMany('json');
+  const text = await request.text();
+  if (text.length > 4096) return json(413, { ok: false, error: 'too large' });
+  let body;
+  try { body = JSON.parse(text || '{}'); } catch { return json(400, { ok: false, error: 'invalid JSON' }); }
+  try {
+    const out = await apiFor(env)[fn](body, { dispatch: jobDispatcher(env), ip: clientIp(request) });
+    const res = json(out.status, out.body);
+    for (const [k, v] of Object.entries(out.headers || {})) res.headers.set(k, v);
+    return res;
+  } catch (error) {
+    console.error(`${fn} failed`, error);
+    return json(502, { ok: false, error: `${what} failed. Please try again, or contact your host.` });
+  }
+}
+
+/**
+ * One instance per tenant, worldwide. Serializes the tenant's writes so the
+ * optimistic audit-head check never has to fight a burst (a 2,000-user SCIM
+ * sync failed ~1.3 % of writes with 409 without this). It keeps no state of
+ * its own: the data stays in D1, so the DO can be dropped at any time.
+ */
+export class TenantWriter {
+  constructor(state, env) {
+    this.env = env;
+    this.queue = createTenantQueue({ maxDepth: Number(env.WRITE_QUEUE_MAX || 256) });
+  }
+
+  async fetch(request) {
+    // Scheduled work for this tenant (worker.js scheduled()). Only the front
+    // Worker reaches a DO, and it forwards nothing but /api/* and /scim/*,
+    // so this path cannot be called from outside.
+    if (new URL(request.url).pathname === '/__tenant/job') {
+      // Arrival, lock alarm, visitor check-out or invite registration for this tenant (see jobDispatcher).
+      const tenantId = request.headers.get('x-accessx-tenant');
+      const job = await request.json();
+      const out = await this.queue.run('tenant', () => apiFor(this.env).runTenantJob(tenantId, job));
+      return Response.json(out);
+    }
+    if (new URL(request.url).pathname === '/__tenant/cron') {
+      const tenantId = request.headers.get('x-accessx-tenant');
+      const api = apiFor(this.env);
+      const out = await this.queue.run('tenant', async () => ({ reconcile: await api.reconcileOne(tenantId), maintenance: await api.maintainOne(tenantId) }));
+      return Response.json(out);
+    }
+    const req = await parseRequest(request, this.env);
+    if (req instanceof Response) return req;
+    let out;
+    const api = apiFor(this.env);
+    const start = meterStart();
+    try {
+      out = await this.queue.run('tenant', () => api.handle(req));
+    } catch (error) {
+      if (!(error instanceof QueueFullError)) throw error;
+      out = busyResponse(error, req.path);
+    }
+    const res = withMeter(toResponse(out), start);
+    res.headers.set('x-accessx-writer', 'durable-object');
+    return res;
   }
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/api/')) return handleApi(request, env);
+    if (request.method === 'POST' && url.pathname.startsWith('/api/ttlock/notify/')) return handleTtlockNotify(request, env, url);
+    if (request.method === 'POST' && url.pathname === '/api/stripe/webhook') return handleStripeWebhook(request, env);
+    if (request.method === 'POST' && url.pathname === '/api/visit-checkout') return handlePublicJson(request, env, 'visitCheckoutPublic', 'Check-out');
+    if (request.method === 'POST' && url.pathname === '/api/visit-invite') return handlePublicJson(request, env, 'visitInvitePublic', 'Registration');
+    if (request.method === 'POST' && url.pathname === '/api/signup') return handlePublicJson(request, env, 'signupPublic', 'Signup', 'signup');
+    if (request.method === 'POST' && url.pathname === '/api/signup/verify') return handlePublicJson(request, env, 'signupVerifyPublic', 'Signup', 'signup');
+    if (request.method === 'POST' && url.pathname === '/api/kiosk') return handlePublicJson(request, env, 'kioskPublic', 'Kiosk', 'kiosk');
+    if (request.method === 'POST' && url.pathname === '/api/calendar-confirm') return handlePublicJson(request, env, 'calendarConfirmPublic', 'Confirmation');
+    if (request.method === 'POST' && url.pathname === '/api/inbound/calendar') return handleCalendarHttp(request, env, url);
+    if (url.pathname === '/.well-known/security.txt') {
+      const body = securityTxt(env);
+      return new Response(body || 'not found', { status: body ? 200 : 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': body ? 'public, max-age=86400' : 'no-store' } });
+    }
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/scim/')) return handleApi(request, env);
+    // The signup page may show the Cloudflare Turnstile widget (R16): only that
+    // page's policy allows its script and frame, and only when it is configured.
+    if (url.pathname === '/signup' && env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET_KEY) {
+      const res = await env.ASSETS.fetch(request);
+      const out = new Response(res.body, res);
+      out.headers.set('content-security-policy', withTurnstile(out.headers.get('content-security-policy')));
+      return out;
+    }
     return env.ASSETS.fetch(request);
+  },
+  /**
+   * Cloudflare Email Routing (R17): mail to cal-<key>@CALENDAR_INBOUND_DOMAIN (a
+   * catch-all or per-address rule "Send to a Worker"). Meeting invitations become
+   * drafts for their organiser to confirm; everything else is dropped silently
+   * (no bounce: senders can be forged, and a bounce would confirm the address).
+   */
+  async email(message, env) {
+    try {
+      if (message.rawSize > 600 * 1024) return;
+      const raw = new Uint8Array(await new Response(message.raw).arrayBuffer());
+      const out = await apiFor(env).calendarInbound({ to: message.to, raw }, { dispatch: jobDispatcher(env) });
+      if (out.accepted) console.log('calendar invitation', JSON.stringify({ tenant: out.tenantId, status: out.result && (out.result.status || out.result.reason) }));
+    } catch (error) {
+      console.error('calendar email failed', error);
+    }
+  },
+  /** Cron trigger (wrangler.jsonc "triggers.crons"): converge credentials. */
+  async scheduled(event, env, ctx) {
+    const api = apiFor(env);
+    // Weekly D1 -> R2 export (backup-export-core.js); needs the BACKUPS binding.
+    if (env.BACKUPS) {
+      ctx.waitUntil(maybeExport({ sql: d1Adapter(env.DB), bucket: env.BACKUPS, hourUtc: Number(env.BACKUP_HOUR_UTC || 17), keep: Number(env.BACKUP_KEEP || 8) })
+        .then(r => { if (!r.skipped) console.log('backup', JSON.stringify(r)); })
+        .catch(error => console.error('backup export failed', String(error && error.message || error))));
+    }
+    if (!env.TENANT_WRITER) {
+      ctx.waitUntil(api.reconcileAll().then(results => console.log('reconcile', JSON.stringify(results))));
+      ctx.waitUntil(api.maintenance().then(results => console.log('maintenance', JSON.stringify(results))));
+      return;
+    }
+    // Each tenant's reconcile + maintenance runs inside its TenantWriter, queued
+    // with that tenant's writes (no optimistic-concurrency fights with users).
+    ctx.waitUntil((async () => {
+      const results = await Promise.all((await api.tenantIds()).map(async tenantId => {
+        try {
+          const stub = env.TENANT_WRITER.get(env.TENANT_WRITER.idFromName(tenantId));
+          const res = await stub.fetch(new Request('https://tenant-writer/__tenant/cron', { method: 'POST', headers: { 'x-accessx-tenant': tenantId } }));
+          return { tenantId, ...(await res.json()) };
+        } catch (error) {
+          return { tenantId, error: String(error.message || error) };
+        }
+      }));
+      console.log('cron', JSON.stringify(results));
+    })());
   },
 };

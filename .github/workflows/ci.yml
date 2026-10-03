@@ -1,0 +1,29 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Shared snapshot items throw on writes instead of failing silently.
+      ACCESSX_SNAPSHOT_GUARD: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22   # node:sqlite
+          cache: npm
+      - run: npm ci
+      # Merge gate: any cross-tenant leak fails the build.
+      - name: Cross-tenant isolation gate
+        run: npm run test:isolation
+      - name: Unit + API tests
+        run: npm test
+      # R23: main deploys to Cloudflare on merge. Bundle the Worker exactly as the
+      # deploy would (no Cloudflare credentials needed) and run the config doctor.
+      - name: Worker bundle (deploy dry run)
+        run: npm run deploy -- --dry-run
+      - name: wrangler.jsonc doctor
+        run: node -e "const d=require('./doctor-core');const f=d.checkWrangler(require('fs').readFileSync('wrangler.jsonc','utf8')).findings.filter(x=>x.level!=='ok');if(f.length){console.error(f);process.exit(1)}console.log('wrangler.jsonc ok')"

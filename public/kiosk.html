@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Visitor sign-in</title>
+<style>
+  :root{--fg:#1d2433;--muted:#667085;--line:#e4e7ec;--ok:#067647;--bad:#b42318;--btn:#1d4ed8}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;font:18px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--fg);background:#f6f7f9;display:flex;align-items:center;justify-content:center;padding:24px;-webkit-user-select:none;user-select:none}
+  .card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:32px;max-width:760px;width:100%}
+  body.phone{font-size:16px;padding:14px;align-items:flex-start} body.phone .card{padding:20px}
+  h1{font-size:30px;margin:0 0 6px} body.phone h1{font-size:22px}
+  h2{font-size:22px;margin:0 0 12px}
+  .meta{color:var(--muted);font-size:16px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:22px}
+  .grid.one{grid-template-columns:1fr}
+  button{width:100%;padding:22px 16px;border:0;border-radius:14px;background:var(--btn);color:#fff;font-size:21px;font-weight:600;cursor:pointer;margin-top:14px}
+  .grid button{margin-top:0;min-height:120px}
+  button.secondary{background:#fff;color:var(--btn);border:2px solid var(--btn)}
+  button.link{background:none;color:var(--btn);padding:10px;font-size:17px;font-weight:500;min-height:0}
+  button:disabled{opacity:.6;cursor:default}
+  body.phone button{padding:16px;font-size:18px} body.phone .grid{grid-template-columns:1fr} body.phone .grid button{min-height:64px}
+  label{display:block;font-size:16px;font-weight:600;margin-top:16px}
+  input{width:100%;margin-top:6px;padding:16px;border:1px solid #98a2b3;border-radius:10px;font-size:20px;-webkit-user-select:text;user-select:text}
+  label.check{font-weight:400;display:flex;gap:12px;align-items:flex-start}
+  label.check input{width:28px;height:28px;margin-top:0;flex:none}
+  .notice{white-space:pre-wrap;background:#f9fafb;border:1px solid var(--line);border-radius:10px;padding:14px;max-height:34vh;overflow:auto;font-size:16px;margin-top:14px;-webkit-user-select:text;user-select:text}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  .qr{display:flex;gap:20px;align-items:center;margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+  .qr svg{flex:none;border-radius:8px}
+  .big{font-size:64px;line-height:1;margin-bottom:8px}
+  .foot{display:flex;justify-content:space-between;margin-top:20px}
+</style>
+</head>
+<body>
+<main class="card" id="box" aria-live="polite">
+  <h1>Loading…</h1>
+</main>
+<script src="i18n-zh.js"></script>
+<script src="i18n.js"></script>
+<script src="qr.js"></script>
+<script src="kiosk.js"></script>
+</body>
+</html>

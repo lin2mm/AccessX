@@ -6,19 +6,36 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/scim/*", "/.well-known/security.txt", "/signup"]
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "accessx-demo",
-      "database_id": "local-accessx-demo",
+      // No database_id on purpose (R23): `npm run deploy` (scripts/cf-deploy.js) finds this
+      // database by name in the Cloudflare account, creates it if missing, applies the
+      // migrations, then deploys. Local dev (`wrangler dev --local`) needs no id.
       "migrations_dir": "migrations"
     }
   ],
-  "vars": {
-    "AUTH_OPEN_READS": "1"
+  // One TenantWriter per tenant serializes that tenant's writes (worker.js).
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT_WRITER", "class_name": "TenantWriter" }]
   },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantWriter"] }],
+  // Brakes for the unauthenticated endpoints (rate-limit-core.js): per
+  // Cloudflare location, eventually consistent. namespace_id must be unique
+  // in the Cloudflare account.
+  "ratelimits": [
+    { "name": "RL_NOTIFY", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
+    { "name": "RL_PUBLIC", "namespace_id": "4102", "simple": { "limit": 20, "period": 60 } }
+  ],
+  // Reconcile credentials against policy every 15 minutes (worker.js scheduled()).
+  "triggers": { "crons": ["*/15 * * * *"] },
+  // Variables and secrets are set in the Cloudflare dashboard (Settings > Variables & Secrets)
+  // and survive Git deploys. Nothing here turns anonymous reads on: a public demo sets
+  // AUTH_OPEN_READS=1 in the dashboard; local tests get it from .dev.vars (support/dev-vars.js).
+  "keep_vars": true,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

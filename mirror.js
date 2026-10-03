@@ -19,7 +19,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const DIR = path.join(__dirname, 'data');
+const SEED = path.join(__dirname, 'data', 'mirror.json');
+const DIR = process.env.DATA_DIR || path.join(__dirname, 'data', 'runtime');
 const FILE = path.join(DIR, 'mirror.json');
 
 const RETENTION = {
@@ -29,8 +30,10 @@ const RETENTION = {
 };
 
 function load() {
-  try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); }
-  catch { return { records: [], lastSync: null, stats: {} }; }
+  for (const file of [FILE, SEED]) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* try next */ }
+  }
+  return { records: [], lastSync: null, stats: {} };
 }
 
 function save(db) {

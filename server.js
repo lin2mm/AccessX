@@ -1,391 +1,340 @@
+/**
+ * Express adapter. All API behaviour lives in api-core.js (shared with
+ * the Cloudflare Worker); this file only does HTTP plumbing, static
+ * files, storage wiring and the reconcile timer.
+ */
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
-const { TTLock, RECORD_TYPES } = require('./ttlock');
-const { getDriver, availableVendors } = require('./drivers');
-const mirror = require('./mirror');
-const { createAuth, authStatus: getAuthStatus } = require('./auth');
-const acl = require('./acl');
+const { nodeSqliteAdapter, migrateNode } = require('./store/sqlite-node');
+const { createStore } = require('./store/repo');
+const { seedTenant } = require('./store/bootstrap');
+const { createAuthenticator, DEFAULT_TENANT } = require('./auth-core');
+const { createApi } = require('./api-core');
+const { createDemoVendor } = require('./vendor-demo');
+const { createTTLockVendor, fileMirror } = require('./vendor-ttlock');
+const { TTLock } = require('./ttlock');
+const { createVendorAccounts } = require('./vendor-accounts');
+const { createAuditOps } = require('./audit-ops');
+const { createDnsTxtResolver } = require('./dns-core');
 
-const app = express();
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data', 'runtime');
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const tt = new TTLock();
-const DEMO = tt.demo;
-const authConfig = {
-  token: process.env.ADMIN_TOKEN || '',
-  openReads: process.env.AUTH_OPEN_READS === undefined
-    ? DEMO
-    : process.env.AUTH_OPEN_READS === '1',
+/* ---------------- storage ---------------- */
+const sql = nodeSqliteAdapter(path.join(DATA_DIR, 'accessx.sqlite'));
+migrateNode(sql, path.join(__dirname, 'migrations'));
+// Snapshot cache budget in rows across tenants (0 = off). ~1 KB per row in memory.
+const store = createStore(sql, { snapshotCache: { maxRows: process.env.SNAPSHOT_CACHE_ROWS === undefined ? 500000 : Number(process.env.SNAPSHOT_CACHE_ROWS) } });
+
+const readJson = file => {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 };
-const requireAuth = createAuth(authConfig);
-const authStatus = () => getAuthStatus(authConfig);
+const readJsonl = file => {
+  try { return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch { return null; }
+};
 
-app.get('/api/auth', (req,res)=>res.json({ ok: true, ...authStatus() }));
-
-/* ----------------------------------------------------------------- */
-/* Demo dataset — realistic commercial scenario                        */
-/* ----------------------------------------------------------------- */
-const DEMO_LOCKS = [
-  { lockId: 9001, lockAlias: 'Main Entrance',        electricQuantity: 78, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9002, lockAlias: 'Server Room',          electricQuantity: 91, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9003, lockAlias: 'Warehouse Side Door',  electricQuantity: 42, hasGateway: 1, groupName: 'Riverside Office' },
-  { lockId: 9004, lockAlias: 'Cleaner Cupboard',     electricQuantity: 15, hasGateway: 0, groupName: 'Riverside Office' },
-  { lockId: 9101, lockAlias: 'Gym Front Door',       electricQuantity: 66, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9102, lockAlias: 'Gym Staff Office',     electricQuantity: 88, hasGateway: 1, groupName: 'Northgate Gym' },
-  { lockId: 9201, lockAlias: 'Storage Block A Gate', electricQuantity: 55, hasGateway: 1, groupName: 'Selfstore Depot' },
-];
-
-function seed() {
-  const db = acl.load();
-  if (db.sites.length) return db;
-
-  db.sites = [
-    { id: 'site_river', name: 'Riverside Office',  address: '12 Riverside Way, Bristol' },
-    { id: 'site_gym',   name: 'Northgate Gym',     address: '4 Northgate, Leeds' },
-    { id: 'site_store', name: 'Selfstore Depot',   address: 'Unit 7, Enfield' },
-  ];
-  db.doorGroups = [
-    { id: 'dg_pub',   siteId: 'site_river', name: 'Public Doors',    lockIds: [9001] },
-    { id: 'dg_sec',   siteId: 'site_river', name: 'Secure Areas',    lockIds: [9002] },
-    { id: 'dg_ops',   siteId: 'site_river', name: 'Operations',      lockIds: [9003, 9004] },
-    { id: 'dg_gym',   siteId: 'site_gym',   name: 'Gym Member Doors',lockIds: [9101] },
-    { id: 'dg_gstaff',siteId: 'site_gym',   name: 'Gym Staff Only',  lockIds: [9102] },
-    { id: 'dg_store', siteId: 'site_store', name: 'Storage Gates',   lockIds: [9201] },
-  ];
-  db.schedules = [
-    { id: 'sch_office', name: 'Office Hours',   denyOnHolidays: true,
-      windows: [{ days: [1,2,3,4,5], from: '08:00', to: '18:30' }] },
-    { id: 'sch_24',     name: '24/7',           denyOnHolidays: false,
-      windows: [{ days: [1,2,3,4,5,6,7], from: '00:00', to: '23:59' }] },
-    { id: 'sch_clean',  name: 'Cleaning Window',denyOnHolidays: false,
-      windows: [{ days: [1,3,5], from: '18:00', to: '21:00' }] },
-    { id: 'sch_night',  name: 'Night Shift',    denyOnHolidays: false,
-      windows: [{ days: [1,2,3,4,5,6,7], from: '22:00', to: '06:00' }] },
-  ];
-  db.userGroups = [
-    { id: 'ug_staff',   name: 'Office Staff' },
-    { id: 'ug_it',      name: 'IT Admins' },
-    { id: 'ug_clean',   name: 'Cleaning Contractor' },
-    { id: 'ug_member',  name: 'Gym Members' },
-    { id: 'ug_gymstaff',name: 'Gym Staff' },
-    { id: 'ug_tenant',  name: 'Storage Tenants' },
-  ];
-  db.assignments = [
-    { id: 'as1', userGroupId: 'ug_staff',    doorGroupId: 'dg_pub',    scheduleId: 'sch_office' },
-    { id: 'as2', userGroupId: 'ug_staff',    doorGroupId: 'dg_ops',    scheduleId: 'sch_office' },
-    { id: 'as3', userGroupId: 'ug_it',       doorGroupId: 'dg_pub',    scheduleId: 'sch_24' },
-    { id: 'as4', userGroupId: 'ug_it',       doorGroupId: 'dg_sec',    scheduleId: 'sch_24' },
-    { id: 'as5', userGroupId: 'ug_clean',    doorGroupId: 'dg_ops',    scheduleId: 'sch_clean' },
-    { id: 'as6', userGroupId: 'ug_clean',    doorGroupId: 'dg_pub',    scheduleId: 'sch_clean' },
-    { id: 'as7', userGroupId: 'ug_member',   doorGroupId: 'dg_gym',    scheduleId: 'sch_24' },
-    { id: 'as8', userGroupId: 'ug_gymstaff', doorGroupId: 'dg_gstaff', scheduleId: 'sch_24' },
-    { id: 'as9', userGroupId: 'ug_tenant',   doorGroupId: 'dg_store',  scheduleId: 'sch_24' },
-  ];
-  db.users = [
-    { id: 'u1', name: 'Sarah Kelly',   email: 'sarah@acme.co.uk', groupIds: ['ug_staff'],    suspended: false },
-    { id: 'u2', name: 'Dev Patel',     email: 'dev@acme.co.uk',   groupIds: ['ug_staff','ug_it'], suspended: false },
-    { id: 'u3', name: 'CleanCo Ltd',   email: 'ops@cleanco.uk',   groupIds: ['ug_clean'],    suspended: false,
-      validTo: new Date(Date.now() + 90*864e5).toISOString() },
-    { id: 'u4', name: 'Tom Nguyen',    email: 'tom@x.com',        groupIds: ['ug_member'],   suspended: false },
-    { id: 'u5', name: 'Ex-Employee',   email: 'gone@acme.co.uk',  groupIds: ['ug_staff'],    suspended: true },
-  ];
-  db.holidays = [{ date: new Date(Date.now() + 3*864e5).toISOString().slice(0,10), name: 'Bank Holiday' }];
-  db.roles = [
-    { id: 'r_owner',     name: 'Account Owner',  perms: ['*'] },
-    { id: 'r_manager',   name: 'Site Manager',   perms: ['door.read','door.unlock','user.manage','report.read'] },
-    { id: 'r_installer', name: 'Installer',      perms: ['door.read','door.commission','diag.read'] },
-    { id: 'r_view',      name: 'Auditor',        perms: ['door.read','report.read'] },
-  ];
-  acl.audit(db, 'seed', 'demo dataset created');
-  acl.save(db);
-  return db;
-}
-seed();
-
-/* ----------------------------------------------------------------- */
-/* API                                                                 */
-/* ----------------------------------------------------------------- */
-const ok = (res, d) => res.json({ ok: true, demo: DEMO, ...d });
-const fail = (res, e) => res.status(500).json({ ok: false, error: String(e.message || e) });
-
-app.use('/api', requireAuth);
-
-app.post('/api/auth/verify', (req,res)=>ok(res,{authenticated:true}));
-
-app.get('/api/status', (req, res) => ok(res, {
-  mode: DEMO ? 'DEMO (no TTLock credentials set)' : 'LIVE (TTLock cloud)',
-  region: process.env.TTLOCK_REGION || 'eu',
-}));
-
-// ---- Doors -------------------------------------------------------
-app.get('/api/doors', async (req, res) => {
-  try {
-    const db = acl.load();
-    let locks;
-    if (DEMO) locks = DEMO_LOCKS;
-    else {
-      const r = await tt.listLocks(1, 200);
-      locks = (r.list || []).map(l => ({
-        lockId: l.lockId, lockAlias: l.lockAlias, electricQuantity: l.electricQuantity,
-        hasGateway: l.hasGateway, groupName: l.groupName,
-      }));
-    }
-    // enrich with our own site / door-group metadata
-    const enriched = locks.map(l => {
-      const dg = db.doorGroups.find(d => (d.lockIds || []).includes(l.lockId));
-      const site = dg ? db.sites.find(s => s.id === dg.siteId) : null;
-      return { ...l, doorGroup: dg ? dg.name : null, site: site ? site.name : (l.groupName || 'Unassigned') };
-    });
-    ok(res, { doors: enriched });
-  } catch (e) { fail(res, e); }
-});
-
-app.post('/api/doors/:id/unlock', async (req, res) => {
-  try {
-    const db = acl.load();
-    const lockId = Number(req.params.id);
-    const { userId } = req.body || {};
-    // ★ policy check BEFORE touching the lock — this is the whole point
-    if (userId) {
-      const v = acl.evaluate(db, userId, lockId, new Date());
-      if (!v.allowed) {
-        acl.audit(db, 'unlock.denied', `lock ${lockId} user ${userId}: ${v.reason}`, userId);
-        acl.save(db);
-        return res.status(403).json({ ok: false, denied: true, reason: v.reason, path: v.path });
-      }
-    }
-    if (!DEMO) await tt.unlock(lockId);
-    acl.audit(db, 'unlock.granted', `lock ${lockId}${userId ? ' user ' + userId : ' (admin override)'}`, userId || 'admin');
-    acl.save(db);
-    ok(res, { unlocked: lockId, simulated: DEMO });
-  } catch (e) { fail(res, e); }
-});
-
-// ---- Access decision explainer (the killer demo feature) ----------
-app.post('/api/evaluate', (req, res) => {
-  const db = acl.load();
-  const { userId, lockId, when } = req.body || {};
-  const at = when ? new Date(when) : new Date();
-  ok(res, { at: at.toISOString(), result: acl.evaluate(db, userId, Number(lockId), at) });
-});
-
-app.get('/api/users/:id/doors', (req, res) => {
-  const db = acl.load();
-  ok(res, { doors: acl.doorsForUser(db, req.params.id, new Date()) });
-});
-
-// ---- CRUD --------------------------------------------------------
-for (const coll of ['sites','doorGroups','userGroups','users','schedules','assignments','holidays','roles']) {
-  app.get(`/api/${coll}`, (req, res) => ok(res, { [coll]: acl.load()[coll] }));
-  app.post(`/api/${coll}`, (req, res) => {
-    const db = acl.load();
-    const item = { id: acl.uid(coll.slice(0,3)), ...req.body };
-    db[coll].push(item);
-    acl.audit(db, `${coll}.create`, JSON.stringify(item).slice(0,200));
-    acl.save(db);
-    ok(res, { item });
+/** First boot: import the pre-SQL runtime state if present, else the seed. */
+async function ensureReady() {
+  const legacyState = readJson(path.join(DATA_DIR, 'acl.json'));
+  const data = legacyState || readJson(path.join(__dirname, 'data', 'acl.json')) || {};
+  const result = await seedTenant(store, DEFAULT_TENANT, {
+    data,
+    sealedAudit: readJsonl(path.join(DATA_DIR, 'audit.jsonl')),
+    legacyAudit: data.auditLog,
+    source: legacyState ? 'legacy DATA_DIR/acl.json' : 'data/acl.json',
   });
-  app.delete(`/api/${coll}/:id`, (req, res) => {
-    const db = acl.load();
-    db[coll] = db[coll].filter(x => x.id !== req.params.id);
-    acl.audit(db, `${coll}.delete`, req.params.id);
-    acl.save(db);
-    ok(res, {});
-  });
+  if (result.seeded && legacyState) {
+    // Keep the old files for rollback, but make it obvious they are retired.
+    for (const f of ['acl.json', 'audit.jsonl']) {
+      const from = path.join(DATA_DIR, f);
+      if (fs.existsSync(from)) fs.renameSync(from, `${from}.migrated`);
+    }
+  }
 }
 
-// ---- Credentials -------------------------------------------------
-app.post('/api/passcode', async (req, res) => {
-  try {
-    const { lockId, name, type = 3, startDate, endDate } = req.body;
-    let out;
-    if (DEMO) out = { keyboardPwd: String(Math.floor(100000 + Math.random()*899999)), keyboardPwdId: Date.now() };
-    else out = await tt.createPasscode({ lockId, keyboardPwdName: name, keyboardPwdType: type, startDate, endDate });
-    const db = acl.load();
-    acl.audit(db, 'passcode.create', `lock ${lockId} "${name}"`);
-    acl.save(db);
-    ok(res, { passcode: out });
-  } catch (e) { fail(res, e); }
+/* ---------------- vendors ---------------- */
+const tt = new TTLock();
+const demoVendor = createDemoVendor({ mirror: fileMirror() });
+const liveVendor = tt.demo ? null : createTTLockVendor(tt);
+// TTLock credentials are per deployment today → default tenant only.
+// Per-tenant vendor accounts are the next step (see docs/01-ARCHITECTURE.md).
+// Other tenants get an EMPTY simulated fleet: lock ids belong to a vendor
+// account, and one tenant must never see (let alone open) another's doors.
+const emptyVendor = createDemoVendor({ locks: [] });
+const vendorFor = tenantId => (tenantId === DEFAULT_TENANT ? liveVendor || demoVendor : emptyVendor);
+// Per-tenant TTLock accounts (owners connect their own; tokens sealed with SECRETS_KEY).
+// A connected account overrides vendorFor() for that tenant.
+const { createAlerts, emailConfigFromEnv, needsReconnectMessage } = require('./alerts-core');
+const { createSms, smsConfigFromEnv } = require('./sms-core');
+const vendorAccounts = createVendorAccounts({
+  store,
+  secretsKey: process.env.SECRETS_KEY || '',
+  apiBase: process.env.TTLOCK_API_BASE || '', // deployment-level override (tests, egress proxy) — never per tenant
+  nukiApiBase: process.env.NUKI_API_BASE || '', // same, for Nuki (tests)
+  nukiPoll: process.env.NUKI_POLL_MS ? { pollMs: Math.max(50, Number(process.env.NUKI_POLL_MS) || 1500) } : {},
+  platformApp: { clientId: process.env.TTLOCK_CLIENT_ID || '', clientSecret: process.env.TTLOCK_CLIENT_SECRET || '' },
+  log: (...a) => console.error(...a),
+  // `alerts` is created below; the hook only runs later, at request time.
+  onNeedsReconnect: (tenantId, info) => alerts.send(tenantId, 'vendor_needs_reconnect', needsReconnectMessage(info)),
 });
 
-// ---- Audit trail (ours + TTLock's) --------------------------------
-app.get('/api/records/:lockId', async (req, res) => {
+const { checkConfig, resolveOpenReads } = require('./doctor-core');
+const { signupConfigFromEnv, withTurnstile } = require('./signup-core');
+const startupEnv = { ...process.env };
+// Anonymous read-only (the public demo) is refused once real locks are configured.
+const openReads = resolveOpenReads(process.env, { demoDefault: tt.demo });
+if (openReads.refused) console.error('AUTH_OPEN_READS=1 ignored: TTLOCK_CLIENT_ID is set, anonymous reads stay off');
+const auth = createAuthenticator({
+  store,
+  adminToken: process.env.ADMIN_TOKEN || '',
+  operatorsJson: process.env.OPERATORS || '',
+  platformToken: process.env.PLATFORM_TOKEN || '',
+  openReads: openReads.open,
+});
+// Signed audit anchors (AUDIT_SIGNING_KEY, Ed25519 JWK) + retention.
+const alerts = createAlerts({ store, secretsKey: process.env.SECRETS_KEY || '', allowHttp: process.env.ALLOW_HTTP_WEBHOOKS === '1', publicUrl: process.env.PUBLIC_URL || '', email: emailConfigFromEnv(process.env), log: (...a) => console.error(...a) });
+const auditOps = createAuditOps({ store, signingKeyJson: process.env.AUDIT_SIGNING_KEY || '', log: (...a) => console.error(...a), allowHttpWebhooks: process.env.ALLOW_HTTP_WEBHOOKS === '1' });
+// SSO domain proof (TXT over DoH). Tests set overrides via `dns.set()`.
+const dns = createDnsTxtResolver({ dohUrl: process.env.DOH_URL || undefined });
+const { createTenantQueue, busyResponse, QueueFullError } = require('./tenant-queue');
+const { createLimiters, allow } = require('./rate-limit-core');
+const { securityTxt } = require('./security-txt');
+const { billingConfigFromEnv, createStripe } = require('./billing-core');
+const WRITE_QUEUE_OFF = process.env.WRITE_QUEUE === 'off';
+const writeQueue = createTenantQueue({ maxDepth: Number(process.env.WRITE_QUEUE_MAX || 256) });
+const sms = createSms({ config: smsConfigFromEnv(process.env) });
+const billingConfig = billingConfigFromEnv(process.env);
+if (billingConfig.enabled && !billingConfig.active) console.error(`BILLING_ENABLED=1 but billing is off: check ${billingConfig.problems.join(', ')}`);
+const billing = billingConfig.active ? { config: billingConfig, stripe: createStripe(billingConfig) } : null;
+const api = createApi({
+  store, auth, vendorFor, vendorAccounts, auditOps, alerts, sms, dns, ensureReady, billing,
+  doctor: () => checkConfig(startupEnv, { runtime: 'node' }),
+  signup: signupConfigFromEnv(process.env),
+  calendarDomain: process.env.CALENDAR_INBOUND_DOMAIN || '',
+  demoData: require('./data/acl.json'), // the settings this process started with
+  serialize: (tenantId, fn) => (WRITE_QUEUE_OFF ? fn() : writeQueue.run(tenantId, fn)), log: (...a) => console.error(...a),
+  cookieSameSite: process.env.COOKIE_SAMESITE || 'Lax',
+  secretsKey: process.env.SECRETS_KEY || '',
+  ttlockNotifySecret: process.env.TTLOCK_NOTIFY_SECRET || '',
+  publicUrl: process.env.PUBLIC_URL || '',
+  smsMonthlyCap: Number(process.env.SMS_MONTHLY_CAP || 0),
+  // The bundled mock IdP runs on plain http; real issuers must be https.
+  allowHttpIssuers: process.env.MOCK_IDP === '1',
+});
+
+/* ---------------- HTTP ---------------- */
+const app = express();
+app.disable('x-powered-by');
+// Mirrors public/_headers (used by the Cloudflare build).
+// No inline scripts or handlers: script-src 'self' blocks injected <script>/on*=.
+// connect-src/img-src 'self' stop exfiltration of tokens or data.
+// frame-ancestors (R22): only this origin may put the pages in a frame, so another site cannot
+// overlay the Approve / Open door buttons (clickjacking). FRAME_ANCESTORS widens it for an
+// intended embedding: space-separated origins. On the Worker the same policy is in public/_headers.
+const FRAME_ANCESTORS = frameAncestors(process.env.FRAME_ANCESTORS);
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; " +
+  `base-uri 'none'; form-action 'self'; frame-ancestors ${FRAME_ANCESTORS}`;
+/** FRAME_ANCESTORS -> a CSP frame-ancestors source list; anything malformed falls back to 'self'. */
+function frameAncestors(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return "'self'";
+  const ok = v.split(/\s+/).every(t => /^('self'|'none'|\*|https?:\/\/(\*\.)?[a-z0-9.-]+(:\d+)?)$/i.test(t));
+  if (!ok) { console.error(`FRAME_ANCESTORS ignored (not a list of origins): ${v.slice(0, 80)}`); return "'self'"; }
+  return v;
+}
+const TURNSTILE_ON = Boolean(signupConfigFromEnv(process.env).turnstileSiteKey);
+const CSP_SIGNUP = withTurnstile(CSP); // R16: only the signup page may load the Turnstile widget
+app.use((req, res, next) => {
+  res.set({
+    'Content-Security-Policy': TURNSTILE_ON && (req.path === '/signup' || req.path === '/signup.html') ? CSP_SIGNUP : CSP,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  if (FRAME_ANCESTORS === "'self'") res.set('X-Frame-Options', 'SAMEORIGIN'); // browsers without frame-ancestors
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+  next();
+});
+// SCIM clients (Entra ID, Okta) send application/scim+json.
+// TTLock's record callback is form-encoded and unauthenticated: the secret is the last path segment.
+// One process: exact per-address windows (rate-limit-core.js). Same limits as the Worker's RL_* bindings.
+const limiterFor = createLimiters();
+// Same client address as the auth limiter below (see the x-forwarded-for note there).
+const peerIp = (req) => (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+const tooMany = (res, json) => res.status(429).set('retry-after', '60')[json ? 'json' : 'send'](json ? { ok: false, error: 'Too many requests. Please wait a minute and try again.' } : 'too many requests');
+app.post('/api/ttlock/notify/:secret', express.urlencoded({ extended: false, limit: '256kb' }), async (req, res) => {
+  if (!(await allow(limiterFor, 'notify', peerIp(req)))) return tooMany(res, false);
   try {
-    if (DEMO) {
-      const types = [1,4,7,8,12,55];
-      const list = Array.from({ length: 25 }, (_, i) => {
-        const t = types[i % types.length];
-        return {
-          recordId: 1e6 + i, lockId: Number(req.params.lockId), recordType: t,
-          typeLabel: RECORD_TYPES[t] || `type ${t}`,
-          success: i % 11 === 0 ? 0 : 1,
-          username: ['Sarah Kelly','Dev Patel','CleanCo Ltd','Tom Nguyen'][i % 4],
-          lockDate: Date.now() - i * 3.4e6,
-        };
-      });
-      return ok(res, { records: list });
+    const out = await api.ttlockNotify({ secret: req.params.secret, form: req.body || {} });
+    res.status(out.status).type('text/plain').send(out.status === 200 ? 'success' : 'not found');
+  } catch (error) {
+    console.error('ttlock notify failed', error);
+    res.status(500).type('text/plain').send('error');
+  }
+});
+// Stripe webhook: the signature covers the exact bytes, so keep the raw body.
+app.post('/api/stripe/webhook', express.raw({ type: () => true, limit: '256kb' }), async (req, res) => {
+  if (!(await allow(limiterFor, 'stripe', peerIp(req)))) return tooMany(res, true);
+  try {
+    const out = await api.stripeWebhook({ rawBody: Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '', signature: req.headers['stripe-signature'] || '' });
+    res.status(out.status).json(out.body);
+  } catch (error) {
+    console.error('stripe webhook failed', error);
+    res.status(500).json({ ok: false, error: 'webhook failed' }); // Stripe retries
+  }
+});
+// Visitor self check-out: no login; the token (in the body) is the only credential.
+// Visitor pre-registration: no login; the invite token (in the body) is the only credential.
+// Self-service signup and its emailed link (R15): no login; rate-limited per address.
+for (const [path, fn, what, kind] of [['/api/visit-checkout', 'visitCheckoutPublic', 'Check-out', 'visitorLink'], ['/api/visit-invite', 'visitInvitePublic', 'Registration', 'visitorLink'],
+  ['/api/signup', 'signupPublic', 'Signup', 'signup'], ['/api/signup/verify', 'signupVerifyPublic', 'Signup', 'signup'], ['/api/kiosk', 'kioskPublic', 'Kiosk', 'kiosk'],
+  ['/api/calendar-confirm', 'calendarConfirmPublic', 'Confirmation', 'visitorLink']]) {
+  app.post(path, express.json({ limit: '4kb', type: ['application/json'] }), async (req, res) => {
+    if (!(await allow(limiterFor, kind, peerIp(req)))) return tooMany(res, true);
+    try {
+      const out = await api[fn](req.body || {}, { ip: peerIp(req) });
+      if (out.headers) res.set(out.headers);
+      res.set('cache-control', 'no-store');
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error(`${path} failed`, error);
+      res.status(502).json({ ok: false, error: `${what} failed. Please try again, or contact your host.` });
     }
-    const r = await tt.records(Number(req.params.lockId), { pageSize: 100 });
-    const list = (r.list || []).map(x => ({ ...x, typeLabel: RECORD_TYPES[x.recordType] || `type ${x.recordType}` }));
-    ok(res, { records: list });
-  } catch (e) { fail(res, e); }
-});
-
-app.get('/api/audit', (req, res) => ok(res, { log: acl.load().auditLog.slice(0, 100) }));
-
-// ---- Vendor abstraction ------------------------------------------
-// server 只跟 driver 接口对话，不直接依赖任何厂商。
-app.get('/api/vendor', async (req, res) => {
+  });
+}
+// Calendar invitations (R17) from an inbound-email provider that POSTs the raw message
+// (Cloudflare uses the Worker's email() handler instead). Bearer CALENDAR_INBOUND_SECRET;
+// the envelope recipient in x-envelope-to (or ?to=).
+const CALENDAR_INBOUND_SECRET = process.env.CALENDAR_INBOUND_SECRET || ''; // read once at start, like all settings
+app.post('/api/inbound/calendar', express.raw({ type: () => true, limit: '600kb' }), async (req, res) => {
+  const secret = CALENDAR_INBOUND_SECRET;
+  const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const a = Buffer.from(given); const b = Buffer.from(secret);
+  if (!secret || a.length !== b.length || !require('node:crypto').timingSafeEqual(a, b)) {
+    if (!(await allow(limiterFor, 'visitorLink', peerIp(req)))) return tooMany(res, true);
+    return res.status(404).json({ ok: false, error: 'not found' });
+  }
   try {
-    const d = getDriver();
-    ok(res, {
-      active: d.vendor,
-      available: availableVendors(),
-      capabilities: d.capabilities(),
-      health: await d.health(),
-    });
-  } catch (e) { fail(res, e); }
+    const out = await api.calendarInbound({ to: String(req.headers['x-envelope-to'] || req.query.to || ''), raw: Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || '')) });
+    res.status(202).json({ ok: true, accepted: out.accepted });
+  } catch (error) {
+    console.error('calendar inbound failed', error);
+    res.status(500).json({ ok: false, error: 'inbound failed' }); // the provider retries
+  }
 });
-
-// ---- Record mirror (breaks the vendor 180-day ceiling) ------------
-app.post('/api/mirror/sync', async (req, res) => {
-  try { ok(res, await mirror.sync(getDriver(), req.body || {})); }
-  catch (e) { fail(res, e); }
-});
-
-app.get('/api/mirror/coverage', (req, res) => {
-  try { ok(res, mirror.coverage()); } catch (e) { fail(res, e); }
-});
-
-app.get('/api/mirror/records', (req, res) => {
-  try {
-    const { lockId, from, to, limit } = req.query;
-    ok(res, { records: mirror.query({
-      lockId: lockId || null,
-      from: from ? Number(from) : null,
-      to: to ? Number(to) : null,
-      limit: limit ? Number(limit) : 500,
-    }) });
-  } catch (e) { fail(res, e); }
-});
-
-// ---- Fleet health (installer view) --------------------------------
-app.get('/api/health', async (req, res) => {
-  try {
-    const doors = DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []);
-    const low = doors.filter(d => d.electricQuantity <= 25);
-    const offline = doors.filter(d => !d.hasGateway);
-    ok(res, {
-      total: doors.length, lowBattery: low, offline,
-      score: Math.round(100 - (low.length*12 + offline.length*8)),
-    });
-  } catch (e) { fail(res, e); }
-});
-
-
-/* ----------------------------------------------------------------- */
-/* AI Copilot                                                          */
-/* Deterministic intent router over LIVE data.                         */
-/* Set OPENAI_API_KEY to swap the router for a real LLM + tool-calling; */
-/* the tool functions below are already the "tools" it would call.      */
-/* ----------------------------------------------------------------- */
-function aiTools(db, doors) {
-  return {
-    whoCanOpen(name) {
-      const d = doors.find(x => (x.lockAlias||'').toLowerCase().includes(name));
-      if (!d) return null;
-      const out = [];
-      for (const u of db.users) {
-        const r = acl.evaluate(db, u.id, d.lockId, new Date());
-        if (r.allowed) out.push(u.name);
-      }
-      return { door: d.lockAlias, people: out };
-    },
-    serviceVisits() {
-      const low = doors.filter(x => x.electricQuantity <= 30)
-        .sort((a,b) => a.electricQuantity - b.electricQuantity);
-      const off = doors.filter(x => !x.hasGateway);
-      return { low, off };
-    },
-    anomalies() {
-      const denials = db.auditLog.filter(x => x.action === 'unlock.denied');
-      const suspended = db.users.filter(u => u.suspended);
-      const expiring = db.users.filter(u => u.validTo &&
-        new Date(u.validTo) < new Date(Date.now() + 30*864e5));
-      return { denials: denials.length, suspended, expiring };
-    },
-    explainDenial(personName) {
-      const u = db.users.find(x => x.name.toLowerCase().includes(personName));
-      if (!u) return null;
-      const at = new Date(); at.setUTCHours(21, 0, 0, 0);
-      const res = doors.map(d => ({ door: d.lockAlias, r: acl.evaluate(db, u.id, d.lockId, at) }));
-      return { user: u.name, at: at.toISOString(), res };
-    },
+app.use('/api', express.json({ limit: '64kb', type: ['application/json'] }));
+// Okta/Entra may PUT a group with its full member list: allow larger bodies here only.
+app.use('/scim', express.json({ limit: '1mb', type: ['application/json', 'application/scim+json'] }));
+app.use(['/api', '/scim'], async (req, res) => {
+  // NOTE: x-forwarded-for is client-controlled unless a trusted proxy
+  // overwrites it. Behind a proxy, configure Express "trust proxy" instead.
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const proto = String(req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http')).split(',')[0].trim();
+  const request = {
+    method: req.method,
+    path: req.originalUrl.split('?')[0],
+    query: new URLSearchParams(req.originalUrl.split('?')[1] || ''),
+    body: req.body,
+    headers: req.headers,
+    ip,
+    secure: proto === 'https',
+    origin: process.env.PUBLIC_URL || `${proto}://${req.headers['x-forwarded-host'] || req.headers.host}`,
   };
-}
-
-app.post('/api/ai', async (req, res) => {
+  // Writes of one tenant run one at a time (tenant-queue.js); reads never wait.
+  let out;
   try {
-    const q = String((req.body && req.body.q) || '').toLowerCase();
-    const db = acl.load();
-    const doors = DEMO ? DEMO_LOCKS : ((await tt.listLocks(1,200)).list || []);
-    const T = aiTools(db, doors);
-    let answer;
-
-    if (/batter|service|visit|maintenance|replace/.test(q)) {
-      const { low, off } = T.serviceVisits();
-      answer = `<b>Suggested service run</b><br>` +
-        (low.length ? low.map(d => `· <b>${d.lockAlias}</b> — ${d.electricQuantity}% battery` +
-          (d.electricQuantity <= 15 ? ' <span class="tag r">urgent</span>' : '')).join('<br>')
-          : 'No low batteries.') +
-        (off.length ? `<br>· <b>${off.map(d=>d.lockAlias).join(', ')}</b> — no gateway, cannot be opened remotely` : '') +
-        `<br><br>Batching these into one visit saves a second call-out. Shall I draft the job sheet?`;
-    }
-    else if (/unusual|anomal|risk|suspicious|odd|wrong/.test(q)) {
-      const a = T.anomalies();
-      answer = `<b>Risk review</b><br>` +
-        `· ${a.denials} denied unlock attempt(s) recorded<br>` +
-        `· ${a.suspended.length} suspended user(s): ${a.suspended.map(u=>u.name).join(', ')||'none'}<br>` +
-        `· ${a.expiring.length} credential(s) expiring within 30 days: ${a.expiring.map(u=>u.name).join(', ')||'none'}<br><br>` +
-        `Recommendation: remove suspended users from all groups so they disappear from reports, and renew expiring contractors before they lock themselves out.`;
-    }
-    else if (/who can|who has|access to/.test(q)) {
-      const m = q.match(/(server room|main entrance|warehouse|cleaner|gym front|gym staff|storage)/);
-      const r = m ? T.whoCanOpen(m[1]) : null;
-      answer = r
-        ? `<b>${r.door}</b> — currently openable by: ${r.people.length ? r.people.join(', ') : '<i>nobody at this moment</i>'}.<br><br>This is evaluated live against schedules, so the answer changes with the clock.`
-        : `Name a door and I will list who can open it right now — e.g. "who can open the Server Room?"`;
-    }
-    else if (/denied|why|refus|reject/.test(q)) {
-      const m = q.match(/(sarah|dev|tom|cleanco|cleaner)/);
-      const r = m ? T.explainDenial(m[1]) : null;
-      if (r) {
-        const denied = r.res.filter(x => !x.r.allowed).slice(0, 4);
-        answer = `<b>${r.user}</b> at 21:00 UTC:<br>` +
-          denied.map(x => `· ${x.door}: ${x.r.reason}`).join('<br>') +
-          `<br><br>Most denials at that hour come from the <i>Office Hours</i> schedule ending 18:30. To change it, I can extend the window or add an evening exception — your approval required.`;
-      } else {
-        answer = `Tell me who was denied — e.g. "why was Sarah denied at 9pm?"`;
-      }
-    }
-    else if (/give|grant|add|allow|extend/.test(q)) {
-      answer = `<b>Proposed change</b> (not yet applied)<br>` +
-        `I would add a rule: <b>Cleaning Contractor</b> → <b>Operations</b> on <b>Friday 18:00–21:00</b>.<br><br>` +
-        `Impact: 1 user group, 2 doors. No existing rule is removed.<br>` +
-        `<i>Nothing is executed until you confirm — every AI action is proposal-then-approve, and lands in the audit log with "ai" as the actor.</i>`;
-    }
-    else {
-      answer = `I can help with:<br>· <b>Diagnostics</b> — "which doors need a battery visit?"<br>` +
-        `· <b>Explaining decisions</b> — "why was Sarah denied at 9pm?"<br>` +
-        `· <b>Queries</b> — "who can open the Server Room?"<br>` +
-        `· <b>Risk review</b> — "anything unusual this week?"<br>` +
-        `· <b>Rule drafting</b> — "give the cleaners Friday evening access"<br><br>` +
-        `<i>Running on the deterministic router. Set OPENAI_API_KEY to enable full natural language.</i>`;
-    }
-    ok(res, { answer });
-  } catch (e) { fail(res, e); }
+    // WRITE_QUEUE=off exists for tests that must exercise the in-transaction
+    // guards directly (the queue would serialize the race away).
+    const key = WRITE_QUEUE_OFF ? null : await api.writeKey(request);
+    out = await writeQueue.run(key, () => api.handle(request));
+  } catch (error) {
+    if (!(error instanceof QueueFullError)) throw error;
+    out = busyResponse(error, request.path);
+  }
+  for (const c of out.cookies || []) res.append('Set-Cookie', c);
+  if (out.headers) res.set(out.headers);
+  if (out.redirect) return res.redirect(302, out.redirect);
+  if (out.body === null || out.body === undefined) return res.status(out.status).end();
+  if (out.contentType) return res.status(out.status).type(out.contentType).send(JSON.stringify(out.body));
+  return res.status(out.status).json(out.body);
+});
+if (process.env.MOCK_IDP === '1') {
+  // Demo/test identity provider. NEVER enable in production: anyone can
+  // "log in" as any of its users.
+  console.warn('WARNING: MOCK_IDP=1 — a fake identity provider is mounted at /mock-idp (demo only)');
+  app.use('/mock-idp', require('./support/mock-idp').createMockIdp({ basePath: '/mock-idp' }).router);
+}
+// extensions: /checkout serves checkout.html, as Cloudflare's asset handling does.
+app.get('/.well-known/security.txt', (req, res) => {
+  const body = securityTxt(process.env);
+  if (!body) return res.status(404).type('text/plain').send('not found');
+  res.type('text/plain; charset=utf-8').set('cache-control', 'public, max-age=86400').send(body);
+});
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+// Malformed JSON and oversize bodies → JSON errors, not HTML stack traces.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  res.status(err.status || 400).json({ ok: false, error: err.type === 'entity.too.large' ? 'request body too large' : 'invalid JSON body' });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Access control server on ${PORT} — mode: ${DEMO ? 'DEMO' : 'LIVE'}`));
+/* ---------------- reconcile timer ---------------- */
+function startReconciler(minutes = Number(process.env.RECONCILE_INTERVAL_MIN ?? 15)) {
+  if (!minutes) return null;
+  const timer = setInterval(() => {
+    api.reconcileAll()
+      .then(results => results.filter(r => r.revoked || r.expired || r.pendingRemoval || r.failed || r.escalated || r.error)
+        .forEach(r => console.log('reconcile', JSON.stringify(r))))
+      .catch(error => console.error('reconcile failed', error));
+    // Anchors at most daily per tenant; retention only below delivered anchors.
+    api.maintenance()
+      .then(results => results.filter(r => r.anchored || r.purged || r.error || r.alerts).forEach(r => console.log('maintenance', JSON.stringify(r))))
+      .catch(error => console.error('maintenance failed', error));
+  }, minutes * 60e3);
+  timer.unref();
+  return timer;
+}
+
+/**
+ * Demo convenience (MOCK_IDP_AUTOCONFIGURE=1): point the default tenant's
+ * SSO at the bundled mock IdP and invite alice@riverside.example as a
+ * Riverside site manager, so the preview shows the whole SSO flow.
+ */
+async function autoconfigureMockSso(port) {
+  const settings = (await store.tenantSettings(DEFAULT_TENANT)) || {};
+  if (settings.sso) return;
+  const issuer = `http://127.0.0.1:${port}/mock-idp`;
+  // Demo only: the domain is marked verified (there is no real DNS for riverside.example).
+  const at = new Date().toISOString();
+  const sso = { issuer, clientId: 'accessx-demo', domains: ['riverside.example'], domainVerification: { 'riverside.example': { token: 'mock-autoconfigure', verifiedAt: at } }, enforced: false, trustUnverifiedEmail: false, clientSecretEnc: null, updatedAt: at };
+  const t = store.tenant(DEFAULT_TENANT);
+  const uow = t.unit().raw('UPDATE tenants SET settings = ? WHERE id = ?', [JSON.stringify({ ...settings, sso }), DEFAULT_TENANT])
+    .audit('sso.configure', `issuer=${issuer} client=accessx-demo domains=riverside.example secret=none (mock autoconfigure)`, 'system');
+  const snap = await t.snapshot();
+  const river = snap.sites.find(x => /river/i.test(x.name)) || snap.sites[0];
+  if (!(await t.operators()).some(o => o.email === 'alice@riverside.example')) {
+    const { operatorStatement } = require('./store/repo');
+    const crypto = require('node:crypto');
+    const op = { id: 'op_alice', name: 'Alice Chen', role: 'r_manager', siteIds: river ? [river.id] : [], email: 'alice@riverside.example',
+      tokenSha256: crypto.createHash('sha256').update(`unusable:${crypto.randomBytes(16).toString('hex')}`).digest('hex'), createdBy: 'system' };
+    const stmt = operatorStatement(DEFAULT_TENANT, op);
+    uow.raw(stmt.sql, stmt.params).audit('operator.create', `${op.id} role=r_manager sites=${op.siteIds.join(',')} auth=sso`, 'system');
+  }
+  await uow.commit();
+  console.log(`SSO autoconfigured against the mock IdP (${issuer}); invited alice@riverside.example`);
+}
+
+module.exports = {
+  writeQueue, app, api, store, dns, alerts, vendorFor, startReconciler, autoconfigureMockSso };
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  api.whenReady().then(() => {
+    startReconciler();
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Access control server on ${PORT} — mode: ${tt.demo ? 'DEMO' : 'LIVE'} — db: ${path.join(DATA_DIR, 'accessx.sqlite')}`);
+      if (process.env.MOCK_IDP === '1' && process.env.MOCK_IDP_AUTOCONFIGURE === '1') autoconfigureMockSso(PORT).catch(e => console.error('mock SSO autoconfigure failed:', e));
+    });
+  }).catch(error => { console.error('startup failed:', error); process.exit(1); });
+}

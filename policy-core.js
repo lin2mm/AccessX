@@ -1,6 +1,7 @@
+const auditCore = require('./audit-core');
 const BLANK = {
   sites: [], doorGroups: [], userGroups: [], users: [], schedules: [],
-  holidays: [], assignments: [], roles: [], auditLog: [],
+  holidays: [], assignments: [], roles: [], credentials: [],
 };
 
 const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
@@ -10,37 +11,145 @@ function minutes(hhmm) {
   return hour * 60 + (minute || 0);
 }
 
-function isHoliday(db, date, siteId) {
-  const iso = date.toISOString().slice(0, 10);
-  return db.holidays.some(h => h.date === iso && (!h.siteId || h.siteId === siteId));
+/* ------------------------------------------------------------------ */
+/* Time zones                                                           */
+/* Every schedule is evaluated in the *site's* local time. Instants     */
+/* (validFrom/validTo, credential expiry) stay absolute.                */
+/* ------------------------------------------------------------------ */
+const DEFAULT_TZ = 'UTC';
+const WEEKDAY = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+const formatters = new Map();
+
+const zoneValidity = new Map(); // building an Intl.DateTimeFormat costs ~20 µs; compile asks thousands of times (R20)
+
+function isValidTimeZone(timeZone) {
+  if (!timeZone || typeof timeZone !== 'string') return false;
+  let ok = zoneValidity.get(timeZone);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone });
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    if (zoneValidity.size < 1000) zoneValidity.set(timeZone, ok); // bounded: time zones come from user input
+  }
+  return ok;
 }
 
+function formatter(timeZone) {
+  if (!formatters.has(timeZone)) {
+    formatters.set(timeZone, new Intl.DateTimeFormat('en-US', {
+      timeZone, hourCycle: 'h23', weekday: 'short',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    }));
+  }
+  return formatters.get(timeZone);
+}
+
+/** Wall-clock parts of `date` in `timeZone`. */
+function localParts(date, timeZone = DEFAULT_TZ) {
+  const tz = isValidTimeZone(timeZone) ? timeZone : DEFAULT_TZ;
+  const parts = {};
+  for (const part of formatter(tz).formatToParts(date)) parts[part.type] = part.value;
+  const year = Number(parts.year);
+  const month = Number(parts.month);
+  const day = Number(parts.day);
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const pad = n => String(n).padStart(2, '0');
+  return {
+    timeZone: tz, year, month, day, hour, minute,
+    isoDay: WEEKDAY[parts.weekday],
+    isoDate: `${year}-${pad(month)}-${pad(day)}`,
+    minutes: hour * 60 + minute,
+    label: `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)} ${tz}`,
+  };
+}
+
+function offsetMs(instant, timeZone) {
+  const p = localParts(new Date(instant), timeZone);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - Math.floor(instant / 60000) * 60000;
+}
+
+/**
+ * Convert a site-local wall-clock time ("2026-09-28T21:00") to an instant.
+ * Same rule as RFC 5545 and Temporal's "compatible" disambiguation:
+ *  - non-existent (spring-forward gap) → shifted forward past the gap;
+ *  - ambiguous (fall-back, the hour happens twice) → the EARLIER instant, so
+ *    an end time never grants the repeated hour. `{ prefer: 'later' }` picks
+ *    the second occurrence (e.g. for a start time that should not open early).
+ */
+function zonedTimeToDate(localIso, timeZone = DEFAULT_TZ, { prefer = 'earlier' } = {}) {
+  const match = String(localIso).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!match) return new Date(NaN);
+  const [, y, mo, d, h, mi] = match.map(Number);
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  // Offsets a day either side cover every real-world transition (≤ 1 per day).
+  const candidates = [...new Set([guess - offsetMs(guess - 864e5, timeZone), guess - offsetMs(guess + 864e5, timeZone)])]
+    .filter(t => t + offsetMs(t, timeZone) === guess)
+    .sort((a, b) => a - b);
+  if (candidates.length) return new Date(prefer === 'later' ? candidates[candidates.length - 1] : candidates[0]);
+  // Gap: resolve with the offset in force before it (lands after the gap).
+  return new Date(guess - offsetMs(guess - 864e5, timeZone));
+}
+
+function siteTimeZone(db, siteId) {
+  const site = (db.sites || []).find(item => item.id === siteId);
+  if (site && isValidTimeZone(site.timezone)) return site.timezone;
+  const fallback = db.settings && db.settings.defaultTimezone;
+  return isValidTimeZone(fallback) ? fallback : DEFAULT_TZ;
+}
+
+/** Site that owns a lock (first door group wins). */
+function siteForLock(db, lockId) {
+  const doorGroup = (db.doorGroups || []).find(item => (item.lockIds || []).map(Number).includes(Number(lockId)));
+  if (!doorGroup) return null;
+  return (db.sites || []).find(item => item.id === doorGroup.siteId) || null;
+}
+
+function isHoliday(db, isoDate, siteId) {
+  return (db.holidays || []).some(h => h.date === isoDate && (!h.siteId || h.siteId === siteId));
+}
+
+const previousIsoDay = isoDay => (isoDay === 1 ? 7 : isoDay - 1);
+
 function scheduleAllows(db, schedule, date, siteId) {
-  if (!schedule) return { allowed: true, reason: 'no schedule (24/7)' };
+  const timeZone = siteTimeZone(db, siteId);
+  const local = localParts(date, timeZone);
+  const tzNote = `(${local.label})`;
+  if (!schedule) return { allowed: true, reason: 'no schedule (24/7)', localTime: local.label };
   if (schedule.validFrom && date < new Date(schedule.validFrom)) {
-    return { allowed: false, reason: `schedule not yet valid (from ${schedule.validFrom})` };
+    return { allowed: false, reason: `schedule not yet valid (from ${schedule.validFrom})`, localTime: local.label };
   }
   if (schedule.validTo && date > new Date(schedule.validTo)) {
-    return { allowed: false, reason: `schedule expired (${schedule.validTo})` };
+    return { allowed: false, reason: `schedule expired (${schedule.validTo})`, localTime: local.label };
   }
-  if (isHoliday(db, date, siteId) && schedule.denyOnHolidays) {
-    return { allowed: false, reason: 'holiday — access denied by schedule' };
+  if (schedule.denyOnHolidays && isHoliday(db, local.isoDate, siteId)) {
+    return { allowed: false, reason: `holiday — access denied by schedule ${tzNote}`, localTime: local.label };
   }
 
-  const isoDay = ((date.getUTCDay() + 6) % 7) + 1;
-  const nowMin = date.getUTCHours() * 60 + date.getUTCMinutes();
+  const nowMin = local.minutes;
   for (const window of schedule.windows || []) {
-    if (!window.days.includes(isoDay)) continue;
+    const days = window.days || [];
     const start = minutes(window.from);
     const end = minutes(window.to);
-    if (start <= end && nowMin >= start && nowMin <= end) {
-      return { allowed: true, reason: `within ${window.from}-${window.to}` };
+    if (start <= end) {
+      if (days.includes(local.isoDay) && nowMin >= start && nowMin <= end) {
+        return { allowed: true, reason: `within ${window.from}-${window.to} ${tzNote}`, localTime: local.label };
+      }
+      continue;
     }
-    if (start > end && (nowMin >= start || nowMin <= end)) {
-      return { allowed: true, reason: `within overnight ${window.from}-${window.to}` };
+    // Overnight window (e.g. Fri 22:00-06:00): the part after midnight
+    // belongs to the day the window *started* on.
+    if (nowMin >= start && days.includes(local.isoDay)) {
+      return { allowed: true, reason: `within overnight ${window.from}-${window.to} ${tzNote}`, localTime: local.label };
+    }
+    if (nowMin <= end && days.includes(previousIsoDay(local.isoDay))) {
+      return { allowed: true, reason: `within overnight ${window.from}-${window.to} (started previous day) ${tzNote}`, localTime: local.label };
     }
   }
-  return { allowed: false, reason: 'outside permitted hours' };
+  return { allowed: false, reason: `outside permitted hours ${tzNote}`, localTime: local.label };
 }
 
 function evaluate(db, userId, lockId, when = new Date()) {
@@ -98,9 +207,20 @@ function doorsForUser(db, userId, when = new Date()) {
   return result;
 }
 
+/**
+ * Queue an audit entry. Adapters (acl.save / worker saveAcl) seal the
+ * queue into the append-only hash chain BEFORE persisting state.
+ */
 function audit(db, action, detail, actor = 'system') {
-  db.auditLog.unshift({ id: uid('log'), ts: new Date().toISOString(), actor, action, detail });
-  db.auditLog = db.auditLog.slice(0, 2000);
+  if (!Array.isArray(db.auditPending)) {
+    Object.defineProperty(db, 'auditPending', { value: [], enumerable: false, writable: true, configurable: true });
+  }
+  const entry = auditCore.pending(action, detail, actor);
+  db.auditPending.push(entry);
+  return entry;
 }
 
-module.exports = { BLANK, uid, scheduleAllows, evaluate, doorsForUser, audit };
+module.exports = {
+  BLANK, uid, scheduleAllows, evaluate, doorsForUser, audit,
+  DEFAULT_TZ, isValidTimeZone, localParts, offsetMs, zonedTimeToDate, siteTimeZone, siteForLock,
+};

@@ -57,7 +57,7 @@ main{padding:16px;max-width:1180px;margin:0 auto}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--txt3);
   margin-bottom:12px;font-weight:700}
 .grid{display:grid;gap:10px}
-@media(min-width:720px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+@media(min-width:720px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}.grid.c4{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:700px){
   .hbar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 0}
   #admin-form{flex:1 0 100%}
@@ -78,6 +78,8 @@ button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:va
 .btn:hover{background:var(--action-hover)}
 .btn2{background:transparent;color:var(--action);border-color:var(--action)}
 .btn2:hover{background:var(--db800)}
+a.btn2{text-decoration:none;display:inline-block}
+[hidden]{display:none!important}
 .btn.sm{padding:6px 12px;font-size:12px}
 button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .bat{font-weight:700;font-size:12px}
@@ -134,6 +136,12 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 .sugg button{background:var(--db800);border:1px solid var(--line);color:var(--txt2);
   font-size:11px;padding:5px 10px;font-weight:500}
 .sugg button:hover{border-color:var(--coral);color:var(--coral)}
+.lv-lock{background:var(--green7);color:#C1F2D6}.lv-synced{background:#5c2d00;color:#FFCD88}.lv-cloud{background:#4a0f1a;color:var(--red3)}
+details summary{cursor:pointer;color:var(--txt2);font-size:11.5px}
+.code{font:700 22px/1 ui-monospace,Menlo,monospace;letter-spacing:4px;color:var(--bold-green)}
+.checks label{display:inline-flex;align-items:center;gap:6px;margin:6px 16px 6px 0;text-transform:none;letter-spacing:0;font-size:13px;color:var(--txt)}
+.checks input{width:auto}
+.checks label.off{color:var(--txt3)}
 </style>
 </head>
 <body>
@@ -145,10 +153,13 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <div class="sub">Siemens iX theme · <span class="pill" id="mode">…</span></div>
     </div>
     <form id="admin-form" autocomplete="off">
-      <input id="admin-token" type="password" aria-label="Admin token" autocomplete="current-password" placeholder="Admin token">
-      <button class="btn2 sm" type="submit">Unlock</button>
-      <button class="btn2 sm" id="admin-logout" type="button" hidden>Lock</button>
+      <input id="admin-token" type="password" aria-label="Operator token" autocomplete="current-password" placeholder="Operator token">
+      <button class="btn2 sm" id="admin-submit" type="submit">Sign in</button>
+      <a class="btn2 sm" id="sso-btn" href="/api/auth/sso/start" hidden>Sign in with SSO</a>
+      <a class="btn2 sm" id="signup-link" href="/signup" hidden>Create an account</a>
+      <button class="btn2 sm" id="admin-logout" type="button" hidden>Sign out</button>
       <span id="admin-status" aria-live="polite">Read-only</span>
+      <span id="lang-slot"></span>
     </form>
   </div>
 </header>
@@ -156,8 +167,27 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
 <main>
   <!-- DOORS -->
   <section id="v-doors" class="view on">
+    <div class="card" id="billing-banner" hidden></div>
+    <div class="card" id="setup-card" hidden>
+      <h2>Get started</h2>
+      <div id="setup-list" class="meta"></div>
+      <div id="setup-office" hidden style="margin-top:12px">
+        <h3 style="font-size:15px;margin:0 0 4px">Office setup</h3>
+        <div class="hint">Builds sites from your TTLock groups, door groups from the door names (entrances, offices, facilities; server/comms/IT rooms become <b>sensitive</b>), and Staff / Cleaners rules. You review it first; nothing changes until you apply. Doors already in a group are left alone.</div>
+        <div class="grid c3" style="align-items:end">
+          <div><label for="so-tz">Offices' time zone</label><input id="so-tz" maxlength="60" placeholder="Europe/London"></div>
+          <div class="grid c2" style="gap:8px"><div><label for="so-of">Office hours from</label><input id="so-of" type="time" value="07:00" step="3600"></div><div><label for="so-ot">to</label><input id="so-ot" type="time" value="19:00" step="3600"></div></div>
+          <div class="grid c2" style="gap:8px"><div><label for="so-cf">Cleaning from</label><input id="so-cf" type="time" value="18:00" step="3600"></div><div><label for="so-ct">to</label><input id="so-ct" type="time" value="22:00" step="3600"></div></div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px"><button class="btn2" type="button" id="so-preview">Preview</button><button class="btn" type="button" id="so-apply" disabled>Apply</button></div>
+        <div id="so-res" style="margin-top:10px"></div>
+      </div>
+    </div>
     <div class="card"><h2>Fleet status</h2><div class="grid c3" id="kpis"></div></div>
-    <div class="card"><h2>Doors</h2><div class="grid c2" id="doors"><div class="empty">Loading…</div></div></div>
+    <div class="card"><h2>Doors</h2>
+      <div class="hint">A remote unlock without a person bypasses every rule, so it needs a reason. It is recorded in the audit trail.</div>
+      <input id="u-reason" maxlength="200" placeholder="Reason for remote unlock, e.g. &quot;courier delivery&quot;" style="margin-bottom:12px">
+      <div class="grid c2" id="doors"><div class="empty">Loading…</div></div></div>
   </section>
 
   <!-- ACCESS -->
@@ -167,11 +197,157 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <div class="hint">Ask the policy engine whether a person may open a door at a given moment — and see the exact rule path behind the answer.</div>
       <label>Person</label><select id="e-user"></select>
       <label>Door</label><select id="e-door"></select>
-      <label>Date &amp; time (UTC)</label><input type="datetime-local" id="e-when">
-      <div style="margin-top:14px"><button class="btn" onclick="evaluate()">Evaluate access</button></div>
+      <label>Date &amp; time at the door</label><input type="datetime-local" id="e-when">
+      <div class="meta tz-note" id="e-tz"></div>
+      <div style="margin-top:14px"><button class="btn" type="button" id="e-go">Evaluate access</button></div>
       <div id="e-res"></div>
     </div>
-    <div class="card"><h2>Access rules</h2><div id="rules"></div></div>
+    <div class="card">
+      <h2>Enforcement map</h2>
+      <div class="hint">What each lock will <b>actually</b> enforce. <span class="tag g">lock</span> works offline ·
+        <span class="tag o">synced</span> needs the cloud to push changes in time ·
+        <span class="tag r">cloud</span> only remote unlocks are checked — codes/cards would bypass the rule.</div>
+      <div class="grid c3" id="cm-kpis"></div>
+      <div id="cm-notices" style="margin-top:12px"></div>
+      <div id="cm-rules" style="margin-top:12px;overflow-x:auto"></div>
+      <div id="cm-locks" style="margin-top:12px;overflow-x:auto"></div>
+    </div>
+    <div class="card"><h2>Access rules</h2><div id="rules"></div>
+      <form id="rule-add" class="grid c4 rm" hidden style="align-items:end;margin-top:12px">
+        <label>People group<select id="ra-ug" required></select></label>
+        <label>Can open<select id="ra-dg" required></select></label>
+        <label>When<select id="ra-sch"></select></label>
+        <div><button class="btn sm" type="submit">Add rule</button></div>
+      </form>
+      <div id="rules-msg" class="meta" style="margin-top:8px"></div>
+    </div>
+    <div class="card" id="dg-card">
+      <h2>Door groups</h2>
+      <div class="hint">A door group is a set of doors people get together. Moving a door adds it to the new group first, then takes it out of the old one, so nobody loses access in between. Changes that give people a <b>sensitive</b> door, or remove that protection, wait for a second operator.</div>
+      <div id="dgroups" style="overflow-x:auto"></div>
+      <form id="dg-add" class="grid c4 rm" hidden style="align-items:end;margin-top:12px">
+        <label>New door group<input id="dg-name" required maxlength="100" placeholder="e.g. Level 3"></label>
+        <label>Site<select id="dg-site" required></select></label>
+        <div class="checks"><label><input type="checkbox" id="dg-sens"> Sensitive (four-eyes)</label></div>
+        <div><button class="btn sm" type="submit">Create</button></div>
+      </form>
+      <div id="dg-msg" class="meta" style="margin-top:8px"></div>
+    </div>
+    <div class="card" id="hol-card">
+      <h2>Holidays</h2>
+      <div class="hint">Schedules marked “no holidays” stay closed on these days. Removing a holiday re-opens doors that day, so it waits for a second operator.</div>
+      <div id="holidays"></div>
+      <form id="hol-add" class="grid c4 rm" hidden style="align-items:end;margin-top:12px">
+        <label>Date<input id="hol-date" type="date" required></label>
+        <label>Name<input id="hol-name" maxlength="100" placeholder="e.g. Christmas Day"></label>
+        <label>Where<select id="hol-site"></select></label>
+        <div><button class="btn sm" type="submit">Add holiday</button></div>
+      </form>
+      <div id="hol-msg" class="meta" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h2>Issue passcode</h2>
+      <div class="hint">Codes go through the same policy engine as remote unlocks. The system tells you honestly whether the lock itself can enforce the rule.</div>
+      <label>Person</label><select id="p-user"></select>
+      <label>Door</label><select id="p-door"></select>
+      <div class="grid c2" style="gap:8px">
+        <div><label for="p-start">Valid from — first day they will use it (optional, default now)</label><input type="date" id="p-start"></div>
+        <div><label for="p-start-h">From (door time)</label><select id="p-start-h"></select></div>
+      </div>
+      <div class="meta">TTLock voids a code that is not used within 24 h of its start — so start it on the day they first come in.</div>
+      <label>Valid until — end of that day at the door (optional, default 7 days)</label><input type="date" id="p-end">
+      <div class="meta tz-note" id="p-tz"></div>
+      <div style="margin-top:14px"><button class="btn" type="button" id="p-issue">Issue passcode</button></div>
+      <div id="p-res"></div>
+    </div>
+  </section>
+
+  <!-- VISITORS -->
+  <section id="v-visitors" class="view">
+    <div class="card" id="walk-card" hidden>
+      <h2>Walk-ins waiting</h2>
+      <div class="hint">Signed in at a kiosk without an invitation. The kiosk never gives a door code: <b>Issue code</b> fills in the form below; <b>Dismiss</b> if they have left or were turned away.</div>
+      <div id="walk-list" style="overflow-x:auto"></div>
+    </div>
+    <div class="card">
+      <h2>Register a visitor</h2>
+      <div class="hint">The visitor gets a code for each door, valid only for the visit — the lock itself ends it, even offline. Codes run on whole hours (a TTLock rule). Sensitive doors are not offered: those need a rule and a second operator's approval.</div>
+      <form id="vi-form" autocomplete="off">
+        <div class="grid c3">
+          <div><label for="vi-name">Visitor name</label><input id="vi-name" required maxlength="100"></div>
+          <div><label for="vi-email">Email (optional)</label><input id="vi-email" type="email" maxlength="200"></div>
+          <div><label for="vi-phone">Mobile (optional)</label><input id="vi-phone" type="tel" maxlength="30" placeholder="+44 7700 900123" autocomplete="off"></div>
+          <div><label for="vi-company">Company (optional)</label><input id="vi-company" maxlength="100"></div>
+          <div><label for="vi-host">Host</label><select id="vi-host" required></select></div>
+          <div><label for="vi-date">Date at the door</label><input id="vi-date" type="date" required></div>
+          <div class="grid c2" style="gap:8px">
+            <div><label for="vi-from">From</label><select id="vi-from"></select></div>
+            <div><label for="vi-until">Until</label><select id="vi-until"></select></div>
+          </div>
+        </div>
+        <label>Doors</label>
+        <div id="vi-doors" class="checks"></div>
+        <div class="meta tz-note" id="vi-tz"></div>
+        <div class="checks"><label id="vi-invite-l" title="The visitor enters their own name and arrival time; the code is sent only to the email or mobile above"><input type="checkbox" id="vi-invite"> Send an invitation instead — the visitor registers themselves</label></div>
+        <div class="checks" id="vi-direct"><label id="vi-send-l"><input type="checkbox" id="vi-send"> Email the code to the visitor</label><label id="vi-sms-l"><input type="checkbox" id="vi-sms"> Text the code (SMS)</label></div>
+        <div id="vi-bulk-w" hidden><label for="vi-bulk">Several visitors? One email address per line (up to 100) — each gets their own link; the address above is ignored</label><textarea id="vi-bulk" rows="3" style="width:100%" maxlength="20000" placeholder="ana@partner.example&#10;li@partner.example"></textarea></div>
+        <div class="meta" id="vi-invite-note" hidden>Give one address — email <i>or</i> mobile. The link can be forwarded, but the code is only ever sent to that address. At a site with sensitive doors, registrations wait for your approval below.</div>
+        <div style="margin-top:10px"><button class="btn" type="submit" id="vi-submit">Register &amp; create code</button></div>
+      </form>
+      <div id="vi-res"></div>
+    </div>
+    <div class="card" id="inv-card" hidden>
+      <h2>Invitations</h2>
+      <div class="hint">Links expire at the end of the invited window. Each link works once; approving sends the code to the invited address — nobody sees it here.</div>
+      <div id="inv-list" style="overflow-x:auto"></div>
+    </div>
+    <div class="card">
+      <h2>Visitors</h2>
+      <div class="hint">Checking out ends the codes now (doors with a gateway). A door without a gateway keeps accepting the code until the end time unless it is removed at the lock. Visitor details are erased automatically after the retention period.</div>
+      <label for="vis-range">Show</label>
+      <select id="vis-range" style="max-width:260px"><option value="current">Today &amp; upcoming</option><option value="recent">Last 30 days</option><option value="all">All</option></select>
+      <a class="btn2 sm" href="/visitors-print" target="_blank" rel="noopener" style="margin-left:8px">Print who is on site</a>
+      <div id="vis-list" style="margin-top:10px;overflow-x:auto"></div>
+    </div>
+    <div class="card" id="kiosk-card" hidden>
+      <h2>Kiosks</h2>
+      <div class="hint">A tablet at reception where visitors sign in (with their invitation), register as a walk-in, or sign out; visitors can also scan its code with their own phone. A kiosk can never show a door code or the visitor list. Lock the tablet to the page (iPad: Guided Access; Android: screen pinning).</div>
+      <div id="kiosk-list" style="overflow-x:auto"></div>
+      <form id="kiosk-form" class="grid c3" style="align-items:end;margin-top:10px">
+        <div><label for="kiosk-site">Site</label><select id="kiosk-site" required></select></div>
+        <div><label for="kiosk-name">Name (optional)</label><input id="kiosk-name" maxlength="60" placeholder="Main reception"></div>
+        <div><button class="btn2 sm" type="submit">Add kiosk</button></div>
+      </form>
+      <div id="kiosk-res"></div>
+    </div>
+    <div class="card" id="cal-card" hidden>
+      <h2>Calendar invitations</h2>
+      <div class="hint">Hosts add the address below as a guest to a meeting in Google Calendar or Outlook. They then get an email asking which outside guests should get a visitor invitation: nothing is sent without that click, and each guest still registers before a code is sent to them. Only the doors chosen here are used, never sensitive doors.</div>
+      <div id="cal-state"></div>
+      <form id="cal-form" hidden style="margin-top:10px">
+        <div id="cal-sets"></div>
+        <div class="checks" style="margin-top:8px"><label><input type="checkbox" id="cal-on" checked> Accept calendar invitations</label></div>
+        <div style="margin-top:8px"><button class="btn2 sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="cal-rotate">New address</button></div>
+      </form>
+      <div id="cal-res"></div>
+      <div id="cal-drafts" style="overflow-x:auto;margin-top:10px"></div>
+    </div>
+    <div class="card" id="vis-settings" hidden>
+      <h2>Visitor settings</h2>
+      <form id="vs-form" class="grid c3" style="align-items:end">
+        <div><label for="vs-max">Longest visit (hours)</label><input id="vs-max" type="number" min="1" max="168" required></div>
+        <div><label for="vs-ret">Keep visitor details (days after the visit)</label><input id="vs-ret" type="number" min="1" max="365" required></div>
+        <div class="checks"><label><input type="checkbox" id="vs-notify"> Email the host when their visitor arrives</label></div>
+        <div style="grid-column:1/-1"><label for="vs-notice">Visitor notice (shown at the kiosk; visitors must accept it). House rules, safety, how you use their details. Leave empty for none.</label><textarea id="vs-notice" rows="4" maxlength="2000" style="width:100%"></textarea></div>
+        <div><button class="btn2 sm" type="submit">Save</button></div>
+      </form>
+      <div id="vs-arrivals" class="meta" style="margin-top:6px"></div>
+      <div id="vs-sms" style="margin-top:10px" hidden>
+        <div class="meta" id="vs-sms-usage"></div>
+        <form id="vs-sms-form" style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap"><input id="vs-sms-to" type="tel" placeholder="+44 7700 900123" maxlength="30" style="max-width:200px" aria-label="Test phone number"><button class="btn2 sm" type="submit">Send test text</button></form>
+      </div>
+      <div id="vs-msg" class="meta" style="margin-top:6px"></div>
+    </div>
   </section>
 
   <!-- AI -->
@@ -181,16 +357,16 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
       <div class="hint">Natural-language control and diagnostics. Type an instruction — the copilot maps it to a policy action and explains what it will do <b>before</b> executing.</div>
       <div class="ai">
         <div id="chat"></div>
-        <div class="sugg">
-          <button onclick="ask(this.textContent)">Why was Sarah denied at 9pm?</button>
-          <button onclick="ask(this.textContent)">Which doors need a battery visit?</button>
-          <button onclick="ask(this.textContent)">Give the cleaners Friday evening access</button>
-          <button onclick="ask(this.textContent)">Anything unusual this week?</button>
-          <button onclick="ask(this.textContent)">Who can open the Server Room?</button>
+        <div class="sugg" id="ai-sugg">
+          <button type="button">Why was Sarah denied at 9pm?</button>
+          <button type="button">Which doors need a battery visit?</button>
+          <button type="button">Give the cleaners Friday evening access</button>
+          <button type="button">Anything unusual this week?</button>
+          <button type="button">Who can open the Server Room?</button>
         </div>
         <div class="q">
-          <input id="ai-in" placeholder="Ask or instruct…" onkeydown="if(event.key==='Enter')ask()">
-          <button class="btn" onclick="ask()">Send</button>
+          <input id="ai-in" placeholder="Ask or instruct…">
+          <button class="btn" type="button" id="ai-send">Send</button>
         </div>
       </div>
     </div>
@@ -199,18 +375,175 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
   <!-- PEOPLE -->
   <section id="v-people" class="view">
     <div class="card"><h2>People</h2><div id="people"></div></div>
-    <div class="card"><h2>User groups</h2><div id="ugroups"></div></div>
-    <div class="card"><h2>Schedules</h2><div id="scheds"></div></div>
+    <div class="card" id="rv-card" hidden>
+      <h2>Access review</h2>
+      <div class="hint">Every few months, the people who manage each site confirm who still needs its doors — and owners confirm the administrators. Anyone not confirmed can be removed in one step after the due date. The record goes into the evidence pack.</div>
+      <div id="rv"></div>
+    </div>
+    <div class="card"><h2>User groups</h2><div id="ugroups"></div>
+      <form id="ug-add" class="grid c3 rm" hidden style="align-items:end;margin-top:12px">
+        <label>New people group<input id="ug-name" required maxlength="100" placeholder="e.g. IT"></label>
+        <label>Site<select id="ug-site"></select></label>
+        <div><button class="btn sm" type="submit">Create</button></div>
+      </form>
+      <div id="ug-msg" class="meta" style="margin-top:8px"></div>
+    </div>
+    <div class="card"><h2>Schedules</h2><div id="scheds"></div>
+      <form id="sch-add" hidden style="margin-top:12px">
+        <div class="grid c4" style="align-items:end">
+          <label>New schedule<input id="sch-name" required maxlength="100" placeholder="e.g. Late shift"></label>
+          <label>From<input id="sch-from" type="time" value="07:00" required></label>
+          <label>To<input id="sch-to" type="time" value="19:00" required></label>
+          <div class="checks"><label><input type="checkbox" id="sch-hol" checked> Closed on holidays</label></div>
+        </div>
+        <div id="sch-days" class="checks" style="margin:8px 0"></div>
+        <button class="btn sm" type="submit">Create schedule</button>
+      </form>
+      <div id="sch-msg" class="meta" style="margin-top:8px"></div>
+    </div>
+    <div class="card" id="billing-card" hidden>
+      <h2>Billing</h2>
+      <div id="billing-state"></div>
+      <div style="margin-top:10px"><button class="btn sm" type="button" id="bill-start" hidden>Start subscription</button>
+        <button class="btn2 sm" type="button" id="bill-manage" hidden>Manage billing (card, invoices)</button></div>
+      <div class="hint" style="margin-top:8px">Charged per door per day (a door kept all month = one door-month) and per text-message segment. Doors keep opening whatever happens to an invoice: 15 days unpaid only pauses <i>adding</i> people, visitors, codes and rules. Removing access always works.</div>
+      <div id="bill-msg" class="meta" style="margin-top:6px"></div>
+    </div>
+    <div class="card" id="admin-card" hidden>
+      <h2>Operators &amp; sign-in</h2>
+      <div id="ops"></div>
+      <form id="invite-form" class="grid c3" style="margin-top:12px;align-items:end">
+        <label>Name<input id="i-name" required maxlength="100" autocomplete="off"></label>
+        <label>Work email<input id="i-email" type="email" required maxlength="254" autocomplete="off"></label>
+        <label>Role<select id="i-role">
+          <option value="r_manager">Site Manager</option><option value="r_installer">Installer</option>
+          <option value="r_view">Auditor</option><option value="r_front_desk">Front Desk (visitors only)</option><option value="r_owner">Account Owner</option></select></label>
+        <label>Sites<select id="i-site"></select></label>
+        <div><button class="btn sm" type="submit">Invite (single sign-on)</button></div>
+        <div id="invite-msg" class="meta"></div>
+      </form>
+      <div id="dir-box" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Directory sync (SCIM 2.0)</b>
+        <div id="dir-state" class="meta" style="margin:4px 0 8px"></div>
+        <div id="dir-groups"></div>
+        <button class="btn2 sm" type="button" id="scim-token-btn" style="margin-top:8px">Create SCIM token</button>
+        <div id="scim-token-out" class="meta" style="margin-top:6px"></div>
+      </div>
+      <div id="sso-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Single sign-on (OpenID Connect)</b>
+        <div id="sso-state" class="meta" style="margin:4px 0 8px"></div>
+        <form id="sso-form" class="grid c3" style="align-items:end">
+          <label>Issuer URL<input id="s-issuer" required placeholder="https://login.microsoftonline.com/&lt;tenant&gt;/v2.0" autocomplete="off"></label>
+          <label>Client ID<input id="s-client" required autocomplete="off"></label>
+          <label>Client secret<input id="s-secret" type="password" placeholder="leave empty to keep" autocomplete="new-password"></label>
+          <label>Email domains<input id="s-domains" placeholder="example.com, example.org" autocomplete="off"></label>
+          <div><button class="btn sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="sso-remove">Remove</button></div>
+          <div id="sso-msg" class="meta"></div>
+        </form>
+        <div id="sso-domains" style="margin-top:10px"></div>
+        <div id="sso-enforce-box" hidden style="margin-top:10px">
+          <div class="hint">Require single sign-on: people can only sign in through your identity provider, so disabling them there locks them out here too. Directory-sync tokens and break-glass owners keep working; every break-glass sign-in is recorded.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+            <button class="btn2 sm" type="button" id="sso-enforce">Require single sign-on</button>
+            <button class="btn2 sm" type="button" id="glass-create">Create break-glass owner</button>
+            <span id="sso-enforce-msg" class="meta"></span>
+          </div>
+        </div>
+      </div>
+      <div id="vendor-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <b>Lock vendor account</b>
+        <div id="vendor-state" class="meta" style="margin:4px 0 8px"></div>
+        <form id="vendor-form" class="grid c3" style="align-items:end">
+          <label>Vendor<select id="v-kind"><option value="ttlock">TTLock</option><option value="nuki">Nuki</option></select></label>
+          <label class="v-ttlock">Region<select id="v-region"><option value="eu">EU (euapi.ttlock.com)</option><option value="cn">China (api.sciener.com)</option></select></label>
+          <label class="v-ttlock">TTLock account<input id="v-user" maxlength="100" autocomplete="off" placeholder="a dedicated admin account, not a personal one"></label>
+          <label class="v-ttlock">Password<input id="v-pass" type="password" maxlength="200" autocomplete="new-password" placeholder="used once, never stored"></label>
+          <label class="v-ttlock">Own app client ID (optional)<input id="v-cid" autocomplete="off" placeholder="leave empty to use the platform app"></label>
+          <label class="v-ttlock">Own app client secret<input id="v-csec" type="password" autocomplete="new-password"></label>
+          <label class="v-nuki" hidden>Nuki Web API token<input id="v-nuki-token" type="password" maxlength="500" autocomplete="new-password" placeholder="Nuki Web → API → Generate API token"></label>
+          <div><button class="btn sm" type="submit">Connect</button> <button class="btn2 sm" type="button" id="vendor-remove">Disconnect</button></div>
+          <div id="vendor-msg" class="meta"></div>
+        </form>
+        <div id="vendor-limits" class="meta" hidden style="margin-top:8px"></div>
+      </div>
+      <div id="alerts-box" hidden style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <h3 style="margin:0">Alerts to Slack / Teams / email</h3>
+        <div class="hint">Approval requests, codes still on offline locks past the removal target, failed revocations, break-glass sign-ins, a TTLock account that must be reconnected, lock alarms, batteries running low, a TTLock callback that went silent and billing notices (payment failed, adding paused, closure). Undelivered alerts are retried for about a day. The webhook URL is stored encrypted and never shown again. Teams: channel ••• → Workflows → “Post to a channel when a webhook request is received”.</div>
+        <div id="alerts-state" class="meta" style="margin:4px 0 8px"></div>
+        <form id="alerts-form" class="grid c3" style="align-items:end">
+          <label>Webhook URL<input id="al-url" type="password" placeholder="leave empty to keep" autocomplete="off"></label>
+          <label>Format<select id="al-format"><option value="">auto</option><option value="slack">Slack</option><option value="teams">Teams (Workflows)</option><option value="json">JSON (SIEM / ticketing)</option></select></label>
+          <label>Removal target (hours)<input id="al-sla" type="number" min="1" max="720" step="1"></label>
+          <label id="al-emails-wrap" style="grid-column:1/-1">Email recipients (up to 10, comma-separated)<input id="al-emails" type="text" placeholder="security@example.com, it@example.com" autocomplete="off"></label>
+          <div id="al-events" style="grid-column:1/-1"></div>
+          <fieldset id="al-digest" style="grid-column:1/-1;border:1px solid var(--line,#ddd);border-radius:8px;padding:8px 10px">
+            <legend class="meta">Daily summary: send these once a day instead of one by one</legend>
+            <div id="al-dg-events"></div>
+            <label style="display:inline-block;margin-top:6px">at <select id="al-dg-hour"></select></label>
+            <label style="display:inline-block">time zone <input id="al-dg-tz" maxlength="64" style="width:180px"></label>
+            <div class="meta" id="al-dg-state"></div>
+          </fieldset>
+          <div><button class="btn sm" type="submit">Save</button> <button class="btn2 sm" type="button" id="al-test">Send test</button> <button class="btn2 sm" type="button" id="al-remove">Remove webhook</button></div>
+          <div id="alerts-msg" class="meta"></div>
+        </form>
+      </div>
+    </div>
   </section>
 
   <!-- ACTIVITY -->
   <section id="v-log" class="view">
+    <div class="card" id="appr-card" hidden>
+      <h2>Waiting for a second person</h2>
+      <div class="hint">New access to a sensitive door needs approval by a different operator with the same permission. Approved requests are re-checked against current rules before they run; requests expire after 72 hours.</div>
+      <div id="appr-list" style="overflow-x:auto"></div>
+      <div id="appr-ready"></div>
+      <div id="appr-msg" class="meta" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <h2>Time to revoke · last 30 days</h2>
+      <div class="grid c3" id="ttr-kpis"></div>
+      <div id="ttr-open" style="margin-top:10px"></div>
+    </div>
     <div class="card">
       <h2>Door audit trail</h2>
-      <label>Door</label><select id="r-door" onchange="loadRecords()"></select>
+      <label>Door</label><select id="r-door"></select>
       <div style="overflow-x:auto;margin-top:10px"><table id="recs"></table></div>
     </div>
-    <div class="card"><h2>System activity</h2><div style="overflow-x:auto"><table id="alog"></table></div></div>
+    <div class="card">
+      <h2>Credentials on locks</h2>
+      <div class="hint">Every code the system has issued. Anything current policy would no longer issue is flagged for revocation.</div>
+      <div style="overflow-x:auto"><table id="creds"></table></div>
+    </div>
+    <div class="card" id="sw-card" hidden>
+      <h2>Passcode sweep</h2>
+      <div class="hint">Reads the codes each lock holds and compares them with AccessX: codes someone set in the TTLock app or an old system, codes AccessX revoked that are still there, and codes AccessX issued that the lock lost. Code digits are never shown. It sees what the lock vendor's cloud knows — a code typed in at the keypad as the admin, or one deleted over Bluetooth only, does not appear.</div>
+      <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+        <div><label for="sw-site">Doors</label><select id="sw-site"></select></div>
+        <button class="btn2" type="button" id="sw-run">Check the codes on the locks</button>
+      </div>
+      <div id="sw-res" style="margin-top:10px"></div>
+      <div id="sw-past" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <h2>System activity</h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+        <button class="btn2 sm" type="button" id="a-verify">Verify audit chain</button>
+        <span id="a-verify-res" class="meta"></span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn2 sm" type="button" id="a-anchor">Anchor now</button>
+        <button class="btn2 sm" type="button" id="a-export">Export (JSON)</button>
+        <a class="btn2 sm" id="a-evidence" href="evidence.html" target="_blank" rel="noopener">Evidence pack</a>
+        <span id="a-anchor-res" class="meta"></span>
+      </div>
+      <div class="hint" id="a-anchor-state"></div>
+      <div style="overflow-x:auto"><table id="alog"></table></div>
+    </div>
+    <div class="card" id="rt-card" hidden>
+      <h2>Data retention</h2>
+      <div class="hint">How long AccessX keeps each kind of record, and where to change it. Useful for your privacy notice and for a customer's security questionnaire.</div>
+      <div id="rt" style="overflow-x:auto"></div>
+    </div>
   </section>
 </main>
 
@@ -218,146 +551,15 @@ label{display:block;font-size:11px;color:var(--txt3);margin:10px 0 4px;
   <button class="on" data-v="doors"><span class="ic">▣</span>Doors</button>
   <button data-v="access"><span class="ic">⛨</span>Access</button>
   <button data-v="ai"><span class="ic">✦</span>Copilot</button>
+  <button data-v="visitors"><span class="ic">✚</span>Visitors</button>
   <button data-v="people"><span class="ic">◉</span>People</button>
   <button data-v="log"><span class="ic">≡</span>Activity</button>
 </nav>
 
-<script>
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let adminToken='';
-const api=async(u,o={})=>{
-  const headers=new Headers(o.headers||{});
-  if(adminToken)headers.set('Authorization',`Bearer ${adminToken}`);
-  const r=await fetch(u,{...o,headers});
-  return r.json();
-};
-let DOORS=[],USERS=[];
-
-$('#admin-form').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const candidate=$('#admin-token').value;
-  const r=await fetch('/api/auth/verify',{method:'POST',headers:{Authorization:`Bearer ${candidate}`}});
-  const result=await r.json();
-  if(r.ok){
-    adminToken=candidate;$('#admin-token').value='';
-    $('#admin-status').textContent='Admin unlocked for this tab';
-    $('#admin-logout').hidden=false;
-    await init();
-  }else{
-    $('#admin-status').textContent=result.error||'Token rejected';
-  }
-});
-$('#admin-logout').addEventListener('click',()=>{
-  adminToken='';$('#admin-status').textContent='Read-only';$('#admin-logout').hidden=true;
-});
-
-$$('nav button').forEach(b=>b.onclick=()=>{
-  $$('nav button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
-  $$('.view').forEach(v=>v.classList.remove('on'));$('#v-'+b.dataset.v).classList.add('on');
-});
-const batClass=n=>n>50?'hi':n>25?'mid':'lo';
-
-async function init(){
-  const auth=await fetch('/api/auth').then(r=>r.json());
-  if(!auth.openReads&&!adminToken){
-    $('#mode').textContent=auth.tokenConfigured?'Admin required':'Setup required';
-    $('#admin-status').textContent=auth.tokenConfigured?'Token required for live data':'Set ADMIN_TOKEN on server';
-    return;
-  }
-  const st=await api('/api/status');
-  $('#mode').textContent=st.mode.startsWith('DEMO')?'Demo data':'Live';
-  const now=new Date();now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
-  $('#e-when').value=now.toISOString().slice(0,16);
-  await loadDoors();await loadHealth();await loadPeople();await loadRules();await loadAudit();
-  addBubble('Copilot ready. I can explain access decisions, plan service visits, spot anomalies and draft rule changes for your approval.',false);
-}
-async function loadDoors(){
-  const d=await api('/api/doors');DOORS=d.doors||[];
-  $('#doors').innerHTML=DOORS.map(l=>{
-    const cls=!l.hasGateway?'off':(l.electricQuantity<=25?'warn':'');
-    return `<div class="door ${cls}">
-      <div><b>${l.lockAlias}</b>
-        <div class="meta">${l.site||'—'} ${l.doorGroup?'· '+l.doorGroup:''}</div>
-        <div class="meta"><span class="bat ${batClass(l.electricQuantity)}">${l.electricQuantity}% battery</span>
-        ${l.hasGateway?'<span class="tag g" style="margin-left:6px">online</span>':'<span class="tag r" style="margin-left:6px">no gateway</span>'}</div>
-      </div><button class="btn sm" onclick="unlock(${l.lockId},this)">Unlock</button></div>`}).join('');
-  const opts=DOORS.map(l=>`<option value="${l.lockId}">${l.lockAlias}</option>`).join('');
-  $('#e-door').innerHTML=opts;$('#r-door').innerHTML=opts;loadRecords();
-}
-async function loadHealth(){
-  const h=await api('/api/health');
-  $('#kpis').innerHTML=`
-    <div class="kpi"><div class="n">${h.total}</div><div class="l">Doors</div></div>
-    <div class="kpi"><div class="n ${h.lowBattery.length?'warn':'ok'}">${h.lowBattery.length}</div><div class="l">Low battery</div></div>
-    <div class="kpi"><div class="n ${h.offline.length?'bad':'ok'}">${h.offline.length}</div><div class="l">No gateway</div></div>`;
-}
-async function unlock(id,btn){
-  btn.textContent='…';
-  const r=await api('/api/doors/'+id+'/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  btn.textContent=r.ok?'Sent':'Denied';setTimeout(()=>btn.textContent='Unlock',1700);loadAudit();
-}
-async function loadPeople(){
-  const [u,g,s]=await Promise.all([api('/api/users'),api('/api/userGroups'),api('/api/schedules')]);
-  USERS=u.users||[];
-  const gname=id=>(g.userGroups.find(x=>x.id===id)||{}).name||id;
-  $('#people').innerHTML=`<table><tr><th>Name</th><th>Groups</th><th>Status</th></tr>`+
-    USERS.map(p=>`<tr><td><b>${p.name}</b><div class="meta">${p.email||''}</div></td>
-    <td>${(p.groupIds||[]).map(i=>'<span class="chip">'+gname(i)+'</span>').join('')}</td>
-    <td>${p.suspended?'<span class="tag r">suspended</span>':'<span class="tag g">active</span>'}
-    ${p.validTo?'<div class="meta">until '+p.validTo.slice(0,10)+'</div>':''}</td></tr>`).join('')+`</table>`;
-  $('#ugroups').innerHTML=g.userGroups.map(x=>`<span class="chip">${x.name}</span>`).join('');
-  $('#scheds').innerHTML=s.schedules.map(x=>`<div style="margin-bottom:10px"><b>${x.name}</b>
-    ${x.denyOnHolidays?'<span class="tag o" style="margin-left:6px">no holidays</span>':''}
-    <div class="sched">${(x.windows||[]).map(w=>'Days '+w.days.join(',')+' · '+w.from+'–'+w.to).join('<br>')}</div></div>`).join('');
-  $('#e-user').innerHTML=USERS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('');
-}
-async function loadRules(){
-  const [a,ug,dg,s]=await Promise.all([api('/api/assignments'),api('/api/userGroups'),api('/api/doorGroups'),api('/api/schedules')]);
-  const n=(arr,id)=>(arr.find(x=>x.id===id)||{}).name||'—';
-  $('#rules').innerHTML=`<table><tr><th>Who</th><th>Can open</th><th>When</th></tr>`+
-    a.assignments.map(r=>`<tr><td>${n(ug.userGroups,r.userGroupId)}</td>
-    <td>${n(dg.doorGroups,r.doorGroupId)}</td><td>${n(s.schedules,r.scheduleId)}</td></tr>`).join('')+`</table>`;
-}
-async function evaluate(){
-  const r=await api('/api/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({userId:$('#e-user').value,lockId:$('#e-door').value,when:new Date($('#e-when').value).toISOString()})});
-  if(!r.ok){$('#e-res').textContent=r.error||'Request denied';return;}
-  const x=r.result;
-  $('#e-res').innerHTML=`<div class="res ${x.allowed?'y':'n'}">
-    <b style="font-size:14px;letter-spacing:.5px">${x.allowed?'ACCESS GRANTED':'ACCESS DENIED'}</b>
-    <div style="margin-top:5px">${x.reason}</div>
-    ${(x.path&&x.path.length)?'<div style="margin-top:8px;font-size:11.5px;opacity:.85">Rules evaluated:<br>'+
-      x.path.map(p=>`· ${p.group} → ${p.doorGroup} (${p.schedule}): ${p.reason}`).join('<br>')+'</div>':''}</div>`;
-}
-async function loadRecords(){
-  const id=$('#r-door').value;if(!id)return;
-  const r=await api('/api/records/'+id);
-  $('#recs').innerHTML=`<tr><th>When</th><th>Who</th><th>Method</th><th></th></tr>`+
-    (r.records||[]).map(x=>`<tr><td>${new Date(x.lockDate).toLocaleString()}</td>
-    <td>${x.username||'—'}</td><td>${x.typeLabel}</td>
-    <td>${x.success?'<span class="tag g">ok</span>':'<span class="tag r">failed</span>'}</td></tr>`).join('');
-}
-async function loadAudit(){
-  const r=await api('/api/audit');
-  $('#alog').innerHTML=`<tr><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr>`+
-    (r.log||[]).slice(0,25).map(x=>`<tr><td>${new Date(x.ts).toLocaleString()}</td>
-    <td>${x.actor}</td><td><span class="chip">${x.action}</span></td>
-    <td style="color:var(--txt3)">${(x.detail||'').slice(0,70)}</td></tr>`).join('');
-}
-/* ---- Copilot ---- */
-function addBubble(t,me){
-  const d=document.createElement('div');d.className='bubble'+(me?' me':'');d.innerHTML=t;
-  $('#chat').appendChild(d);d.scrollIntoView({behavior:'smooth',block:'nearest'});
-}
-async function ask(text){
-  const q=text||$('#ai-in').value.trim();if(!q)return;
-  $('#ai-in').value='';addBubble(q,true);
-  const r=await api('/api/ai',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
-  if(!r.ok){const d=document.createElement('div');d.className='bubble';d.textContent=r.error||'Request denied';$('#chat').appendChild(d);return;}
-  addBubble(r.answer||'—',false);
-}
-init();
-if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
-</script>
+<script src="i18n-zh.js"></script>
+<script src="i18n.js"></script>
+<script src="qr.js"></script>
+<script src="app.js"></script>
+<script src="review.js"></script>
 </body>
 </html>
